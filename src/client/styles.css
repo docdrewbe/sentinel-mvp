@@ -179,6 +179,31 @@ button.primary:hover { background: var(--accent-dark); }
   margin: 4px 0 8px;
 }
 
+.panel-alert {
+  border: 2px solid var(--red);
+  background: #fdf0ee;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 0 10px;
+}
+
+.panel-alert p {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.panel-alert .panel-error-detail {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.panel-loading {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
 .error {
   margin: 12px auto 0; max-width: 1280px;
   background: #f9dcd9; color: #7a1a14;

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { resolveOrgId, settlePanels } from './dashboard.js';
+import { applySettled, beginContext, canAct, initialPanels, panelData, resolveOrgId, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -17,10 +17,9 @@ const dueSoon = (t: ComplianceTask): boolean => {
 export default function App(): JSX.Element {
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [users, setUsers] = useState<DemoUser[]>([]);
-  const [domains, setDomains] = useState<RegulatoryDomain[]>([]);
-  const [tasks, setTasks] = useState<ComplianceTask[]>([]);
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
-  const [templates, setTemplates] = useState<TaskTemplate[]>([]);
+  const [panels, setPanels] = useState<Panels>(initialPanels);
+  const requestSeq = useRef(0);
+  const contextKeyRef = useRef('');
   const [orgId, setOrgId] = useState('');
   const [userId, setUserId] = useState(() => localStorage.getItem('sentinel-user') ?? '');
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -29,12 +28,19 @@ export default function App(): JSX.Element {
   const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState('');
-  const [panelErrors, setPanelErrors] = useState<
-    Partial<Record<'tasks' | 'domains' | 'audit' | 'templates', string>>
-  >({});
 
   const me = users.find((u) => u.id === userId) ?? null;
   const org = orgs.find((o) => o.id === orgId) ?? null;
+  const contextKey = `${userId}|${orgId}`;
+  // Guarded rows: only loaded panels of the current context ever render.
+  const tasks = panelData(panels.tasks, contextKey);
+  const domains = panelData(panels.domains, contextKey);
+  const audit = panelData(panels.audit, contextKey);
+  const templates = panelData(panels.templates, contextKey);
+  const tasksReady = canAct(panels.tasks, contextKey);
+  const domainsReady = canAct(panels.domains, contextKey);
+  const auditReady = canAct(panels.audit, contextKey);
+  const templatesReady = canAct(panels.templates, contextKey);
   const task = tasks.find((t) => t.id === taskId) ?? null;
 
   const userName = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
@@ -46,20 +52,18 @@ export default function App(): JSX.Element {
     [me, orgs, orgIds]
   );
 
-  const refresh = useCallback(async (oid: string) => {
+  const refresh = useCallback(async (oid: string, key: string) => {
     if (!oid) return;
+    const mySeq = ++requestSeq.current;
     const [t, d, a, tpl] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
       api.templates(oid)
     ]);
-    const { values, errors } = settlePanels(t, d, a, tpl);
-    if (values.tasks !== undefined) setTasks(values.tasks);
-    if (values.domains !== undefined) setDomains(values.domains);
-    if (values.audit !== undefined) setAudit(values.audit);
-    if (values.templates !== undefined) setTemplates(values.templates);
-    setPanelErrors(errors);
+    setPanels((prev) =>
+      applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl)
+    );
   }, []);
 
   useEffect(() => {
@@ -92,20 +96,32 @@ export default function App(): JSX.Element {
       setOrgId(resolved);
       return;
     }
-    setTaskId(null);
-    setInstantiateFor(null);
-    setError('');
-    refresh(orgId).catch((e: Error) => setError(e.message));
+    const nextKey = `${userId}|${orgId}`;
+    const prevKey = contextKeyRef.current;
+    contextKeyRef.current = nextKey;
+    // Synchronous clear before fetching: no previous-context rows survive.
+    setPanels((prev) => beginContext(prevKey, nextKey, prev));
+    if (prevKey !== nextKey) {
+      setTaskId(null);
+      setInstantiateFor(null);
+      setShowNew(false);
+      setError('');
+    }
+    refresh(orgId, nextKey).catch((e: Error) => setError(e.message));
   }, [userId, orgId, users, orgs, refresh]);
 
   const run = async (fn: () => Promise<unknown>): Promise<void> => {
     setError('');
     try {
       await fn();
-      await refresh(orgId);
+      await refresh(orgId, contextKey);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Action failed.');
     }
+  };
+
+  const retry = (): void => {
+    refresh(orgId, contextKey).catch((e: Error) => setError(e.message));
   };
 
   const filtered = tasks.filter((t) => {
@@ -177,18 +193,20 @@ export default function App(): JSX.Element {
           {org && (
             <p>
               {KIND_LABELS[org.kind]}
-              {org.beds ? ` · ${org.beds} beds` : ''} · {org.location} · {domains.length} regulatory
-              domains · {tasks.length} tasks
+              {org.beds ? ` · ${org.beds} beds` : ''} · {org.location}
+              {domainsReady && tasksReady
+                ? <> · {domains.length} regulatory domains · {tasks.length} tasks</>
+                : null}
             </p>
           )}
         </section>
 
         <section className="stats" aria-label="Task summary">
-          <Stat label="Open" value={stats.open} tone="ink" />
-          <Stat label="In progress" value={stats.inProgress} tone="blue" />
-          <Stat label="Due within 7 days" value={stats.dueSoon} tone="amber" />
-          <Stat label="Overdue" value={stats.overdue} tone="red" />
-          <Stat label="Verified" value={stats.verified} tone="green" />
+          <Stat label="Open" value={tasksReady ? stats.open : '—'} tone="ink" />
+          <Stat label="In progress" value={tasksReady ? stats.inProgress : '—'} tone="blue" />
+          <Stat label="Due within 7 days" value={tasksReady ? stats.dueSoon : '—'} tone="amber" />
+          <Stat label="Overdue" value={tasksReady ? stats.overdue : '—'} tone="red" />
+          <Stat label="Verified" value={tasksReady ? stats.verified : '—'} tone="green" />
         </section>
 
         <section className="columns">
@@ -196,7 +214,7 @@ export default function App(): JSX.Element {
             <div className="panel-head">
               <h3>Compliance tasks</h3>
               <div className="panel-actions">
-                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status" disabled={!tasksReady}>
                   <option value="all">All statuses</option>
                   <option value="open">Open</option>
                   <option value="in_progress">In progress</option>
@@ -206,14 +224,14 @@ export default function App(): JSX.Element {
                   <option value="overdue">Overdue</option>
                 </select>
                 {me && can(me, 'task.create') && (
-                  <button className="primary" onClick={() => setShowNew((s) => !s)}>
+                  <button className="primary" onClick={() => setShowNew((s) => !s)} disabled={!tasksReady}>
                     {showNew ? 'Close' : 'New task'}
                   </button>
                 )}
               </div>
             </div>
-            {panelErrors.tasks && <p className="panel-error" role="alert">Tasks: {panelErrors.tasks}</p>}
-            {panelErrors.domains && <p className="panel-error" role="alert">Regulatory domains: {panelErrors.domains}</p>}
+            <PanelNotice panel={panels.tasks} contextKey={contextKey} name="tasks" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+            <PanelNotice panel={panels.domains} contextKey={contextKey} name="regulatory domains" orgName={org?.name ?? 'this organization'} onRetry={retry} />
             {showNew && me && org && (
               <NewTaskForm
                 orgId={org.id}
@@ -271,33 +289,41 @@ export default function App(): JSX.Element {
                   <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
                 </dl>
-                <StatusButtons
-                  me={me}
-                  task={task}
-                  onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
-                />
-                <h5>Evidence & chain of custody ({task.evidence.length})</h5>
-                {task.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
-                <ul className="evidence">
-                  {task.evidence.map((e) => (
-                    <li key={e.id}>
-                      <span>{e.label}</span>
-                      <span className="holder">Holder: {e.holder}</span>
-                    </li>
-                  ))}
-                </ul>
-                {can(me, 'evidence.add', task) && (
-                  <EvidenceForm
-                    onAdd={(label, holder) => run(async () => api.addEvidence(task.id, { label, holder }))}
-                  />
-                )}
-                {can(me, 'custody.transfer', task) && task.evidence.length > 0 && (
-                  <TransferForm
-                    evidence={task.evidence}
-                    onTransfer={(evidenceId, toHolder) =>
-                      run(async () => api.transfer(task.id, { evidenceId, toHolder }))
-                    }
-                  />
+                {tasksReady ? (
+                  <>
+                    <StatusButtons
+                      me={me}
+                      task={task}
+                      onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
+                    />
+                    <h5>Evidence & chain of custody ({task.evidence.length})</h5>
+                    {task.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
+                    <ul className="evidence">
+                      {task.evidence.map((e) => (
+                        <li key={e.id}>
+                          <span>{e.label}</span>
+                          <span className="holder">Holder: {e.holder}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {can(me, 'evidence.add', task) && (
+                      <EvidenceForm
+                        onAdd={(label, holder) => run(async () => api.addEvidence(task.id, { label, holder }))}
+                      />
+                    )}
+                    {can(me, 'custody.transfer', task) && task.evidence.length > 0 && (
+                      <TransferForm
+                        evidence={task.evidence}
+                        onTransfer={(evidenceId, toHolder) =>
+                          run(async () => api.transfer(task.id, { evidenceId, toHolder }))
+                        }
+                      />
+                    )}
+                  </>
+                ) : (
+                  <p className="panel-error" role="alert">
+                    Task actions unavailable while task data is loading or failed.
+                  </p>
                 )}
                 <h5>Record history (append-only)</h5>
                 {recordTrail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
@@ -319,14 +345,14 @@ export default function App(): JSX.Element {
           <div className="panel-head">
             <h3>Compliance task templates (synthetic — illustrative references, not legal advice)</h3>
             <div className="panel-actions">
-              <select value={controlFilter} onChange={(e) => setControlFilter(e.target.value)} aria-label="Filter by control type">
+              <select value={controlFilter} onChange={(e) => setControlFilter(e.target.value)} aria-label="Filter by control type" disabled={!templatesReady}>
                 <option value="all">All controls</option>
                 <option value="legally_required">Legally required</option>
                 <option value="best_practice">Best practice (voluntary)</option>
               </select>
             </div>
           </div>
-          {panelErrors.templates && <p className="panel-error" role="alert">Templates: {panelErrors.templates}</p>}
+          <PanelNotice panel={panels.templates} contextKey={contextKey} name="templates" orgName={org?.name ?? 'this organization'} onRetry={retry} />
           <table>
             <thead>
               <tr>
@@ -367,7 +393,7 @@ export default function App(): JSX.Element {
                     </td>
                     <td>
                       {me && can(me, 'task.create') && x.active && (
-                        <button onClick={() => setInstantiateFor(instantiateFor === x.id ? null : x.id)}>
+                        <button onClick={() => setInstantiateFor(instantiateFor === x.id ? null : x.id)} disabled={!templatesReady}>
                           {instantiateFor === x.id ? 'Cancel' : 'New task'}
                         </button>
                       )}
@@ -399,7 +425,7 @@ export default function App(): JSX.Element {
           <div className="panel-head">
             <h3>Audit event log (append-only, hash-chained — simulated)</h3>
           </div>
-          {panelErrors.audit && <p className="panel-error" role="alert">Audit log: {panelErrors.audit}</p>}
+          <PanelNotice panel={panels.audit} contextKey={contextKey} name="audit events" orgName={org?.name ?? 'this organization'} onRetry={retry} />
           <table>
             <thead>
               <tr>
@@ -439,7 +465,35 @@ export default function App(): JSX.Element {
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: number; tone: string }): JSX.Element {
+function PanelNotice({ panel, contextKey, name, orgName, onRetry }: {
+  panel: { key: string; status: string; error?: string };
+  contextKey: string;
+  name: string;
+  orgName: string;
+  onRetry: () => void;
+}): JSX.Element | null {
+  if (panel.key !== contextKey) return null;
+  if (panel.status === 'loading') return <p className="panel-loading">Loading {name}…</p>;
+  if (panel.status === 'error') {
+    return (
+      <div className="panel-alert" role="alert">
+        <p>Couldn't load {name} for {orgName}.</p>
+        <p className="panel-error-detail">{panel.error}</p>
+        <button onClick={onRetry}>Retry</button>
+      </div>
+    );
+  }
+  if (panel.error) {
+    return (
+      <p className="panel-error" role="alert">
+        {name} may be out of date: {panel.error} <button onClick={onRetry}>Retry</button>
+      </p>
+    );
+  }
+  return null;
+}
+
+function Stat({ label, value, tone }: { label: string; value: number | string; tone: string }): JSX.Element {
   return (
     <div className={`stat stat-${tone}`}>
       <span className="stat-value">{value}</span>

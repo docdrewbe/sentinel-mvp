@@ -10,6 +10,93 @@ import type {
   TaskTemplate
 } from '../shared/types.js';
 
+// ---------------------------------------------------------------------------
+// F3a: context-keyed panel state. Every response is tied to the user+org that
+// requested it (and to a request sequence), so delayed or out-of-order
+// responses can never paint another context's data.
+// ---------------------------------------------------------------------------
+
+export type PanelStatus = 'loading' | 'loaded' | 'error';
+
+export interface PanelState<T> {
+  key: string;
+  status: PanelStatus;
+  data: T[];
+  error?: string;
+}
+
+export interface Panels {
+  tasks: PanelState<ComplianceTask>;
+  domains: PanelState<RegulatoryDomain>;
+  audit: PanelState<AuditEvent>;
+  templates: PanelState<TaskTemplate>;
+}
+
+export type PanelName = keyof Panels;
+
+export function initialPanels(): Panels {
+  const fresh = <T,>(): PanelState<T> => ({ key: '', status: 'loading', data: [] });
+  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh() };
+}
+
+/** On a context change, synchronously clear every panel; same key → unchanged. */
+export function beginContext(prevKey: string, nextKey: string, panels: Panels): Panels {
+  if (prevKey === nextKey) return panels;
+  const fresh = <T,>(): PanelState<T> => ({ key: nextKey, status: 'loading', data: [] });
+  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh() };
+}
+
+function nextPanel<T>(
+  prior: PanelState<T>,
+  key: string,
+  value: T[] | undefined,
+  error: string | undefined
+): PanelState<T> {
+  if (value !== undefined) return { key, status: 'loaded', data: value };
+  // Rejected: keep prior rows only when they belong to this same context and
+  // were successfully loaded (same-context refresh/retry). After a context
+  // change the panel is loading/empty, so failures stay empty — never stale.
+  if (prior.key === key && prior.status === 'loaded') {
+    return { key, status: 'loaded', data: prior.data, error };
+  }
+  return { key, status: 'error', data: [], error };
+}
+
+/**
+ * Apply settled results only when they belong to the current context AND the
+ * latest request. Stale contexts and out-of-order responses are discarded.
+ */
+export function applySettled(
+  panels: Panels,
+  key: string,
+  seq: number,
+  currentKey: string,
+  currentSeq: number,
+  tasks: PromiseSettledResult<ComplianceTask[]>,
+  domains: PromiseSettledResult<RegulatoryDomain[]>,
+  audit: PromiseSettledResult<AuditEvent[]>,
+  templates: PromiseSettledResult<TaskTemplate[]>
+): Panels {
+  if (key !== currentKey || seq !== currentSeq) return panels;
+  const { values, errors } = settlePanels(tasks, domains, audit, templates);
+  return {
+    tasks: nextPanel(panels.tasks, key, values.tasks, errors.tasks),
+    domains: nextPanel(panels.domains, key, values.domains, errors.domains),
+    audit: nextPanel(panels.audit, key, values.audit, errors.audit),
+    templates: nextPanel(panels.templates, key, values.templates, errors.templates)
+  };
+}
+
+/** Rows render only for loaded panels of the current context. */
+export function panelData<T>(panel: PanelState<T>, currentKey: string): T[] {
+  return panel.key === currentKey && panel.status === 'loaded' ? panel.data : [];
+}
+
+/** Actions are allowed only on freshly loaded data for the current context. */
+export function canAct<T>(panel: PanelState<T>, currentKey: string): boolean {
+  return panel.key === currentKey && panel.status === 'loaded' && !panel.error;
+}
+
 /** Org ids the picker may offer for this user (all of them while loading). */
 export function pickerOrgIds(orgs: Organization[], me: DemoUser | null): string[] {
   const ids = orgs.map((o) => o.id);
