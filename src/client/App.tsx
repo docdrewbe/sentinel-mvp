@@ -3,7 +3,7 @@ import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { applySettled, beginContext, canAct, initialPanels, panelData, requiredEvidenceFor, resolveOrgId, submitBlockReason, type Panels } from './dashboard.js';
+import { applySettled, beginContext, canAct, initialPanels, panelData, requiredEvidenceFor, resolveOrgId, submitBlockReason, verifyBlockReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -286,6 +286,9 @@ export default function App(): JSX.Element {
                     <div><dt>Template</dt><dd>{templateById.get(task.templateId)?.title ?? task.templateId}</dd></div>
                   )}
                   <div><dt>Owner</dt><dd>{userName.get(task.ownerId) ?? '—'}</dd></div>
+                  {task.submittedBy && (
+                    <div><dt>Submitted by</dt><dd>{userName.get(task.submittedBy) ?? task.submittedBy}</dd></div>
+                  )}
                   <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
                 </dl>
@@ -296,6 +299,7 @@ export default function App(): JSX.Element {
                       me={me}
                       task={task}
                       submitBlockReason={submitBlockReason(task)}
+                      verifyBlockReason={verifyBlockReason(me, task)}
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
                     <h5>Evidence & chain of custody ({task.evidence.length})</h5>
@@ -540,7 +544,7 @@ function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | 
   );
 }
 
-function StatusButtons({ me, task, submitBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; submitBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
+function StatusButtons({ me, task, submitBlockReason, verifyBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; submitBlockReason: string | null; verifyBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
   // D4d: an explicit title wins over the generic "Requires: ..." prefix, so
   // the evidence block reason is never doubled up.
   const btn = (label: string, status: TaskStatus, allowed: boolean, need: string, title?: string): JSX.Element => (
@@ -552,7 +556,8 @@ function StatusButtons({ me, task, submitBlockReason, onChange }: { me: DemoUser
     <div className="status-btns">
       {btn('Start', 'in_progress', can(me, 'task.update', task), 'owner / manager / officer / admin')}
       {btn('Submit', 'submitted', can(me, 'task.submit', task) && submitBlockReason === null, 'owner / manager / officer / admin', submitBlockReason ?? undefined)}
-      {btn('Verify', 'verified', can(me, 'task.verify', task), 'compliance officer / admin')}
+      {btn('Verify', 'verified', can(me, 'task.verify', task) && verifyBlockReason === null, 'compliance officer / admin', verifyBlockReason ?? undefined)}
+      {verifyBlockReason && can(me, 'task.verify', task) && <p className="sod-note">{verifyBlockReason}</p>}
       {btn('Reopen', 'open', can(me, 'task.update', task), 'owner / manager / officer / admin')}
     </div>
   );

@@ -80,4 +80,19 @@ describe('synthetic demo data', () => {
     }
     assert.ok(count > 0, 'expected seeded submitted/verified tasks');
   });
+
+  it('D5: every submitted/verified seed task records its submitter', () => {
+    const db = seedDatabase();
+    let count = 0;
+    for (const t of db.tasks) {
+      if (t.status !== 'submitted' && t.status !== 'verified') continue;
+      count++;
+      assert.ok(t.submittedBy, `${t.id}: missing submittedBy`);
+      assert.ok(
+        db.users.some((u) => u.id === t.submittedBy && u.orgId === t.orgId),
+        `${t.id}: submittedBy is not a same-org user`
+      );
+    }
+    assert.ok(count > 0, 'expected seeded submitted/verified tasks');
+  });
 });

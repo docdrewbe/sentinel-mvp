@@ -81,7 +81,17 @@ export interface ComplianceTask {
    * from older servers.
    */
   requiredEvidence?: number;
+  /**
+   * D5: user who last submitted the task (set on each transition into
+   * `submitted`). Absent on tasks that predate the rule or were never
+   * submitted.
+   */
+  submittedBy?: string;
 }
+
+/** D5: shared server/dashboard separation-of-duties rejection message. */
+export const SEPARATION_OF_DUTIES_MESSAGE =
+  'Separation of duties: verifier must differ from owner/submitter.';
 
 export interface AuditEvent {
   seq: number;

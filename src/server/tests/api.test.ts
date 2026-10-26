@@ -1446,3 +1446,239 @@ describe('D4c authoritative requiredEvidence (HTTP)', () => {
     }
   });
 });
+
+describe('D5 separation of duties (HTTP)', () => {
+  const SOD = 'Separation of duties: verifier must differ from owner/submitter.';
+
+  interface TaskJson {
+    id: string;
+    status: string;
+    evidence: Array<Record<string, unknown>>;
+    submittedBy?: string;
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeSubmitted(
+    base: string,
+    actorId: string,
+    ownerId: string,
+    orgId = 'org-cah',
+    domainId = 'dom-osha-h'
+  ): Promise<string> {
+    const created = await call(base, 'POST', '/api/tasks', actorId, {
+      orgId,
+      domainId,
+      title: 'D5 probe',
+      ownerId,
+      dueDate: '2026-12-01'
+    });
+    assert.equal(created.status, 201);
+    const id = String(created.json.id);
+    assert.equal(
+      (
+        await call(base, 'POST', `/api/tasks/${id}/evidence`, actorId, {
+          label: 'attachment (simulated)',
+          holder: 'Case File'
+        })
+      ).status,
+      201
+    );
+    assert.equal(
+      (await call(base, 'PATCH', `/api/tasks/${id}`, actorId, { status: 'submitted' })).status,
+      200
+    );
+    return id;
+  }
+
+  it('rejects owner self-verification with no state change', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeSubmitted(base, 'u-officer', 'u-officer');
+      assert.equal((await getTask(base, 'u-officer', 'org-cah', id)).submittedBy, 'u-officer');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects submitter self-verification but allows an independent verifier', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D5 probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'attachment (simulated)',
+            holder: 'Case File'
+          })
+        ).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'submitted' })).status,
+        200
+      );
+      assert.equal((await getTask(base, 'u-officer', 'org-cah', id)).submittedBy, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(ok.status, 200);
+      assert.equal((await getTask(base, 'u-admin', 'org-cah', id)).status, 'verified');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects admin self-verification of an owned task', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeSubmitted(base, 'u-admin', 'u-admin');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps cross-org rules: scoped users blocked, privileged independent verify allowed', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const blocked = await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-clinic-mgr', {
+        status: 'verified'
+      });
+      assert.equal(blocked.status, 403);
+      const id = await makeSubmitted(base, 'u-officer', 'u-clinic-staff', 'org-clinic', 'dom-osha-c');
+      assert.equal((await getTask(base, 'u-officer', 'org-clinic', id)).submittedBy, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('still enforces the evidence gate for independent verifiers', async () => {
+    const { db, base, close } = await startServer((seeded) => {
+      const legacy = seeded.tasks.find((t) => t.id === 'task-sharps-log');
+      assert.ok(legacy);
+      legacy.status = 'submitted';
+      legacy.evidence = [];
+    });
+    try {
+      const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(
+        denied.json.error,
+        'Verification requires at least 1 evidence item (has 0).'
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('applies separation of duties before the evidence gate', async () => {
+    const { db, base, close } = await startServer((seeded) => {
+      const legacy = seeded.tasks.find((t) => t.id === 'task-sharps-log');
+      assert.ok(legacy);
+      legacy.status = 'submitted';
+      legacy.evidence = [];
+      legacy.ownerId = 'u-officer';
+    });
+    try {
+      const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back an independent verification when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeSubmitted(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+          status: 'verified'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      const task = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(task.status, 'submitted');
+      assert.equal(task.submittedBy, 'u-nurse-mgr');
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

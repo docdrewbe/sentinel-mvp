@@ -33,6 +33,7 @@ interface SeedTask {
   dueIn: number;
   status: TaskStatus;
   evidence?: Array<{ label: string; holder: string }>;
+  submittedBy?: string;
 }
 
 interface SeedTemplate {
@@ -89,7 +90,8 @@ const SEED_TASKS: SeedTask[] = [
     evidence: [
       { label: 'Temperature log export (simulated)', holder: 'J. Ortiz' },
       { label: 'Corrective action note (simulated)', holder: 'M. Lee' }
-    ]
+    ],
+    submittedBy: 'u-nurse-mgr'
   },
   {
     key: 'task-access-review',
@@ -108,7 +110,8 @@ const SEED_TASKS: SeedTask[] = [
     ownerId: 'u-staff',
     dueIn: -10,
     status: 'submitted',
-    evidence: [{ label: 'Unit signage checklist (simulated)', holder: 'T. Nguyen' }]
+    evidence: [{ label: 'Unit signage checklist (simulated)', holder: 'T. Nguyen' }],
+    submittedBy: 'u-staff'
   },
   {
     key: 'task-baa',
@@ -118,7 +121,8 @@ const SEED_TASKS: SeedTask[] = [
     ownerId: 'u-officer',
     dueIn: -20,
     status: 'verified',
-    evidence: [{ label: 'Signed BAA bundle (simulated)', holder: 'J. Ortiz' }]
+    evidence: [{ label: 'Signed BAA bundle (simulated)', holder: 'J. Ortiz' }],
+    submittedBy: 'u-officer'
   },
   // --- Outpatient clinic (primary demo) ---
   {
@@ -148,7 +152,8 @@ const SEED_TASKS: SeedTask[] = [
     ownerId: 'u-clinic-staff',
     dueIn: -6,
     status: 'verified',
-    evidence: [{ label: 'Reception photo log (simulated)', holder: 'R. Gomez' }]
+    evidence: [{ label: 'Reception photo log (simulated)', holder: 'R. Gomez' }],
+    submittedBy: 'u-clinic-staff'
   },
   // --- Cannabis microbusiness (secondary demo: model portability) ---
   {
@@ -228,6 +233,7 @@ export function seedDatabase(): DbShape {
       dueDate: dueInDays(s.dueIn),
       status: s.status,
       evidence,
+      ...(s.submittedBy ? { submittedBy: s.submittedBy } : {}),
       createdAt: t,
       updatedAt: t
     };

@@ -21,7 +21,7 @@ import {
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import type { ComplianceTask, DemoUser } from '../shared/types.js';
-import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { SEPARATION_OF_DUTIES_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
@@ -204,6 +204,17 @@ export function createApp(db: DbShape): express.Express {
           forbidden(res, user, action);
           return;
         }
+        // D5: separation of duties lives here, outside can(), so the role
+        // matrix stays simple. The verifier must differ from the task owner
+        // and from the user who submitted it.
+        if (
+          action === 'task.verify' &&
+          task.status === 'submitted' &&
+          (user.id === task.ownerId || user.id === task.submittedBy)
+        ) {
+          res.status(403).json({ error: SEPARATION_OF_DUTIES_MESSAGE });
+          return;
+        }
       }
       const touchesFields =
         patch.title !== undefined ||
@@ -218,6 +229,11 @@ export function createApp(db: DbShape): express.Express {
       const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
       const updated = mutateDb(db, () => {
         const next = updateTask(db, task.id, patch);
+        // D5: record the submitter atomically with the transition into
+        // `submitted`, so verification can always tell who submitted.
+        if (next.status === 'submitted' && oldStatus !== 'submitted') {
+          next.submittedBy = user.id;
+        }
         appendAudit(db, {
           actorId: user.id,
           action: statusChanged ? `task.${next.status}` : 'task.updated',

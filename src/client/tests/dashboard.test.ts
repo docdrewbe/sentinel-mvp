@@ -10,7 +10,8 @@ import {
   requiredEvidenceFor,
   resolveOrgId,
   settlePanels,
-  submitBlockReason
+  submitBlockReason,
+  verifyBlockReason
 } from '../dashboard.js';
 import type { ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
@@ -268,5 +269,34 @@ describe('D4d submit tooltip (unit)', () => {
     assert.ok(reason && !reason.includes('Requires'));
     assert.equal(submitBlockReason({ evidence: [{}, {}], requiredEvidence: 2 }), null);
     assert.equal(submitBlockReason({ evidence: [] }), null);
+  });
+});
+
+describe('D5 separation-of-duties hint (unit)', () => {
+  const MSG = 'Separation of duties: verifier must differ from owner/submitter.';
+
+  it('blocks the owner and the submitter of a submitted task', () => {
+    const task = { ownerId: 'u-nurse-mgr', submittedBy: 'u-officer', status: 'submitted' as const };
+    assert.equal(verifyBlockReason({ id: 'u-nurse-mgr' }, task), MSG);
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, task), MSG);
+  });
+
+  it('allows an independent verifier, including with legacy missing submittedBy', () => {
+    assert.equal(
+      verifyBlockReason(
+        { id: 'u-admin' },
+        { ownerId: 'u-nurse-mgr', submittedBy: 'u-officer', status: 'submitted' }
+      ),
+      null
+    );
+    assert.equal(
+      verifyBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'submitted' }),
+      null
+    );
+  });
+
+  it('stays silent unless the task is submitted', () => {
+    const own = { ownerId: 'u-officer', submittedBy: 'u-officer', status: 'open' as const };
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, own), null);
   });
 });
