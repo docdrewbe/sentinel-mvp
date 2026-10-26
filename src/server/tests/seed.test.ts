@@ -126,6 +126,26 @@ describe('synthetic demo data', () => {
     }
   });
 
+  it('seeds one synthetic hospital CAPA with valid references', () => {
+    const db = seedDatabase();
+    assert.equal(db.capas.length, 1);
+    const capa = db.capas[0];
+    assert.equal(capa.orgId, 'org-cah');
+    assert.ok(db.domains.some((d) => d.id === capa.domainId && d.orgId === capa.orgId));
+    assert.ok(db.users.some((u) => u.id === capa.ownerId && u.orgId === capa.orgId));
+    assert.ok(['low', 'medium', 'high', 'critical'].includes(capa.severity));
+    assert.ok(
+      ['open', 'investigation', 'action_in_progress', 'effectiveness_review', 'closed'].includes(capa.status)
+    );
+    if (capa.taskId) {
+      assert.ok(db.tasks.some((t) => t.id === capa.taskId && t.orgId === capa.orgId));
+    }
+    assert.match(capa.dueDate, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(
+      db.audit.some((e) => e.action === 'capa.created' && e.recordType === 'capa' && e.recordId === capa.id)
+    );
+  });
+
   it('D5d: every seeded verified task shows an independent, authorized verifier', () => {
     const db = seedDatabase();
     let count = 0;

@@ -378,6 +378,27 @@ export function seedDatabase(): DbShape {
     })
   );
 
+  // First-slice CAPA example (synthetic hospital finding; no PHI).
+  db.capas = [
+    {
+      id: 'capa-temp-log',
+      orgId: 'org-cah',
+      domainId: 'dom-tjc',
+      taskId: 'task-med-storage',
+      finding: 'Medication refrigerator temperature log gaps on two night shifts (simulated finding).',
+      severity: 'medium',
+      containment: 'Manual twice-daily checks assigned pending logger repair (simulated).',
+      rootCause: 'Night-shift coverage gap during PTO (simulated draft).',
+      ownerId: 'u-nurse-mgr',
+      dueDate: dueInDays(14),
+      correctivePlan: 'Repair logger and backfill supervised readings (simulated).',
+      status: 'investigation',
+      evidence: [],
+      createdAt: t,
+      updatedAt: t
+    }
+  ];
+
   db.audit = [];
   const push = (input: {
     actorId: string;
@@ -415,6 +436,16 @@ export function seedDatabase(): DbShape {
       recordId: template.id,
       orgId: template.orgId,
       detail: `Seeded: ${template.title} [${template.controlType}]`
+    });
+  }
+  for (const capa of db.capas) {
+    push({
+      actorId: 'u-officer',
+      action: 'capa.created',
+      recordType: 'capa',
+      recordId: capa.id,
+      orgId: capa.orgId,
+      detail: `Seeded: ${capa.finding.slice(0, 80)}`
     });
   }
   return db;

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
-import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
+import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { applySettled, beginContext, canAct, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { applySettled, beginContext, canAct, capaCloseBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -23,6 +23,7 @@ export default function App(): JSX.Element {
   const [orgId, setOrgId] = useState('');
   const [userId, setUserId] = useState(() => localStorage.getItem('sentinel-user') ?? '');
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [capaId, setCapaId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [controlFilter, setControlFilter] = useState('all');
   const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
@@ -37,11 +38,14 @@ export default function App(): JSX.Element {
   const domains = panelData(panels.domains, contextKey);
   const audit = panelData(panels.audit, contextKey);
   const templates = panelData(panels.templates, contextKey);
+  const capas = panelData(panels.capas, contextKey);
   const tasksReady = canAct(panels.tasks, contextKey);
   const domainsReady = canAct(panels.domains, contextKey);
   const auditReady = canAct(panels.audit, contextKey);
   const templatesReady = canAct(panels.templates, contextKey);
+  const capasReady = canAct(panels.capas, contextKey);
   const task = tasks.find((t) => t.id === taskId) ?? null;
+  const capa = capas.find((c) => c.id === capaId) ?? null;
 
   const userName = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
   const privilegedIds = useMemo(
@@ -52,6 +56,7 @@ export default function App(): JSX.Element {
     [users]
   );
   const domainById = useMemo(() => new Map(domains.map((d) => [d.id, d])), [domains]);
+  const taskById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
   const templateById = useMemo(() => new Map(templates.map((x) => [x.id, x])), [templates]);
   const orgIds = useMemo(() => orgs.map((o) => o.id), [orgs]);
   const visibleOrgs = useMemo(
@@ -62,14 +67,15 @@ export default function App(): JSX.Element {
   const refresh = useCallback(async (oid: string, key: string) => {
     if (!oid) return;
     const mySeq = ++requestSeq.current;
-    const [t, d, a, tpl] = await Promise.allSettled([
+    const [t, d, a, tpl, c] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
-      api.templates(oid)
+      api.templates(oid),
+      api.capas(oid)
     ]);
     setPanels((prev) =>
-      applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl)
+      applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c)
     );
   }, []);
 
@@ -110,6 +116,7 @@ export default function App(): JSX.Element {
     setPanels((prev) => beginContext(prevKey, nextKey, prev));
     if (prevKey !== nextKey) {
       setTaskId(null);
+      setCapaId(null);
       setInstantiateFor(null);
       setShowNew(false);
       setError('');
@@ -147,6 +154,7 @@ export default function App(): JSX.Element {
   };
 
   const recordTrail = task ? audit.filter((e) => e.recordId === task.id) : [];
+  const capaTrail = capa ? audit.filter((e) => e.recordId === capa.id) : [];
 
   return (
     <div className="page">
@@ -376,6 +384,67 @@ export default function App(): JSX.Element {
           </div>
         </section>
 
+        <section className="columns">
+          <div className="tasklist panel">
+            <div className="panel-head">
+              <h3>Corrective and preventive actions (CAPA)</h3>
+            </div>
+            <PanelNotice panel={panels.capas} contextKey={contextKey} name="CAPAs" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+            <table>
+              <thead>
+                <tr>
+                  <th>Finding</th>
+                  <th>Severity</th>
+                  <th>Owner</th>
+                  <th>Due</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {capas.map((c) => (
+                  <tr key={c.id} className={c.id === capaId ? 'selected' : ''} onClick={() => setCapaId(c.id)}>
+                    <td className="task-title">{c.finding.length > 80 ? `${c.finding.slice(0, 80)}…` : c.finding}</td>
+                    <td>{CAPA_SEVERITY_LABELS[c.severity]}</td>
+                    <td>{userName.get(c.ownerId) ?? '—'}</td>
+                    <td>{c.dueDate}</td>
+                    <td>
+                      <span className="status">{CAPA_STATUS_LABELS[c.status]}</span>
+                    </td>
+                  </tr>
+                ))}
+                {capas.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="empty">No CAPAs for this organization yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="detail panel">
+            <div className="panel-head">
+              <h3>CAPA detail</h3>
+            </div>
+            {!capa && <p className="empty">Select a CAPA to review plans, evidence, and history.</p>}
+            {capa && me && (
+              <CapaDetail
+                key={capa.id}
+                me={me}
+                capa={capa}
+                ready={capasReady}
+                userName={userName}
+                domainName={domainById.get(capa.domainId)?.name ?? '—'}
+                linkedTaskTitle={capa.taskId ? (taskById.get(capa.taskId)?.title ?? capa.taskId) : null}
+                trail={capaTrail}
+                onAdvance={(status, effectivenessDecision) =>
+                  run(async () => api.patchCapa(capa.id, { status, ...(effectivenessDecision ? { effectivenessDecision } : {}) }))
+                }
+                onAddEvidence={(label, holder) => run(async () => api.addCapaEvidence(capa.id, { label, holder }))}
+              />
+            )}
+          </div>
+        </section>
+
         <section className="panel">
           <div className="panel-head">
             <h3>Compliance task templates (synthetic — illustrative references, not legal advice)</h3>
@@ -559,6 +628,114 @@ function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | 
   );
 }
 
+const CAPA_NEXT: Record<Exclude<CapaStatus, 'closed'>, CapaStatus> = {
+  open: 'investigation',
+  investigation: 'action_in_progress',
+  action_in_progress: 'effectiveness_review',
+  effectiveness_review: 'closed'
+};
+
+function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, onAdvance, onAddEvidence }: {
+  me: DemoUser;
+  capa: CapaRecord;
+  ready: boolean;
+  userName: Map<string, string>;
+  domainName: string;
+  linkedTaskTitle: string | null;
+  trail: AuditEvent[];
+  onAdvance: (status: CapaStatus, effectivenessDecision?: string) => void;
+  onAddEvidence: (label: string, holder: string) => void;
+}): JSX.Element {
+  const [decision, setDecision] = useState('');
+  const next = capa.status === 'closed' ? null : CAPA_NEXT[capa.status];
+  const closing = capa.status === 'effectiveness_review';
+  const closeReason = closing ? capaCloseBlockReason(me, capa) : null;
+  const roleOk = can(me, closing ? 'capa.close' : 'capa.update', capa);
+  const decisionOk = !closing || decision.trim().length > 0;
+  const allowed = ready && roleOk && closeReason === null && decisionOk && next !== null;
+  const title = !ready
+    ? 'CAPA actions unavailable while data is loading or failed.'
+    : !roleOk
+      ? `Requires: ${closing ? 'compliance officer / admin' : 'owner / manager / officer / admin'}`
+      : (closeReason ?? (!decisionOk ? 'Document the effectiveness decision to close.' : ''));
+  return (
+    <>
+      <h4>{capa.finding}</h4>
+      <dl className="meta">
+        <div><dt>Domain</dt><dd>{domainName}</dd></div>
+        <div><dt>Severity</dt><dd>{CAPA_SEVERITY_LABELS[capa.severity]}</dd></div>
+        <div><dt>Owner</dt><dd>{userName.get(capa.ownerId) ?? '—'}</dd></div>
+        <div><dt>Due</dt><dd>{capa.dueDate}</dd></div>
+        <div><dt>Status</dt><dd>{CAPA_STATUS_LABELS[capa.status]}</dd></div>
+        {linkedTaskTitle && <div><dt>Task</dt><dd>{linkedTaskTitle}</dd></div>}
+        {capa.closedBy && (
+          <div><dt>Closed by</dt><dd>{userName.get(capa.closedBy) ?? capa.closedBy}{capa.closedAt ? ` · ${new Date(capa.closedAt).toLocaleString()}` : ''}</dd></div>
+        )}
+      </dl>
+      {capa.containment && <p><strong>Containment:</strong> {capa.containment}</p>}
+      {capa.rootCause && <p><strong>Root cause:</strong> {capa.rootCause}</p>}
+      {capa.correctivePlan && <p><strong>Corrective plan:</strong> {capa.correctivePlan}</p>}
+      {capa.preventivePlan && <p><strong>Preventive plan:</strong> {capa.preventivePlan}</p>}
+      {capa.effectivenessDecision && <p><strong>Effectiveness decision:</strong> {capa.effectivenessDecision}</p>}
+      {next && (
+        <div className="status-btns">
+          {closing && (
+            <input
+              aria-label="Effectiveness decision"
+              placeholder="Document the effectiveness decision…"
+              value={decision}
+              onChange={(e) => setDecision(e.target.value)}
+              style={{ flexBasis: '100%' }}
+            />
+          )}
+          <button disabled={!allowed} title={title} onClick={() => onAdvance(next, closing ? decision.trim() : undefined)}>
+            {closing ? 'Close CAPA' : `Advance to ${CAPA_STATUS_LABELS[next]}`}
+          </button>
+        </div>
+      )}
+      {closeReason && roleOk && <p className="sod-note">{closeReason}</p>}
+      <h5>Evidence ({capa.evidence.length})</h5>
+      {capa.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
+      <ul className="evidence">
+        {capa.evidence.map((e) => (
+          <li key={e.id} className="evidence-item">
+            <div className="evidence-row">
+              <span>{e.label}</span>
+              <span className="holder">Holder: {e.holder}</span>
+            </div>
+            {(e.custody ?? []).length > 0 && (
+              <ol className="custody">
+                {(e.custody ?? []).map((c) => (
+                  <li key={c.seq}>
+                    {c.fromHolder ?? '—'} → {c.toHolder} ·{' '}
+                    {userName.get(c.byUserId) ?? c.byUserId} ·{' '}
+                    {new Date(c.at).toLocaleString()}
+                    {c.reason ? ` — ${c.reason}` : ''}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </li>
+        ))}
+      </ul>
+      {ready && can(me, 'capa.evidence.add', capa) && capa.status !== 'closed' && (
+        <EvidenceForm onAdd={onAddEvidence} />
+      )}
+      <h5>Record history (append-only)</h5>
+      {trail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
+      <ol className="trail">
+        {trail.map((e) => (
+          <li key={e.id}>
+            <code>#{e.seq}</code> {e.action} · {userName.get(e.actorId) ?? e.actorId} ·{' '}
+            {new Date(e.timestamp).toLocaleString()}
+            <div className="trail-detail">{e.detail}</div>
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
 function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBlockReason, reopenBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; startBlockReason: string | null; submitBlockReason: string | null; verifyBlockReason: string | null; reopenBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
   // A button is enabled only when the role allows it AND no state reason
   // blocks it. The tooltip names the role gap first, else the state reason.
@@ -573,7 +750,7 @@ function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBl
   };
   return (
     <div className="status-btns">
-      {btn('Start', 'in_progress', 'task.update', startBlockReason, 'owner / manager / officer / admin')}
+      {btn(startButtonLabel(task), 'in_progress', 'task.update', startBlockReason, 'owner / manager / officer / admin')}
       {btn('Submit', 'submitted', 'task.submit', submitBlockReason, 'owner / manager / officer / admin')}
       {btn('Verify', 'verified', 'task.verify', verifyBlockReason, 'compliance officer / admin')}
       {task.status === 'submitted' && verifyBlockReason && can(me, 'task.verify', task) && <p className="sod-note">{verifyBlockReason}</p>}

@@ -1,10 +1,11 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
 import { visibleOrgIds } from '../shared/rbac.js';
-import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
+import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type {
   AuditEvent,
+  CapaRecord,
   ComplianceTask,
   DemoUser,
   Organization,
@@ -32,20 +33,21 @@ export interface Panels {
   domains: PanelState<RegulatoryDomain>;
   audit: PanelState<AuditEvent>;
   templates: PanelState<TaskTemplate>;
+  capas: PanelState<CapaRecord>;
 }
 
 export type PanelName = keyof Panels;
 
 export function initialPanels(): Panels {
   const fresh = <T,>(): PanelState<T> => ({ key: '', status: 'loading', data: [] });
-  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh() };
+  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh(), capas: fresh() };
 }
 
 /** On a context change, synchronously clear every panel; same key → unchanged. */
 export function beginContext(prevKey: string, nextKey: string, panels: Panels): Panels {
   if (prevKey === nextKey) return panels;
   const fresh = <T,>(): PanelState<T> => ({ key: nextKey, status: 'loading', data: [] });
-  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh() };
+  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh(), capas: fresh() };
 }
 
 function nextPanel<T>(
@@ -77,15 +79,17 @@ export function applySettled(
   tasks: PromiseSettledResult<ComplianceTask[]>,
   domains: PromiseSettledResult<RegulatoryDomain[]>,
   audit: PromiseSettledResult<AuditEvent[]>,
-  templates: PromiseSettledResult<TaskTemplate[]>
+  templates: PromiseSettledResult<TaskTemplate[]>,
+  capas: PromiseSettledResult<CapaRecord[]>
 ): Panels {
   if (key !== currentKey || seq !== currentSeq) return panels;
-  const { values, errors } = settlePanels(tasks, domains, audit, templates);
+  const { values, errors } = settlePanels(tasks, domains, audit, templates, capas);
   return {
     tasks: nextPanel(panels.tasks, key, values.tasks, errors.tasks),
     domains: nextPanel(panels.domains, key, values.domains, errors.domains),
     audit: nextPanel(panels.audit, key, values.audit, errors.audit),
-    templates: nextPanel(panels.templates, key, values.templates, errors.templates)
+    templates: nextPanel(panels.templates, key, values.templates, errors.templates),
+    capas: nextPanel(panels.capas, key, values.capas, errors.capas)
   };
 }
 
@@ -220,6 +224,31 @@ export function verifyBlockReason(
   return null;
 }
 
+/**
+ * CAPA close gate for the dashboard: effectiveness review only, an
+ * independent reviewer, and at least one evidence item. The effectiveness
+ * decision text is form state, checked by the component. Mirrors the server;
+ * the server still decides.
+ */
+export function capaCloseBlockReason(
+  me: Pick<DemoUser, 'id'>,
+  capa: Pick<CapaRecord, 'ownerId' | 'status'> & { evidence: readonly unknown[] }
+): string | null {
+  if (capa.status !== 'effectiveness_review') {
+    return 'Only CAPAs in effectiveness review can be closed.';
+  }
+  if (me.id === capa.ownerId) return CAPA_CLOSE_SOD_MESSAGE;
+  if (capa.evidence.length < 1) {
+    return 'Closing a CAPA requires at least 1 evidence item.';
+  }
+  return null;
+}
+
+/** Task action label: returning a submitted task to in-progress reads as a send-back. */
+export function startButtonLabel(task: Pick<ComplianceTask, 'status'>): string {
+  return task.status === 'submitted' ? 'Send back' : 'Start';
+}
+
 /** Org ids the picker may offer for this user (all of them while loading). */
 export function pickerOrgIds(orgs: Organization[], me: DemoUser | null): string[] {
   const ids = orgs.map((o) => o.id);
@@ -243,6 +272,7 @@ export interface PanelResults {
   domains: RegulatoryDomain[];
   audit: AuditEvent[];
   templates: TaskTemplate[];
+  capas: CapaRecord[];
 }
 
 export interface SettledPanels {
@@ -263,7 +293,8 @@ export function settlePanels(
   tasks: PromiseSettledResult<ComplianceTask[]>,
   domains: PromiseSettledResult<RegulatoryDomain[]>,
   audit: PromiseSettledResult<AuditEvent[]>,
-  templates: PromiseSettledResult<TaskTemplate[]>
+  templates: PromiseSettledResult<TaskTemplate[]>,
+  capas: PromiseSettledResult<CapaRecord[]>
 ): SettledPanels {
   const values: Partial<PanelResults> = {};
   const errors: Partial<Record<keyof PanelResults, string>> = {};
@@ -275,5 +306,7 @@ export function settlePanels(
   else errors.audit = reasonMessage(audit.reason);
   if (templates.status === 'fulfilled') values.templates = templates.value;
   else errors.templates = reasonMessage(templates.reason);
+  if (capas.status === 'fulfilled') values.capas = capas.value;
+  else errors.capas = reasonMessage(capas.reason);
   return { values, errors };
 }

@@ -4,6 +4,7 @@ import {
   applySettled,
   beginContext,
   canAct,
+  capaCloseBlockReason,
   initialPanels,
   panelData,
   pickerOrgIds,
@@ -12,6 +13,7 @@ import {
   resolveOrgId,
   settlePanels,
   startBlockReason,
+  startButtonLabel,
   submitBlockReason,
   submitStatusReason,
   verifyBlockReason,
@@ -105,12 +107,14 @@ describe('settled panel merge (F3)', () => {
       { status: 'rejected', reason: new Error("Organization not visible to role 'staff'.") },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] }
     );
     assert.ok(!('tasks' in values), 'failed panel must not overwrite prior tasks');
     assert.deepEqual(values.domains, []);
     assert.deepEqual(values.audit, []);
     assert.deepEqual(values.templates, []);
+    assert.deepEqual(values.capas, []);
     assert.deepEqual(Object.keys(errors), ['tasks']);
     assert.match(errors.tasks as string, /not visible/);
   });
@@ -120,6 +124,7 @@ describe('settled panel merge (F3)', () => {
     const { values, errors } = settlePanels(
       { status: 'rejected', reason: 'boom' },
       { status: 'rejected', reason: 'boom' },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] }
     );
@@ -135,10 +140,11 @@ describe('settled panel merge (F3)', () => {
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] }
     );
     assert.deepEqual(errors, {});
-    assert.equal(Object.keys(values).length, 4);
+    assert.equal(Object.keys(values).length, 5);
   });
 });
 
@@ -157,12 +163,13 @@ describe('context-keyed panels (F3a)', () => {
       { status: 'fulfilled', value: [row('t1')] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] });
 
   it('beginContext clears on change, preserves on same key', () => {
     const before = loaded(KEY_A);
     const cleared = beginContext(KEY_A, KEY_B, before);
-    for (const name of ['tasks', 'domains', 'audit', 'templates'] as const) {
+    for (const name of ['tasks', 'domains', 'audit', 'templates', 'capas'] as const) {
       assert.equal(cleared[name].key, KEY_B);
       assert.equal(cleared[name].status, 'loading');
       assert.deepEqual(cleared[name].data, []);
@@ -174,6 +181,7 @@ describe('context-keyed panels (F3a)', () => {
     const cleared = beginContext(KEY_A, KEY_B, loaded(KEY_A));
     const next = applySettled(cleared, KEY_B, 2, KEY_B, 2,
       fail('boom'),
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] });
@@ -191,6 +199,7 @@ describe('context-keyed panels (F3a)', () => {
       fail('boom'),
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] });
     assert.equal(next.tasks.status, 'loaded');
     assert.deepEqual(next.tasks.data, [{ id: 't1' }]);
@@ -203,6 +212,7 @@ describe('context-keyed panels (F3a)', () => {
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] });
     assert.strictEqual(next, current);
   });
@@ -210,6 +220,7 @@ describe('context-keyed panels (F3a)', () => {
   it('ignores out-of-order responses for the same context', () => {
     const current = loaded(KEY_A);
     const late = applySettled(current, KEY_A, 1, KEY_A, 2,
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
@@ -230,10 +241,12 @@ describe('context-keyed panels (F3a)', () => {
       fail('x'),
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] });
     assert.equal(canAct(failed.tasks, KEY_B), false);
     const staleOk = applySettled(current, KEY_A, 2, KEY_A, 2,
       fail('x'),
+      { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] },
       { status: 'fulfilled', value: [] });
@@ -438,5 +451,35 @@ describe('action-button states (unit)', () => {
     );
     assert.equal(verifyEvidenceReason({ status: 'submitted', evidence: [] }), null);
     assert.equal(verifyEvidenceReason({ status: 'open', evidence: [], requiredEvidence: 1 }), null);
+  });
+});
+
+describe('CAPA close gate and send-back label (unit)', () => {
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+
+  it('Close requires effectiveness review, independence, and evidence', () => {
+    assert.equal(
+      capaCloseBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'action_in_progress', evidence: [{}] }),
+      'Only CAPAs in effectiveness review can be closed.'
+    );
+    assert.equal(
+      capaCloseBlockReason({ id: 'u-staff' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [{}] }),
+      SOD
+    );
+    assert.equal(
+      capaCloseBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [] }),
+      'Closing a CAPA requires at least 1 evidence item.'
+    );
+    assert.equal(
+      capaCloseBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [{}] }),
+      null
+    );
+  });
+
+  it('Start reads as Send back on submitted tasks', () => {
+    assert.equal(startButtonLabel({ status: 'submitted' }), 'Send back');
+    assert.equal(startButtonLabel({ status: 'open' }), 'Start');
+    assert.equal(startButtonLabel({ status: 'in_progress' }), 'Start');
+    assert.equal(startButtonLabel({ status: 'verified' }), 'Start');
   });
 });

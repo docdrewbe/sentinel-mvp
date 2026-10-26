@@ -410,6 +410,8 @@ describe('audit org backfill', () => {
         assert.equal(e.orgId, db.tasks.find((t) => t.id === e.recordId)?.orgId);
       } else if (e.recordType === 'template') {
         assert.equal(e.orgId, db.templates.find((t) => t.id === e.recordId)?.orgId);
+      } else if (e.recordType === 'capa') {
+        assert.equal(e.orgId, db.capas.find((c) => c.id === e.recordId)?.orgId);
       } else {
         assert.equal(e.orgId, 'system');
       }

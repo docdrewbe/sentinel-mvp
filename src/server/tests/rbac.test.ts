@@ -56,6 +56,39 @@ describe('role-based workflows (simulated)', () => {
   });
 });
 
+describe('CAPA permissions (simulated)', () => {
+  const capa = (over: { orgId?: string; ownerId?: string } = {}) => ({
+    orgId: 'org-cah',
+    ownerId: 'u-staff',
+    ...over
+  });
+
+  it('only officers and admins may close', () => {
+    const c = capa();
+    assert.equal(can(user({ role: 'administrator', id: 'u-admin' }), 'capa.close', c), true);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'capa.close', c), true);
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'capa.close', c), false);
+    assert.equal(can(user({ role: 'staff' }), 'capa.close', c), false);
+  });
+
+  it('managers update and create; staff create nothing and update only their own', () => {
+    const mgr = user({ role: 'department_manager', id: 'u-mgr' });
+    assert.equal(can(mgr, 'capa.create'), true);
+    assert.equal(can(mgr, 'capa.update', capa({ ownerId: 'u-staff' })), true);
+    assert.equal(can(user({ role: 'staff' }), 'capa.create'), false);
+    assert.equal(can(user({ role: 'staff' }), 'capa.update', capa({ ownerId: 'u-staff' })), true);
+    assert.equal(can(user({ role: 'staff' }), 'capa.update', capa({ ownerId: 'u-other' })), false);
+    assert.equal(can(user({ role: 'staff' }), 'capa.evidence.add', capa({ ownerId: 'u-staff' })), true);
+    assert.equal(can(user({ role: 'staff' }), 'capa.evidence.add', capa({ ownerId: 'u-other' })), false);
+  });
+
+  it('scoped roles cannot touch other organizations CAPAs', () => {
+    const foreign = capa({ orgId: 'org-clinic', ownerId: 'u-clinic-staff' });
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'capa.update', foreign), false);
+    assert.equal(can(user({ role: 'staff' }), 'capa.evidence.add', foreign), false);
+  });
+});
+
 describe('organization visibility (F3)', () => {
   const all = ['org-cah', 'org-clinic', 'org-canna'];
 

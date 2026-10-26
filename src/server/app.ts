@@ -8,11 +8,14 @@ import {
   ValidationError,
   addEvidence,
   appendAudit,
+  capaAddEvidence,
+  createCapa,
   createTask,
   createTemplate,
   instantiateTemplate,
   mutateDb,
   transferCustody,
+  updateCapa,
   updateTask,
   updateTemplate,
   verifyAuditChain,
@@ -21,8 +24,8 @@ import {
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
-import type { ComplianceTask, DemoUser } from '../shared/types.js';
-import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser } from '../shared/types.js';
+import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
@@ -360,6 +363,215 @@ export function createApp(db: DbShape): express.Express {
         return moved;
       });
       res.json(ref);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // CAPA records (first slice). Tenant isolation, authorization, atomic
+  // persistence, and audit chaining reuse the task-route machinery.
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/capas', (req: AuthRequest, res) => {
+    const scope = readScope(req, res);
+    if (!scope) return;
+    const status = String(req.query.status ?? '');
+    res.json(db.capas.filter((c) => scope.includes(c.orgId) && (!status || c.status === status)));
+  });
+
+  app.post('/api/capas', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const input = req.body as {
+      orgId: string;
+      domainId: string;
+      taskId?: string;
+      finding: string;
+      severity: string;
+      ownerId: string;
+      dueDate: string;
+      containment?: string;
+      rootCause?: string;
+      correctivePlan?: string;
+      preventivePlan?: string;
+    };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'capa.create');
+      return;
+    }
+    if (!can(user, 'capa.create')) {
+      forbidden(res, user, 'capa.create');
+      return;
+    }
+    try {
+      const capa = mutateDb(db, () => {
+        const created = createCapa(db, {
+          orgId: input.orgId,
+          domainId: input.domainId,
+          taskId: input.taskId,
+          finding: String(input.finding ?? ''),
+          severity: input.severity as CapaRecord['severity'],
+          ownerId: input.ownerId,
+          dueDate: input.dueDate,
+          containment: input.containment,
+          rootCause: input.rootCause,
+          correctivePlan: input.correctivePlan,
+          preventivePlan: input.preventivePlan
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'capa.created',
+          recordType: 'capa',
+          recordId: created.id,
+          orgId: created.orgId,
+          detail: created.finding.slice(0, 120)
+        });
+        return created;
+      });
+      res.status(201).json(capa);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.patch('/api/capas/:id', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const capa = db.capas.find((c) => c.id === req.params.id);
+    if (!capa) {
+      res.status(404).json({ error: 'CAPA not found.' });
+      return;
+    }
+    if (!visibleOrgIds(user, db.orgs.map((o) => o.id)).includes(capa.orgId)) {
+      orgForbidden(req, res);
+      return;
+    }
+    const patch = req.body as {
+      finding?: string;
+      severity?: string;
+      containment?: string;
+      rootCause?: string;
+      ownerId?: string;
+      dueDate?: string;
+      domainId?: string;
+      correctivePlan?: string;
+      preventivePlan?: string;
+      effectivenessDecision?: string;
+      status?: CapaStatus;
+    };
+    try {
+      if (patch.status !== undefined && patch.status !== capa.status) {
+        const action: Action = patch.status === 'closed' ? 'capa.close' : 'capa.update';
+        if (!can(user, action, capa)) {
+          forbidden(res, user, action);
+          return;
+        }
+        if (action === 'capa.close') {
+          // Independence: the owner must never approve their own work.
+          if (user.id === capa.ownerId) {
+            res.status(403).json({ error: CAPA_CLOSE_SOD_MESSAGE });
+            return;
+          }
+          if (capa.evidence.length < 1) {
+            res.status(400).json({ error: 'Closing a CAPA requires at least 1 evidence item.' });
+            return;
+          }
+          const decision = (patch.effectivenessDecision ?? capa.effectivenessDecision ?? '').trim();
+          if (!decision) {
+            res.status(400).json({ error: 'Closing a CAPA requires a documented effectiveness decision.' });
+            return;
+          }
+        }
+      }
+      const touchesFields =
+        patch.finding !== undefined ||
+        patch.severity !== undefined ||
+        patch.containment !== undefined ||
+        patch.rootCause !== undefined ||
+        patch.ownerId !== undefined ||
+        patch.dueDate !== undefined ||
+        patch.domainId !== undefined ||
+        patch.correctivePlan !== undefined ||
+        patch.preventivePlan !== undefined ||
+        patch.effectivenessDecision !== undefined;
+      if (touchesFields && !can(user, 'capa.update', capa)) {
+        forbidden(res, user, 'capa.update');
+        return;
+      }
+      const oldStatus = capa.status;
+      const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
+      const updated = mutateDb(db, () => {
+        const next = updateCapa(db, capa.id, {
+          ...(patch.finding !== undefined ? { finding: patch.finding } : {}),
+          ...(patch.severity !== undefined ? { severity: patch.severity as CapaRecord['severity'] } : {}),
+          ...(patch.containment !== undefined ? { containment: patch.containment } : {}),
+          ...(patch.rootCause !== undefined ? { rootCause: patch.rootCause } : {}),
+          ...(patch.ownerId !== undefined ? { ownerId: patch.ownerId } : {}),
+          ...(patch.dueDate !== undefined ? { dueDate: patch.dueDate } : {}),
+          ...(patch.domainId !== undefined ? { domainId: patch.domainId } : {}),
+          ...(patch.correctivePlan !== undefined ? { correctivePlan: patch.correctivePlan } : {}),
+          ...(patch.preventivePlan !== undefined ? { preventivePlan: patch.preventivePlan } : {}),
+          ...(patch.effectivenessDecision !== undefined
+            ? { effectivenessDecision: patch.effectivenessDecision }
+            : {}),
+          ...(patch.status !== undefined ? { status: patch.status } : {})
+        });
+        if (next.status === 'closed' && oldStatus !== 'closed') {
+          next.closedBy = user.id;
+          next.closedAt = new Date().toISOString();
+        }
+        appendAudit(db, {
+          actorId: user.id,
+          action: statusChanged ? `capa.${next.status}` : 'capa.updated',
+          recordType: 'capa',
+          recordId: capa.id,
+          orgId: capa.orgId,
+          detail: `${next.finding.slice(0, 80)} [${oldStatus} -> ${next.status}]`
+        });
+        return next;
+      });
+      res.json(updated);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.post('/api/capas/:id/evidence', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const capa = db.capas.find((c) => c.id === req.params.id);
+    if (!capa) {
+      res.status(404).json({ error: 'CAPA not found.' });
+      return;
+    }
+    if (!visibleOrgIds(user, db.orgs.map((o) => o.id)).includes(capa.orgId)) {
+      orgForbidden(req, res);
+      return;
+    }
+    if (!can(user, 'capa.evidence.add', capa)) {
+      forbidden(res, user, 'capa.evidence.add');
+      return;
+    }
+    try {
+      const ref = mutateDb(db, () => {
+        const added = capaAddEvidence(
+          db,
+          req.params.id,
+          {
+            label: String(req.body.label ?? ''),
+            holder: String(req.body.holder ?? '')
+          },
+          user.id
+        );
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'evidence.added',
+          recordType: 'capa',
+          recordId: req.params.id,
+          orgId: capa.orgId,
+          detail: `${added.label} (holder: ${added.holder})`
+        });
+        return added;
+      });
+      res.status(201).json(ref);
     } catch (e) {
       sendError(req, res, e);
     }

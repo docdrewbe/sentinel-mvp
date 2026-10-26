@@ -15,6 +15,9 @@ import {
 import { dirname, join } from 'node:path';
 import type {
   AuditEvent,
+  CapaRecord,
+  CapaSeverity,
+  CapaStatus,
   ComplianceTask,
   ControlType,
   DemoUser,
@@ -41,6 +44,7 @@ export interface DbShape {
   users: DemoUser[];
   tasks: ComplianceTask[];
   templates: TaskTemplate[];
+  capas: CapaRecord[];
   audit: AuditEvent[];
 }
 
@@ -51,7 +55,7 @@ export function dataFilePath(): string {
 }
 
 export function emptyDb(): DbShape {
-  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], audit: [] };
+  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], audit: [] };
 }
 
 export function loadDb(): DbShape {
@@ -267,6 +271,8 @@ export function backfillAuditOrgIds(db: DbShape): void {
       e.orgId = db.tasks.find((t) => t.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
     } else if (e.recordType === 'template') {
       e.orgId = db.templates.find((t) => t.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
+    } else if (e.recordType === 'capa') {
+      e.orgId = db.capas.find((c) => c.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
     } else if (e.recordType === 'database') {
       e.orgId = SYSTEM_AUDIT_ORG;
     } else {
@@ -468,6 +474,185 @@ export function transferCustody(
   ref.updatedAt = new Date().toISOString();
   task.updatedAt = ref.updatedAt;
   return { ref, fromHolder };
+}
+
+// ---------------------------------------------------------------------------
+// CAPA records (first slice). Same safeguards as tasks: tenant checks at the
+// API layer, strict status transitions, evidence with custody genesis, and
+// locked records once closed. Closure independence is enforced in the PATCH
+// route, which knows the acting user.
+// ---------------------------------------------------------------------------
+
+export interface CapaInput {
+  orgId: string;
+  domainId: string;
+  taskId?: string;
+  finding: string;
+  severity: CapaSeverity;
+  ownerId: string;
+  dueDate: string;
+  containment?: string;
+  rootCause?: string;
+  correctivePlan?: string;
+  preventivePlan?: string;
+}
+
+const CAPA_STATUSES: CapaStatus[] = [
+  'open',
+  'investigation',
+  'action_in_progress',
+  'effectiveness_review',
+  'closed'
+];
+
+/** First-slice workflow: strict forward progression only. */
+const CAPA_TRANSITIONS: Record<CapaStatus, CapaStatus[]> = {
+  open: ['investigation'],
+  investigation: ['action_in_progress'],
+  action_in_progress: ['effectiveness_review'],
+  effectiveness_review: ['closed'],
+  closed: []
+};
+
+const CAPA_SEVERITIES: CapaSeverity[] = ['low', 'medium', 'high', 'critical'];
+
+function assertCapaNotLocked(capa: CapaRecord): void {
+  if (capa.status === 'closed') {
+    throw new ValidationError('Closed CAPA records are locked.');
+  }
+}
+
+export function createCapa(db: DbShape, input: CapaInput): CapaRecord {
+  const org = db.orgs.find((o) => o.id === input.orgId);
+  if (!org) throw new ValidationError('Unknown organization.');
+  const domain = db.domains.find((d) => d.id === input.domainId && d.orgId === input.orgId);
+  if (!domain) throw new ValidationError('Unknown regulatory domain for this organization.');
+  if (!domain.active) throw new ValidationError('Regulatory domain is inactive.');
+  const owner = db.users.find((u) => u.id === input.ownerId && u.orgId === input.orgId);
+  if (!owner) throw new ValidationError('Owner must be a user of the same organization.');
+  if (!input.finding || !input.finding.trim()) throw new ValidationError('Finding description is required.');
+  if (!CAPA_SEVERITIES.includes(input.severity)) throw new ValidationError('Unknown CAPA severity.');
+  assertDueDate(input.dueDate);
+  if (input.taskId !== undefined) {
+    const task = db.tasks.find((t) => t.id === input.taskId && t.orgId === input.orgId);
+    if (!task) throw new ValidationError('Linked task must exist in the same organization.');
+  }
+  const now = new Date().toISOString();
+  const trim = (v: string | undefined): string | undefined => {
+    const t = v?.trim();
+    return t ? t : undefined;
+  };
+  const capa: CapaRecord = {
+    id: randomUUID(),
+    orgId: input.orgId,
+    domainId: input.domainId,
+    ...(input.taskId ? { taskId: input.taskId } : {}),
+    finding: input.finding.trim(),
+    severity: input.severity,
+    ...(trim(input.containment) ? { containment: trim(input.containment) as string } : {}),
+    ...(trim(input.rootCause) ? { rootCause: trim(input.rootCause) as string } : {}),
+    ownerId: input.ownerId,
+    dueDate: input.dueDate,
+    ...(trim(input.correctivePlan) ? { correctivePlan: trim(input.correctivePlan) as string } : {}),
+    ...(trim(input.preventivePlan) ? { preventivePlan: trim(input.preventivePlan) as string } : {}),
+    status: 'open',
+    evidence: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  db.capas.push(capa);
+  return capa;
+}
+
+export function updateCapa(
+  db: DbShape,
+  id: string,
+  patch: Partial<
+    Pick<
+      CapaRecord,
+      | 'finding'
+      | 'severity'
+      | 'containment'
+      | 'rootCause'
+      | 'ownerId'
+      | 'dueDate'
+      | 'domainId'
+      | 'correctivePlan'
+      | 'preventivePlan'
+      | 'effectivenessDecision'
+      | 'status'
+    >
+  >
+): CapaRecord {
+  const capa = db.capas.find((c) => c.id === id);
+  if (!capa) throw new ValidationError('CAPA not found.');
+  assertCapaNotLocked(capa);
+  if (patch.finding !== undefined) {
+    if (!patch.finding.trim()) throw new ValidationError('Finding description is required.');
+    capa.finding = patch.finding.trim();
+  }
+  if (patch.severity !== undefined) {
+    if (!CAPA_SEVERITIES.includes(patch.severity)) throw new ValidationError('Unknown CAPA severity.');
+    capa.severity = patch.severity;
+  }
+  for (const field of ['containment', 'rootCause', 'correctivePlan', 'preventivePlan', 'effectivenessDecision'] as const) {
+    if (patch[field] !== undefined) {
+      const text = patch[field]?.trim() ?? '';
+      if (text) capa[field] = text;
+      else delete capa[field];
+    }
+  }
+  if (patch.ownerId !== undefined) {
+    const owner = db.users.find((u) => u.id === patch.ownerId && u.orgId === capa.orgId);
+    if (!owner) throw new ValidationError('Owner must be a user of the same organization.');
+    capa.ownerId = patch.ownerId;
+  }
+  if (patch.dueDate !== undefined) {
+    assertDueDate(patch.dueDate);
+    capa.dueDate = patch.dueDate;
+  }
+  if (patch.domainId !== undefined) {
+    const domain = db.domains.find((d) => d.id === patch.domainId && d.orgId === capa.orgId);
+    if (!domain) throw new ValidationError('Unknown regulatory domain for this organization.');
+    capa.domainId = patch.domainId;
+  }
+  if (patch.status !== undefined) {
+    if (!CAPA_STATUSES.includes(patch.status)) throw new ValidationError('Unknown CAPA status.');
+    if (patch.status !== capa.status && !CAPA_TRANSITIONS[capa.status].includes(patch.status)) {
+      throw new ValidationError(
+        `Illegal CAPA transition from '${capa.status}' to '${patch.status}'.`
+      );
+    }
+    capa.status = patch.status;
+  }
+  capa.updatedAt = new Date().toISOString();
+  return capa;
+}
+
+export function capaAddEvidence(
+  db: DbShape,
+  capaId: string,
+  input: { label: string; holder: string },
+  byUserId: string
+): EvidenceRef {
+  const capa = db.capas.find((c) => c.id === capaId);
+  if (!capa) throw new ValidationError('CAPA not found.');
+  assertCapaNotLocked(capa);
+  if (!input.label.trim()) throw new ValidationError('Evidence label is required.');
+  if (!input.holder.trim()) throw new ValidationError('Evidence holder is required.');
+  const now = new Date().toISOString();
+  const ref: EvidenceRef = {
+    id: randomUUID(),
+    label: input.label.trim(),
+    holder: input.holder.trim(),
+    custody: [
+      { seq: 1, fromHolder: null, toHolder: input.holder.trim(), byUserId, at: now }
+    ],
+    updatedAt: now
+  };
+  capa.evidence.push(ref);
+  capa.updatedAt = ref.updatedAt;
+  return ref;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import type { AuditEvent, ComplianceTask, DemoUser, Organization, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
+import type { AuditEvent, CapaRecord, ComplianceTask, DemoUser, Organization, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -43,5 +43,10 @@ export const api = {
   audit: (limit = 100) => req<AuditEvent[]>(`/api/audit?limit=${limit}`),
   templates: (orgId: string) => req<TaskTemplate[]>(`/api/templates?orgId=${orgId}`),
   instantiate: (id: string, body: { ownerId: string; dueDate?: string }) =>
-    req<ComplianceTask>(`/api/templates/${id}/instantiate`, { method: 'POST', body: JSON.stringify(body) })
+    req<ComplianceTask>(`/api/templates/${id}/instantiate`, { method: 'POST', body: JSON.stringify(body) }),
+  capas: (orgId: string) => req<CapaRecord[]>(`/api/capas?orgId=${orgId}`),
+  patchCapa: (id: string, patch: object) =>
+    req<CapaRecord>(`/api/capas/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  addCapaEvidence: (id: string, e: { label: string; holder: string }) =>
+    req(`/api/capas/${id}/evidence`, { method: 'POST', body: JSON.stringify(e) })
 };

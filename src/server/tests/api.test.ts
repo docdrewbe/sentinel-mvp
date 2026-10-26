@@ -2532,3 +2532,352 @@ describe('second compliance officer (HTTP)', () => {
     }
   });
 });
+
+describe('CAPA lifecycle (HTTP)', () => {
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+
+  interface CapaJson {
+    id: string;
+    status: string;
+    ownerId: string;
+    evidence: Array<Record<string, unknown>>;
+    closedBy?: string;
+    closedAt?: string;
+    effectivenessDecision?: string;
+  }
+
+  async function getCapa(base: string, userId: string, orgId: string, id: string): Promise<CapaJson> {
+    const res = await call(base, 'GET', `/api/capas?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const capas = res.json as unknown as CapaJson[];
+    const found = capas.find((c) => c.id === id);
+    assert.ok(found, `capa ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeCapa(
+    base: string,
+    actorId: string,
+    ownerId: string,
+    extra: Record<string, unknown> = {}
+  ): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', actorId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'CAPA probe finding (simulated).',
+      severity: 'medium',
+      ownerId,
+      dueDate: '2026-12-01',
+      ...extra
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function advance(base: string, actorId: string, id: string, status: string): Promise<number> {
+    return (await call(base, 'PATCH', `/api/capas/${id}`, actorId, { status })).status;
+  }
+
+  it('runs the full workflow to an independent closure, then locks', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        taskId: 'task-med-storage',
+        finding: 'CAPA probe finding (simulated).',
+        severity: 'high',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01',
+        containment: 'Immediate correction (simulated).'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+            rootCause: 'Root cause (simulated).',
+            correctivePlan: 'Corrective plan (simulated).',
+            preventivePlan: 'Preventive plan (simulated).'
+          })
+        ).status,
+        200
+      );
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'effectiveness check (simulated)',
+            holder: 'M. Lee'
+          })
+        ).status,
+        201
+      );
+      const closed = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        status: 'closed',
+        effectivenessDecision: 'Effective: no recurrence in 30 days (simulated).'
+      });
+      assert.equal(closed.status, 200);
+      assert.equal(closed.json.closedBy, 'u-officer');
+      assert.match(String(closed.json.closedAt), /^\d{4}-\d{2}-\d{2}T/);
+      const fetched = await getCapa(base, 'u-officer', 'org-cah', id);
+      assert.equal(fetched.status, 'closed');
+      assert.equal(fetched.effectivenessDecision, 'Effective: no recurrence in 30 days (simulated).');
+      const locked = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        finding: 'edited after close'
+      });
+      assert.equal(locked.status, 400);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-officer', {
+            label: 'late (simulated)',
+            holder: 'J. Ortiz'
+          })
+        ).status,
+        400
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects illegal transitions and invalid input', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'attachment (simulated)',
+            holder: 'Case File'
+          })
+        ).status,
+        201
+      );
+      const jump = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        status: 'closed',
+        effectivenessDecision: 'Skipped (simulated).'
+      });
+      assert.equal(jump.status, 400);
+      assert.match(String(jump.json.error), /Illegal CAPA transition/);
+      assert.equal(
+        (await call(base, 'POST', '/api/capas', 'u-officer', {
+          orgId: 'org-cah',
+          domainId: 'dom-osha-h',
+          finding: 'Bad severity (simulated).',
+          severity: 'urgent',
+          ownerId: 'u-officer',
+          dueDate: '2026-12-01'
+        })).status,
+        400
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/capas', 'u-officer', {
+          orgId: 'org-cah',
+          domainId: 'dom-osha-h',
+          taskId: 'task-inventory-sop',
+          finding: 'Cross-org link (simulated).',
+          severity: 'low',
+          ownerId: 'u-officer',
+          dueDate: '2026-12-01'
+        })).status,
+        400
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/capas', 'u-officer', {
+          orgId: 'org-cah',
+          domainId: 'dom-osha-h',
+          finding: '   ',
+          severity: 'low',
+          ownerId: 'u-officer',
+          dueDate: '2026-12-01'
+        })).status,
+        400
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('enforces roles and tenant isolation', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      assert.equal(
+        (await call(base, 'POST', '/api/capas', 'u-staff', {
+          orgId: 'org-cah',
+          domainId: 'dom-osha-h',
+          finding: 'Staff probe (simulated).',
+          severity: 'low',
+          ownerId: 'u-staff',
+          dueDate: '2026-12-01'
+        })).status,
+        403
+      );
+      assert.equal((await call(base, 'GET', '/api/capas?orgId=org-cah', 'u-clinic-mgr')).status, 403);
+      const own = await call(base, 'GET', '/api/capas', 'u-clinic-mgr');
+      assert.equal(own.status, 200);
+      assert.deepEqual(own.json, []);
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-clinic-staff', { finding: 'x' })).status, 403);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+          status: 'closed',
+          effectivenessDecision: 'Manager close (simulated).'
+        })).status,
+        403
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-staff', {
+          status: 'closed',
+          effectivenessDecision: 'Staff close (simulated).'
+        })).status,
+        403
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('requires an independent reviewer to close', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-officer', 'u-officer');
+      assert.equal(await advance(base, 'u-officer', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-officer', id, 'action_in_progress'), 200);
+      assert.equal(await advance(base, 'u-officer', id, 'effectiveness_review'), 200);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-officer', {
+            label: 'effectiveness check (simulated)',
+            holder: 'J. Ortiz'
+          })
+        ).status,
+        201
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        status: 'closed',
+        effectivenessDecision: 'Self-approved (simulated).'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assert.deepEqual(await getCapa(base, 'u-officer', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer2', {
+            status: 'closed',
+            effectivenessDecision: 'Effective (simulated).'
+          })
+        ).status,
+        200
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('requires closure evidence and a documented decision', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      const noEvidence = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        status: 'closed',
+        effectivenessDecision: 'Decision without evidence (simulated).'
+      });
+      assert.equal(noEvidence.status, 400);
+      assert.equal(noEvidence.json.error, 'Closing a CAPA requires at least 1 evidence item.');
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'effectiveness check (simulated)',
+            holder: 'M. Lee'
+          })
+        ).status,
+        201
+      );
+      const noDecision = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        status: 'closed'
+      });
+      assert.equal(noDecision.status, 400);
+      assert.equal(noDecision.json.error, 'Closing a CAPA requires a documented effectiveness decision.');
+      assert.equal((await getCapa(base, 'u-officer', 'org-cah', id)).status, 'effectiveness_review');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back CAPA writes when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'effectiveness check (simulated)',
+            holder: 'M. Lee'
+          })
+        ).status,
+        201
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const capasBefore = db.capas.length;
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+          status: 'closed',
+          effectivenessDecision: 'Effective (simulated).'
+        });
+        assert.equal(res.status, 500);
+        const created = await call(base, 'POST', '/api/capas', 'u-officer', {
+          orgId: 'org-cah',
+          domainId: 'dom-osha-h',
+          finding: 'Rolled-back probe (simulated).',
+          severity: 'low',
+          ownerId: 'u-officer',
+          dueDate: '2026-12-01'
+        });
+        assert.equal(created.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(await getCapa(base, 'u-officer', 'org-cah', id), before);
+      assert.equal(db.capas.length, capasBefore);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

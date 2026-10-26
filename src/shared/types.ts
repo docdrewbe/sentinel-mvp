@@ -174,6 +174,65 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   verified: 'Verified'
 };
 
+/** CAPA workflow states (first slice: strict forward progression). */
+export type CapaStatus =
+  | 'open'
+  | 'investigation'
+  | 'action_in_progress'
+  | 'effectiveness_review'
+  | 'closed';
+
+/** CAPA finding severity (synthetic demo scale). */
+export type CapaSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface CapaRecord {
+  id: string;
+  orgId: string;
+  domainId: string;
+  /** Linked compliance task, when this CAPA arose from one. */
+  taskId?: string;
+  /** Finding description (synthetic; never real PHI). */
+  finding: string;
+  severity: CapaSeverity;
+  /** Immediate containment / correction. */
+  containment?: string;
+  /** Root-cause analysis. */
+  rootCause?: string;
+  ownerId: string;
+  /** ISO calendar date (YYYY-MM-DD). */
+  dueDate: string;
+  correctivePlan?: string;
+  preventivePlan?: string;
+  status: CapaStatus;
+  /** Supporting evidence (same custody-tracked shape as tasks). */
+  evidence: EvidenceRef[];
+  /** Effectiveness decision, documented at closure. */
+  effectivenessDecision?: string;
+  closedBy?: string;
+  closedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const CAPA_STATUS_LABELS: Record<CapaStatus, string> = {
+  open: 'Open',
+  investigation: 'Investigation',
+  action_in_progress: 'Action In Progress',
+  effectiveness_review: 'Effectiveness Review',
+  closed: 'Closed'
+};
+
+export const CAPA_SEVERITY_LABELS: Record<CapaSeverity, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  critical: 'Critical'
+};
+
+/** CAPA closure independence rule (server-enforced; the dashboard mirrors it). */
+export const CAPA_CLOSE_SOD_MESSAGE =
+  'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+
 export const KIND_LABELS: Record<OrgKind, string> = {
   hospital: 'Hospital',
   clinic: 'Clinic',
