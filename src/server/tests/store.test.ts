@@ -1,14 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { AuditEvent } from '../../shared/types.js';
 
 process.env.SENTINEL_DATA_FILE = join(mkdtempSync(join(tmpdir(), 'sentinel-test-')), 'db.json');
 
 const {
   appendAudit,
   backfillAuditOrgIds,
+  buildAuditEvent,
   emptyDb,
   findOrphanedTempFiles,
   verifyAuditChain,
@@ -91,6 +94,110 @@ describe('interrupted-save detection', () => {
     } finally {
       unlinkSync(orphan);
     }
+  });
+});
+
+describe('hash versions (F1)', () => {
+  // Pinned copy of the pre-F1 (v1) hash computation. The v1 field list is
+  // frozen; this independent copy fails loudly if it ever drifts.
+  const v1hash = (e: {
+    seq: number;
+    id: string;
+    actorId: string;
+    action: string;
+    recordType: string;
+    recordId: string;
+    timestamp: string;
+    detail: string;
+    prevHash: string;
+  }): string =>
+    createHash('sha256')
+      .update(
+        [
+          e.seq,
+          e.id,
+          e.actorId,
+          e.action,
+          e.recordType,
+          e.recordId,
+          e.timestamp,
+          e.detail,
+          e.prevHash
+        ].join('|')
+      )
+      .digest('hex');
+
+  // A genuine v1-shaped chain: backfilled orgId present, no hashVersion.
+  function v1chain(): AuditEvent[] {
+    const t = '2026-10-26T00:00:00.000Z';
+    const e1 = {
+      seq: 1,
+      id: 'v1-a',
+      actorId: 'u-admin',
+      action: 'task.created',
+      recordType: 'task',
+      recordId: 't1',
+      orgId: 'org-cah',
+      timestamp: t,
+      detail: 'first',
+      prevHash: 'GENESIS'
+    };
+    const h1 = { ...e1, hash: v1hash(e1) };
+    const e2 = { ...e1, seq: 2, id: 'v1-b', recordId: 't2', detail: 'second', prevHash: h1.hash };
+    return [h1, { ...e2, hash: v1hash(e2) }] as AuditEvent[];
+  }
+
+  const freshV2 = () => {
+    const db = emptyDb();
+    appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', orgId: 'org-cah', detail: 'first' });
+    appendAudit(db, { actorId: 'u2', action: 'b', recordType: 't', recordId: 'r2', orgId: 'org-cah', detail: 'second' });
+    return db;
+  };
+
+  it('writes hashVersion 2 on new events', () => {
+    const db = freshV2();
+    assert.equal(db.audit[0].hashVersion, 2);
+    assert.equal(db.audit[1].hashVersion, 2);
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
+  });
+
+  it('detects tampering with a v2 event orgId', () => {
+    const db = freshV2();
+    db.audit[1].orgId = 'org-clinic';
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 2 });
+  });
+
+  it('detects tampering with hashVersion itself', () => {
+    const downgraded = freshV2();
+    downgraded.audit[1].hashVersion = 1;
+    assert.deepEqual(verifyAuditChain(downgraded.audit), { ok: false, badSeq: 2 });
+    const stripped = freshV2();
+    delete (stripped.audit[0] as unknown as Record<string, unknown>).hashVersion;
+    assert.deepEqual(verifyAuditChain(stripped.audit), { ok: false, badSeq: 1 });
+  });
+
+  it('still verifies legacy v1 chains', () => {
+    assert.deepEqual(verifyAuditChain(v1chain()), { ok: true });
+    const tampered = v1chain();
+    tampered[0].detail = 'forged';
+    assert.deepEqual(verifyAuditChain(tampered), { ok: false, badSeq: 1 });
+  });
+
+  it('verifies mixed v1/v2 histories and protects the v2 suffix', () => {
+    const chain = v1chain();
+    chain.push(
+      buildAuditEvent(chain, {
+        actorId: 'u1',
+        action: 'c',
+        recordType: 't',
+        recordId: 'r3',
+        orgId: 'org-cah',
+        detail: 'third'
+      })
+    );
+    assert.deepEqual(verifyAuditChain(chain), { ok: true });
+    chain[2].orgId = 'system';
+    assert.deepEqual(verifyAuditChain(chain), { ok: false, badSeq: 3 });
   });
 });
 

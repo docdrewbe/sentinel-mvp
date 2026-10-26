@@ -44,6 +44,7 @@ Reset demo data: stop the server and delete `./data/sentinel.json`.
 - Managers and staff see and change only their own organization (enforced by the API, not just the dashboard).
 - Administrators and compliance officers have documented cross-organization demo access.
 - Every audit event carries its organization's id; pre-existing events are backfilled on load.
+- Audit hash versions: pre-F1 (v1) events carry a backfilled, **unhashed** `orgId`; new (v2) events bind `orgId` into the hash. Accepted for the demo — the data will be reset before judging, making every event v2.
 
 ## API sketch
 

@@ -152,8 +152,9 @@ export function mutateDb<T>(db: DbShape, fn: () => T): T {
 type HashableEvent = Omit<AuditEvent, 'hash'>;
 
 function eventHash(e: HashableEvent): string {
-  // NOTE: orgId is deliberately not hashed so pre-D6 chains keep verifying.
-  const parts = [
+  // v1 field list is frozen so pre-F1 chains keep verifying. v2 additionally
+  // binds the version itself and orgId, so re-tagging an event breaks the chain.
+  const parts: Array<string | number> = [
     e.seq,
     e.id,
     e.actorId,
@@ -164,6 +165,7 @@ function eventHash(e: HashableEvent): string {
     e.detail,
     e.prevHash
   ];
+  if (e.hashVersion === 2) parts.push(e.hashVersion, e.orgId);
   return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
@@ -184,7 +186,8 @@ export function buildAuditEvent(audit: AuditEvent[], input: AuditInput): AuditEv
     id: randomUUID(),
     timestamp: new Date().toISOString(),
     prevHash,
-    ...input
+    ...input,
+    hashVersion: 2
   };
   return { ...base, hash: eventHash(base) };
 }

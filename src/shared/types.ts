@@ -74,6 +74,11 @@ export interface AuditEvent {
   recordId: string;
   /** Owning organization; 'system' for non-tenant operational events. */
   orgId: string;
+  /**
+   * Hash format version. Absent on pre-F1 (v1) events, whose orgId is
+   * backfilled and NOT hash-covered. v2 events bind orgId into the hash.
+   */
+  hashVersion?: number;
   timestamp: string;
   detail: string;
   prevHash: string;
