@@ -14,6 +14,7 @@ import {
   createTemplate,
   instantiateTemplate,
   mutateDb,
+  monotonicNow,
   transferCustody,
   updateCapa,
   updateTask,
@@ -23,7 +24,7 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
-import { capaGateMissing } from '../shared/capa.js';
+import { capaGateMissing, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser } from '../shared/types.js';
 import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
@@ -395,6 +396,7 @@ export function createApp(db: DbShape): express.Express {
       rootCause?: string;
       correctivePlan?: string;
       preventivePlan?: string;
+      effectivenessCriteria?: string;
     };
     if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
       forbidden(res, user, 'capa.create');
@@ -417,8 +419,10 @@ export function createApp(db: DbShape): express.Express {
           containment: input.containment,
           rootCause: input.rootCause,
           correctivePlan: input.correctivePlan,
-          preventivePlan: input.preventivePlan
+          preventivePlan: input.preventivePlan,
+          effectivenessCriteria: input.effectivenessCriteria
         });
+        created.statusHistory = [{ status: 'open', at: monotonicNow(), byUserId: user.id }];
         appendAudit(db, {
           actorId: user.id,
           action: 'capa.created',
@@ -456,7 +460,7 @@ export function createApp(db: DbShape): express.Express {
       domainId?: string;
       correctivePlan?: string;
       preventivePlan?: string;
-      effectivenessDecision?: string;
+      effectivenessCriteria?: string;
       status?: CapaStatus;
     };
     try {
@@ -467,28 +471,14 @@ export function createApp(db: DbShape): express.Express {
           return;
         }
         if (action === 'capa.close') {
-          // Independence: the owner must never approve their own work.
+          // C2: closure happens only through an effectiveness review, but an
+          // ineligible reviewer is still told so (and C3 keeps this order).
           if (user.id === capa.ownerId) {
             res.status(403).json({ error: CAPA_CLOSE_SOD_MESSAGE });
             return;
           }
-          if (capa.evidence.length < 1) {
-            res.status(400).json({ error: 'Closing a CAPA requires at least 1 evidence item.' });
-            return;
-          }
-          const decision = (patch.effectivenessDecision ?? capa.effectivenessDecision ?? '').trim();
-          if (!decision) {
-            res.status(400).json({ error: 'Closing a CAPA requires a documented effectiveness decision.' });
-            return;
-          }
-          // C1: re-check every phase gate at closure against the unpatched
-          // record; blanking attempts in the same request are caught by the
-          // erasure rule inside updateCapa and rolled back.
-          const missing = capaGateMissing(capa, 'closed');
-          if (missing.length > 0) {
-            res.status(400).json({ error: missing.join(' ') });
-            return;
-          }
+          res.status(400).json({ error: 'Close via an effectiveness review.' });
+          return;
         }
       }
       const editedFields = (
@@ -502,7 +492,7 @@ export function createApp(db: DbShape): express.Express {
           'domainId',
           'correctivePlan',
           'preventivePlan',
-          'effectivenessDecision'
+          'effectivenessCriteria'
         ] as const
       ).filter((field) => patch[field] !== undefined);
       if (editedFields.length > 0 && !can(user, 'capa.update', capa)) {
@@ -522,14 +512,16 @@ export function createApp(db: DbShape): express.Express {
           ...(patch.domainId !== undefined ? { domainId: patch.domainId } : {}),
           ...(patch.correctivePlan !== undefined ? { correctivePlan: patch.correctivePlan } : {}),
           ...(patch.preventivePlan !== undefined ? { preventivePlan: patch.preventivePlan } : {}),
-          ...(patch.effectivenessDecision !== undefined
-            ? { effectivenessDecision: patch.effectivenessDecision }
+          ...(patch.effectivenessCriteria !== undefined
+            ? { effectivenessCriteria: patch.effectivenessCriteria }
             : {}),
           ...(patch.status !== undefined ? { status: patch.status } : {})
         });
-        if (next.status === 'closed' && oldStatus !== 'closed') {
-          next.closedBy = user.id;
-          next.closedAt = new Date().toISOString();
+        if (statusChanged) {
+          next.statusHistory = [
+            ...(next.statusHistory ?? []),
+            { status: next.status, at: monotonicNow(), byUserId: user.id }
+          ];
         }
         appendAudit(db, {
           actorId: user.id,
@@ -564,6 +556,11 @@ export function createApp(db: DbShape): express.Express {
       forbidden(res, user, 'capa.evidence.add');
       return;
     }
+    const kind = req.body.kind;
+    if (kind !== undefined && kind !== 'implementation' && kind !== 'effectiveness') {
+      res.status(400).json({ error: 'Unknown evidence kind.' });
+      return;
+    }
     try {
       const ref = mutateDb(db, () => {
         const added = capaAddEvidence(
@@ -571,7 +568,8 @@ export function createApp(db: DbShape): express.Express {
           req.params.id,
           {
             label: String(req.body.label ?? ''),
-            holder: String(req.body.holder ?? '')
+            holder: String(req.body.holder ?? ''),
+            ...(kind !== undefined ? { kind } : {})
           },
           user.id
         );
@@ -586,6 +584,121 @@ export function createApp(db: DbShape): express.Express {
         return added;
       });
       res.status(201).json(ref);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // C2: the only way to close a CAPA. An effective review closes it; an
+  // ineffective one returns it to Action In Progress with history intact.
+  app.post('/api/capas/:id/effectiveness-review', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const capa = db.capas.find((c) => c.id === req.params.id);
+    if (!capa) {
+      res.status(404).json({ error: 'CAPA not found.' });
+      return;
+    }
+    if (!visibleOrgIds(user, db.orgs.map((o) => o.id)).includes(capa.orgId)) {
+      orgForbidden(req, res);
+      return;
+    }
+    if (!can(user, 'capa.close', capa)) {
+      forbidden(res, user, 'capa.close');
+      return;
+    }
+    if (capa.status !== 'effectiveness_review') {
+      res.status(400).json({ error: 'Only CAPAs in effectiveness review can be reviewed.' });
+      return;
+    }
+    // C2 interim independence (owner only); C3 derives it from involvement history.
+    if (user.id === capa.ownerId) {
+      res.status(403).json({ error: CAPA_CLOSE_SOD_MESSAGE });
+      return;
+    }
+    const outcome = req.body.outcome;
+    if (outcome !== 'effective' && outcome !== 'ineffective') {
+      res.status(400).json({ error: 'Review outcome must be effective or ineffective.' });
+      return;
+    }
+    const rationale = String(req.body.rationale ?? '').trim();
+    if (!rationale) {
+      res.status(400).json({ error: 'An effectiveness review requires a documented rationale.' });
+      return;
+    }
+    const evidenceIds = req.body.evidenceIds;
+    const qualifying = new Set(qualifyingEffectivenessEvidence(capa).map((e) => e.id));
+    if (
+      !Array.isArray(evidenceIds) ||
+      evidenceIds.length < 1 ||
+      !evidenceIds.every((id: unknown) => typeof id === 'string' && qualifying.has(id))
+    ) {
+      res.status(400).json({
+        error: 'Each referenced evidence item must be current-cycle effectiveness evidence.'
+      });
+      return;
+    }
+    // C1 gates still hold at closure.
+    const missing = capaGateMissing(capa, 'closed');
+    if (missing.length > 0) {
+      res.status(400).json({ error: missing.join(' ') });
+      return;
+    }
+    try {
+      const updated = mutateDb(db, () => {
+        const now = monotonicNow();
+        const seq = (capa.effectivenessReviews ?? []).length + 1;
+        capa.effectivenessReviews = [
+          ...(capa.effectivenessReviews ?? []),
+          {
+            seq,
+            outcome,
+            rationale,
+            reviewerId: user.id,
+            at: now,
+            evidenceIds: [...new Set(evidenceIds as string[])]
+          }
+        ];
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'capa.effectiveness_review.recorded',
+          recordType: 'capa',
+          recordId: capa.id,
+          orgId: capa.orgId,
+          detail: `#${seq} ${outcome}: ${rationale.slice(0, 80)}`
+        });
+        if (outcome === 'effective') {
+          capa.status = 'closed';
+          capa.closedBy = user.id;
+          capa.closedAt = now;
+          capa.effectivenessDecision = rationale;
+          capa.statusHistory = [...(capa.statusHistory ?? []), { status: 'closed', at: now, byUserId: user.id }];
+          appendAudit(db, {
+            actorId: user.id,
+            action: 'capa.closed',
+            recordType: 'capa',
+            recordId: capa.id,
+            orgId: capa.orgId,
+            detail: `${capa.finding.slice(0, 80)} [effectiveness_review -> closed]`
+          });
+        } else {
+          capa.status = 'action_in_progress';
+          capa.statusHistory = [
+            ...(capa.statusHistory ?? []),
+            { status: 'action_in_progress', at: now, byUserId: user.id }
+          ];
+          appendAudit(db, {
+            actorId: user.id,
+            action: 'capa.returned_to_action',
+            recordType: 'capa',
+            recordId: capa.id,
+            orgId: capa.orgId,
+            detail: `#${seq} ineffective: returned to Action In Progress`
+          });
+        }
+        capa.updatedAt = now;
+        return capa;
+      });
+      res.status(201).json(updated);
     } catch (e) {
       sendError(req, res, e);
     }

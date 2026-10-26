@@ -59,6 +59,12 @@ export interface EvidenceRef {
   /** Append-only custody history; entries are never edited or removed. */
   custody: CustodyEntry[];
   updatedAt: string;
+  /**
+   * CAPA evidence only: implementation work proof vs effectiveness-check
+   * proof. Absent (all task evidence, legacy CAPA evidence) counts as
+   * implementation evidence.
+   */
+  kind?: 'implementation' | 'effectiveness';
 }
 
 export interface ComplianceTask {
@@ -206,12 +212,38 @@ export interface CapaRecord {
   status: CapaStatus;
   /** Supporting evidence (same custody-tracked shape as tasks). */
   evidence: EvidenceRef[];
-  /** Effectiveness decision, documented at closure. */
+  /**
+   * Effectiveness decision: display alias of the latest effective review's
+   * rationale, set only by the review endpoint. Never accepted from clients.
+   */
   effectivenessDecision?: string;
+  /** What effectiveness will be judged against; required before review. */
+  effectivenessCriteria?: string;
+  /** Append-only effectiveness review history (server-maintained). */
+  effectivenessReviews?: EffectivenessReview[];
+  /** Append-only status-entry history (server-maintained). */
+  statusHistory?: StatusHistoryEntry[];
   closedBy?: string;
   closedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One recorded effectiveness review: outcome, rationale, reviewer, time, evidence. */
+export interface EffectivenessReview {
+  seq: number;
+  outcome: 'effective' | 'ineffective';
+  rationale: string;
+  reviewerId: string;
+  at: string;
+  evidenceIds: string[];
+}
+
+/** One recorded entry into a CAPA status (server-maintained). */
+export interface StatusHistoryEntry {
+  status: CapaStatus;
+  at: string;
+  byUserId: string;
 }
 
 export const CAPA_STATUS_LABELS: Record<CapaStatus, string> = {

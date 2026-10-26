@@ -2578,22 +2578,26 @@ describe('CAPA lifecycle (HTTP)', () => {
       rootCause: 'Root cause (simulated).',
       correctivePlan: 'Corrective plan (simulated).',
       preventivePlan: 'Preventive plan (simulated).',
+      effectivenessCriteria: 'No recurrence in 30 days (simulated).',
       ...extra
     });
     assert.equal(created.status, 201);
     return String(created.json.id);
   }
 
-  async function addCapaEvidence(base: string, actorId: string, id: string): Promise<void> {
-    assert.equal(
-      (
-        await call(base, 'POST', `/api/capas/${id}/evidence`, actorId, {
-          label: 'attachment (simulated)',
-          holder: 'Case File'
-        })
-      ).status,
-      201
-    );
+  async function addCapaEvidence(
+    base: string,
+    actorId: string,
+    id: string,
+    kind?: string
+  ): Promise<string> {
+    const added = await call(base, 'POST', `/api/capas/${id}/evidence`, actorId, {
+      label: 'attachment (simulated)',
+      holder: 'Case File',
+      ...(kind ? { kind } : {})
+    });
+    assert.equal(added.status, 201);
+    return String(added.json.id);
   }
 
   async function advance(base: string, actorId: string, id: string, status: string): Promise<number> {
@@ -2621,7 +2625,8 @@ describe('CAPA lifecycle (HTTP)', () => {
           await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
             rootCause: 'Root cause (simulated).',
             correctivePlan: 'Corrective plan (simulated).',
-            preventivePlan: 'Preventive plan (simulated).'
+            preventivePlan: 'Preventive plan (simulated).',
+            effectivenessCriteria: 'No recurrence in 30 days (simulated).'
           })
         ).status,
         200
@@ -2630,20 +2635,36 @@ describe('CAPA lifecycle (HTTP)', () => {
       assert.equal(
         (
           await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
-            label: 'effectiveness check (simulated)',
+            label: 'implementation proof (simulated)',
             holder: 'M. Lee'
           })
         ).status,
         201
       );
       assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
-      const closed = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
-        status: 'closed',
-        effectivenessDecision: 'Effective: no recurrence in 30 days (simulated).'
+      const check = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'effectiveness check (simulated)',
+        holder: 'M. Lee',
+        kind: 'effectiveness'
       });
-      assert.equal(closed.status, 200);
+      assert.equal(check.status, 201);
+      const patchClose = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        status: 'closed'
+      });
+      assert.equal(patchClose.status, 400);
+      assert.equal(patchClose.json.error, 'Close via an effectiveness review.');
+      const closed = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Effective: no recurrence in 30 days (simulated).',
+        evidenceIds: [String(check.json.id)]
+      });
+      assert.equal(closed.status, 201);
       assert.equal(closed.json.closedBy, 'u-officer');
       assert.match(String(closed.json.closedAt), /^\d{4}-\d{2}-\d{2}T/);
+      const reviews = (closed.json as unknown as { effectivenessReviews: Array<{ outcome: string }> })
+        .effectivenessReviews;
+      assert.equal(reviews.length, 1);
+      assert.equal(reviews[0].outcome, 'effective');
       const fetched = await getCapa(base, 'u-officer', 'org-cah', id);
       assert.equal(fetched.status, 'closed');
       assert.equal(fetched.effectivenessDecision, 'Effective: no recurrence in 30 days (simulated).');
@@ -2680,11 +2701,15 @@ describe('CAPA lifecycle (HTTP)', () => {
         201
       );
       const jump = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
-        status: 'closed',
-        effectivenessDecision: 'Skipped (simulated).'
+        status: 'closed'
       });
       assert.equal(jump.status, 400);
-      assert.match(String(jump.json.error), /Illegal CAPA transition/);
+      assert.equal(jump.json.error, 'Close via an effectiveness review.');
+      const skip = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+        status: 'action_in_progress'
+      });
+      assert.equal(skip.status, 400);
+      assert.match(String(skip.json.error), /Illegal CAPA transition/);
       assert.equal(
         (await call(base, 'POST', '/api/capas', 'u-officer', {
           orgId: 'org-cah',
@@ -2785,13 +2810,21 @@ describe('CAPA lifecycle (HTTP)', () => {
         201
       );
       assert.equal(await advance(base, 'u-officer', id, 'effectiveness_review'), 200);
+      const check = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-officer', {
+        label: 'effectiveness check (simulated)',
+        holder: 'J. Ortiz',
+        kind: 'effectiveness'
+      });
+      assert.equal(check.status, 201);
+      const reviewBody = {
+        outcome: 'effective',
+        rationale: 'Self-approved (simulated).',
+        evidenceIds: [String(check.json.id)]
+      };
       const diskBefore = readFileSync(dataFile, 'utf8');
       const before = await getCapa(base, 'u-officer', 'org-cah', id);
       const audits = await auditTotal(base, 'u-officer');
-      const denied = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
-        status: 'closed',
-        effectivenessDecision: 'Self-approved (simulated).'
-      });
+      const denied = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', reviewBody);
       assert.equal(denied.status, 403);
       assert.equal(denied.json.error, SOD);
       assert.deepEqual(await getCapa(base, 'u-officer', 'org-cah', id), before);
@@ -2799,12 +2832,13 @@ describe('CAPA lifecycle (HTTP)', () => {
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assert.equal(
         (
-          await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer2', {
-            status: 'closed',
-            effectivenessDecision: 'Effective (simulated).'
+          await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer2', {
+            outcome: 'effective',
+            rationale: 'Effective (simulated).',
+            evidenceIds: [String(check.json.id)]
           })
         ).status,
-        200
+        201
       );
       assertDiskMatchesMemory(db);
     } finally {
@@ -2812,36 +2846,41 @@ describe('CAPA lifecycle (HTTP)', () => {
     }
   });
 
-  it('requires closure evidence and a documented decision', async () => {
-    // C1 gates make review-without-evidence unreachable via the API, so this
-    // legacy shape is built directly (status set, evidence absent).
+  it('requires review evidence references and a documented rationale', async () => {
     const { db, base, close } = await startServer((seeded) => {
       const legacy = seeded.capas.find((c) => c.id === 'capa-temp-log');
       assert.ok(legacy);
       legacy.status = 'effectiveness_review';
+      legacy.statusHistory = [
+        ...(legacy.statusHistory ?? []),
+        { status: 'effectiveness_review', at: '2026-10-20T00:00:00.000Z', byUserId: 'u-nurse-mgr' }
+      ];
     });
     try {
       const id = 'capa-temp-log';
-      const noEvidence = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
-        status: 'closed',
-        effectivenessDecision: 'Decision without evidence (simulated).'
+      const noRefs = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Rationale without evidence (simulated).',
+        evidenceIds: []
       });
-      assert.equal(noEvidence.status, 400);
-      assert.equal(noEvidence.json.error, 'Closing a CAPA requires at least 1 evidence item.');
+      assert.equal(noRefs.status, 400);
       assert.equal(
-        (
-          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
-            label: 'effectiveness check (simulated)',
-            holder: 'M. Lee'
-          })
-        ).status,
-        201
+        noRefs.json.error,
+        'Each referenced evidence item must be current-cycle effectiveness evidence.'
       );
-      const noDecision = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
-        status: 'closed'
+      const added = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'effectiveness check (simulated)',
+        holder: 'M. Lee',
+        kind: 'effectiveness'
       });
-      assert.equal(noDecision.status, 400);
-      assert.equal(noDecision.json.error, 'Closing a CAPA requires a documented effectiveness decision.');
+      assert.equal(added.status, 201);
+      const noRationale = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: '   ',
+        evidenceIds: [String(added.json.id)]
+      });
+      assert.equal(noRationale.status, 400);
+      assert.equal(noRationale.json.error, 'An effectiveness review requires a documented rationale.');
       assert.equal((await getCapa(base, 'u-officer', 'org-cah', id)).status, 'effectiveness_review');
       assertDiskMatchesMemory(db);
     } finally {
@@ -2865,6 +2904,12 @@ describe('CAPA lifecycle (HTTP)', () => {
         201
       );
       assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      const check = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'effectiveness check (simulated)',
+        holder: 'M. Lee',
+        kind: 'effectiveness'
+      });
+      assert.equal(check.status, 201);
       const diskBefore = readFileSync(dataFile, 'utf8');
       const before = await getCapa(base, 'u-officer', 'org-cah', id);
       const audits = await auditTotal(base, 'u-officer');
@@ -2873,9 +2918,10 @@ describe('CAPA lifecycle (HTTP)', () => {
         throw eperm();
       });
       try {
-        const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
-          status: 'closed',
-          effectivenessDecision: 'Effective (simulated).'
+        const res = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+          outcome: 'effective',
+          rationale: 'Effective (simulated).',
+          evidenceIds: [String(check.json.id)]
         });
         assert.equal(res.status, 500);
         const created = await call(base, 'POST', '/api/capas', 'u-officer', {
@@ -3024,7 +3070,8 @@ describe('C1 CAPA phase gates (HTTP)', () => {
             containment: 'Held (simulated).',
             rootCause: 'Found (simulated).',
             correctivePlan: 'Fix (simulated).',
-            preventivePlan: 'Prevent (simulated).'
+            preventivePlan: 'Prevent (simulated).',
+            effectivenessCriteria: 'No recurrence in 30 days (simulated).'
           })
         ).status,
         200
@@ -3112,28 +3159,34 @@ describe('C1 CAPA phase gates (HTTP)', () => {
       assert.ok(legacy);
       legacy.status = 'effectiveness_review';
       delete legacy.rootCause;
+      legacy.statusHistory = [
+        ...(legacy.statusHistory ?? []),
+        { status: 'effectiveness_review', at: '2026-10-20T00:00:00.000Z', byUserId: 'u-nurse-mgr' }
+      ];
+      const at = '2026-10-21T00:00:00.000Z';
       legacy.evidence = [
         {
           id: 'capa-temp-log-ev1',
           label: 'legacy proof (simulated)',
           holder: 'M. Lee',
-          custody: [
-            {
-              seq: 1,
-              fromHolder: null,
-              toHolder: 'M. Lee',
-              byUserId: 'u-nurse-mgr',
-              at: new Date().toISOString()
-            }
-          ],
-          updatedAt: new Date().toISOString()
+          custody: [{ seq: 1, fromHolder: null, toHolder: 'M. Lee', byUserId: 'u-nurse-mgr', at }],
+          updatedAt: at
+        },
+        {
+          id: 'capa-temp-log-ev2',
+          label: 'legacy check (simulated)',
+          holder: 'M. Lee',
+          kind: 'effectiveness',
+          custody: [{ seq: 1, fromHolder: null, toHolder: 'M. Lee', byUserId: 'u-nurse-mgr', at }],
+          updatedAt: at
         }
       ];
     });
     try {
-      const denied = await call(base, 'PATCH', '/api/capas/capa-temp-log', 'u-officer', {
-        status: 'closed',
-        effectivenessDecision: 'Effective (simulated).'
+      const denied = await call(base, 'POST', '/api/capas/capa-temp-log/effectiveness-review', 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Effective (simulated).',
+        evidenceIds: ['capa-temp-log-ev2']
       });
       assert.equal(denied.status, 400);
       assert.match(String(denied.json.error), /Root cause is still required to close\./);
@@ -3154,7 +3207,8 @@ describe('C1 CAPA phase gates (HTTP)', () => {
             containment: 'Held (simulated).',
             rootCause: 'Found (simulated).',
             correctivePlan: 'Fix (simulated).',
-            preventivePlan: 'Prevent (simulated).'
+            preventivePlan: 'Prevent (simulated).',
+            effectivenessCriteria: 'No recurrence in 30 days (simulated).'
           })
         ).status,
         200
@@ -3177,14 +3231,333 @@ describe('C1 CAPA phase gates (HTTP)', () => {
       const audits = await auditTotal(base, 'u-officer');
       const denied = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
         rootCause: '',
-        status: 'closed',
-        effectivenessDecision: 'Effective (simulated).'
+        status: 'closed'
       });
       assert.equal(denied.status, 400);
-      assert.equal(denied.json.error, 'Root cause is required at this stage and cannot be removed.');
+      assert.equal(denied.json.error, 'Close via an effectiveness review.');
       assert.deepEqual(await getCapa(base, 'u-officer', 'org-cah', id), before);
       assert.equal(await auditTotal(base, 'u-officer'), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('C2 effectiveness reviews (HTTP)', () => {
+  interface ReviewJson {
+    seq: number;
+    outcome: string;
+    rationale: string;
+    reviewerId: string;
+    at: string;
+    evidenceIds: string[];
+  }
+
+  interface CapaJson {
+    id: string;
+    status: string;
+    evidence: Array<{ id: string; kind?: string }>;
+    effectivenessReviews?: ReviewJson[];
+    effectivenessDecision?: string;
+    closedBy?: string;
+    closedAt?: string;
+  }
+
+  interface AuditJson {
+    action: string;
+    recordId: string;
+  }
+
+  async function getCapa(base: string, userId: string, orgId: string, id: string): Promise<CapaJson> {
+    const res = await call(base, 'GET', `/api/capas?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const capas = res.json as unknown as CapaJson[];
+    const found = capas.find((c) => c.id === id);
+    assert.ok(found, `capa ${id} visible`);
+    return found;
+  }
+
+  async function capaAuditActions(base: string, id: string): Promise<string[]> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as AuditJson[])
+      .filter((e) => e.recordId === id)
+      .map((e) => e.action);
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeFullCapa(base: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'C2 probe finding (simulated).',
+      severity: 'medium',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2026-12-01',
+      containment: 'Held (simulated).',
+      rootCause: 'Found (simulated).',
+      correctivePlan: 'Fix (simulated).',
+      preventivePlan: 'Prevent (simulated).',
+      effectivenessCriteria: 'No recurrence in 30 days (simulated).'
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function advance(base: string, actorId: string, id: string, status: string): Promise<number> {
+    return (await call(base, 'PATCH', `/api/capas/${id}`, actorId, { status })).status;
+  }
+
+  async function addEvidence(
+    base: string,
+    actorId: string,
+    id: string,
+    kind: string
+  ): Promise<string> {
+    const added = await call(base, 'POST', `/api/capas/${id}/evidence`, actorId, {
+      label: `${kind} proof (simulated)`,
+      holder: 'Case File',
+      kind
+    });
+    assert.equal(added.status, 201);
+    assert.equal(added.json.kind, kind);
+    return String(added.json.id);
+  }
+
+  async function toReview(base: string, id: string): Promise<void> {
+    assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+    assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+    await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+    assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+  }
+
+  it('closes through an effective review with history and audit', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base);
+      await toReview(base, id);
+      const check = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const done = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Effective: no recurrence in 30 days (simulated).',
+        evidenceIds: [check]
+      });
+      assert.equal(done.status, 201);
+      assert.equal(done.json.status, 'closed');
+      assert.equal(done.json.closedBy, 'u-officer');
+      assert.match(String(done.json.closedAt), /^\d{4}-\d{2}-\d{2}T/);
+      const reviews = (done.json as unknown as { effectivenessReviews: ReviewJson[] }).effectivenessReviews;
+      assert.equal(reviews.length, 1);
+      assert.deepEqual(reviews[0], {
+        seq: 1,
+        outcome: 'effective',
+        rationale: 'Effective: no recurrence in 30 days (simulated).',
+        reviewerId: 'u-officer',
+        at: reviews[0].at,
+        evidenceIds: [check]
+      });
+      assert.match(String(reviews[0].at), /^\d{4}-\d{2}-\d{2}T/);
+      const fetched = await getCapa(base, 'u-officer', 'org-cah', id);
+      assert.equal(fetched.effectivenessDecision, 'Effective: no recurrence in 30 days (simulated).');
+      const actions = await capaAuditActions(base, id);
+      assert.ok(actions.includes('capa.effectiveness_review.recorded'));
+      assert.ok(actions.includes('capa.closed'));
+      const again = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Second (simulated).',
+        evidenceIds: [check]
+      });
+      assert.equal(again.status, 400);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('returns to action on ineffective, then closes on a fresh cycle', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base);
+      await toReview(base, id);
+      const stale = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const first = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'ineffective',
+        rationale: 'Recurrence observed (simulated).',
+        evidenceIds: [stale]
+      });
+      assert.equal(first.status, 201);
+      assert.equal(first.json.status, 'action_in_progress');
+      assert.equal(first.json.closedBy, undefined);
+      // Old implementation evidence still satisfies the work gate.
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      const reused = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Reusing prior cycle (simulated).',
+        evidenceIds: [stale]
+      });
+      assert.equal(reused.status, 400);
+      assert.equal(
+        reused.json.error,
+        'Each referenced evidence item must be current-cycle effectiveness evidence.'
+      );
+      const fresh = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const second = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Effective on recheck (simulated).',
+        evidenceIds: [fresh]
+      });
+      assert.equal(second.status, 201);
+      assert.equal(second.json.status, 'closed');
+      assert.deepEqual(
+        (second.json.effectivenessReviews as ReviewJson[]).map((r) => [r.seq, r.outcome]),
+        [
+          [1, 'ineffective'],
+          [2, 'effective']
+        ]
+      );
+      const actions = await capaAuditActions(base, id);
+      assert.ok(actions.includes('capa.returned_to_action'));
+      assert.ok(actions.includes('capa.closed'));
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('validates outcome, rationale, and evidence references', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base);
+      const early = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Too early (simulated).',
+        evidenceIds: ['nope']
+      });
+      assert.equal(early.status, 400);
+      assert.equal(early.json.error, 'Only CAPAs in effectiveness review can be reviewed.');
+      await toReview(base, id);
+      const impl = await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+      const check = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const badOutcome = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'maybe',
+        rationale: 'Rationale (simulated).',
+        evidenceIds: [check]
+      });
+      assert.equal(badOutcome.status, 400);
+      assert.equal(badOutcome.json.error, 'Review outcome must be effective or ineffective.');
+      const blank = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: '  ',
+        evidenceIds: [check]
+      });
+      assert.equal(blank.status, 400);
+      assert.equal(blank.json.error, 'An effectiveness review requires a documented rationale.');
+      for (const evidenceIds of [[], ['missing-id'], [impl], 'not-an-array']) {
+        const bad = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+          outcome: 'effective',
+          rationale: 'Rationale (simulated).',
+          evidenceIds
+        });
+        assert.equal(bad.status, 400);
+        assert.equal(
+          bad.json.error,
+          'Each referenced evidence item must be current-cycle effectiveness evidence.'
+        );
+      }
+      assert.equal((await getCapa(base, 'u-officer', 'org-cah', id)).status, 'effectiveness_review');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('restricts reviews to privileged same-organization reviewers', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base);
+      await toReview(base, id);
+      const check = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const body = {
+        outcome: 'effective',
+        rationale: 'Effective (simulated).',
+        evidenceIds: [check]
+      };
+      assert.equal(
+        (await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-clinic-mgr', body)).status,
+        403
+      );
+      assert.equal(
+        (await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-nurse-mgr', body)).status,
+        403
+      );
+      assert.equal(
+        (await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', body)).status,
+        201
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back a review when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base);
+      await toReview(base, id);
+      const check = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+          outcome: 'effective',
+          rationale: 'Effective (simulated).',
+          evidenceIds: [check]
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(await getCapa(base, 'u-officer', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects effectiveness evidence gathered before the review cycle', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+      const early = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      const denied = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Early check (simulated).',
+        evidenceIds: [early]
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(
+        denied.json.error,
+        'Each referenced evidence item must be current-cycle effectiveness evidence.'
+      );
       assertDiskMatchesMemory(db);
     } finally {
       await close();

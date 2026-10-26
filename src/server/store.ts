@@ -59,6 +59,24 @@ export function emptyDb(): DbShape {
   return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], audit: [] };
 }
 
+let lastStamp = '';
+
+/**
+ * Process-wide strictly increasing ISO timestamp for order-sensitive CAPA
+ * records (review-cycle scoping compares evidence genesis against review
+ * entry times, and fast consecutive requests can share a millisecond).
+ */
+export function monotonicNow(): string {
+  const now = new Date().toISOString();
+  if (now > lastStamp) {
+    lastStamp = now;
+    return now;
+  }
+  const bumped = new Date(Date.parse(lastStamp) + 1).toISOString();
+  lastStamp = bumped;
+  return bumped;
+}
+
 export function loadDb(): DbShape {
   const file = dataFilePath();
   if (!existsSync(file)) return emptyDb();
@@ -496,6 +514,7 @@ export interface CapaInput {
   rootCause?: string;
   correctivePlan?: string;
   preventivePlan?: string;
+  effectivenessCriteria?: string;
 }
 
 const CAPA_STATUSES: CapaStatus[] = [
@@ -556,6 +575,9 @@ export function createCapa(db: DbShape, input: CapaInput): CapaRecord {
     dueDate: input.dueDate,
     ...(trim(input.correctivePlan) ? { correctivePlan: trim(input.correctivePlan) as string } : {}),
     ...(trim(input.preventivePlan) ? { preventivePlan: trim(input.preventivePlan) as string } : {}),
+    ...(trim(input.effectivenessCriteria)
+      ? { effectivenessCriteria: trim(input.effectivenessCriteria) as string }
+      : {}),
     status: 'open',
     evidence: [],
     createdAt: now,
@@ -580,7 +602,7 @@ export function updateCapa(
       | 'domainId'
       | 'correctivePlan'
       | 'preventivePlan'
-      | 'effectivenessDecision'
+      | 'effectivenessCriteria'
       | 'status'
     >
   >
@@ -596,7 +618,9 @@ export function updateCapa(
     if (!CAPA_SEVERITIES.includes(patch.severity)) throw new ValidationError('Unknown CAPA severity.');
     capa.severity = patch.severity;
   }
-  for (const field of ['containment', 'rootCause', 'correctivePlan', 'preventivePlan', 'effectivenessDecision'] as const) {
+  // C2: effectivenessDecision is set only by the review endpoint; PATCH
+  // input carrying it is ignored (it is not in the patch type at all).
+  for (const field of ['containment', 'rootCause', 'correctivePlan', 'preventivePlan', 'effectivenessCriteria'] as const) {
     if (patch[field] !== undefined) {
       const text = patch[field]?.trim() ?? '';
       if (!text && (capaRequiredFields(capa.status) as string[]).includes(field)) {
@@ -644,7 +668,7 @@ export function updateCapa(
 export function capaAddEvidence(
   db: DbShape,
   capaId: string,
-  input: { label: string; holder: string },
+  input: { label: string; holder: string; kind?: 'implementation' | 'effectiveness' },
   byUserId: string
 ): EvidenceRef {
   const capa = db.capas.find((c) => c.id === capaId);
@@ -652,7 +676,10 @@ export function capaAddEvidence(
   assertCapaNotLocked(capa);
   if (!input.label.trim()) throw new ValidationError('Evidence label is required.');
   if (!input.holder.trim()) throw new ValidationError('Evidence holder is required.');
-  const now = new Date().toISOString();
+  if (input.kind !== undefined && input.kind !== 'implementation' && input.kind !== 'effectiveness') {
+    throw new ValidationError('Unknown evidence kind.');
+  }
+  const now = monotonicNow();
   const ref: EvidenceRef = {
     id: randomUUID(),
     label: input.label.trim(),
@@ -660,7 +687,8 @@ export function capaAddEvidence(
     custody: [
       { seq: 1, fromHolder: null, toHolder: input.holder.trim(), byUserId, at: now }
     ],
-    updatedAt: now
+    updatedAt: now,
+    kind: input.kind ?? 'implementation'
   };
   capa.evidence.push(ref);
   capa.updatedAt = ref.updatedAt;

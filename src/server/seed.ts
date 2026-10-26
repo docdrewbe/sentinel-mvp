@@ -394,6 +394,10 @@ export function seedDatabase(): DbShape {
       correctivePlan: 'Repair logger and backfill supervised readings (simulated).',
       status: 'investigation',
       evidence: [],
+      statusHistory: [
+        { status: 'open', at: t, byUserId: 'u-officer' },
+        { status: 'investigation', at: t, byUserId: 'u-nurse-mgr' }
+      ],
       createdAt: t,
       updatedAt: t
     }

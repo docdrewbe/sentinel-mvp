@@ -1,15 +1,21 @@
 // Shared CAPA phase-gate rules: the server enforces them, the dashboard
 // mirrors them for button states. Single source of truth for what each
 // transition requires.
-import type { CapaRecord, CapaStatus } from './types.js';
+import type { CapaRecord, CapaStatus, EvidenceRef } from './types.js';
 
-export type CapaGateField = 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan';
+export type CapaGateField =
+  | 'containment'
+  | 'rootCause'
+  | 'correctivePlan'
+  | 'preventivePlan'
+  | 'effectivenessCriteria';
 
 export const CAPA_GATE_FIELD_LABELS: Record<CapaGateField, string> = {
   containment: 'Containment',
   rootCause: 'Root cause',
   correctivePlan: 'Corrective plan',
-  preventivePlan: 'Preventive plan'
+  preventivePlan: 'Preventive plan',
+  effectivenessCriteria: 'Effectiveness criteria'
 };
 
 /**
@@ -26,18 +32,25 @@ export function capaRequiredFields(status: CapaStatus): CapaGateField[] {
       return ['containment', 'rootCause'];
     case 'effectiveness_review':
     case 'closed':
-      return ['containment', 'rootCause', 'correctivePlan', 'preventivePlan'];
+      return ['containment', 'rootCause', 'correctivePlan', 'preventivePlan', 'effectivenessCriteria'];
   }
 }
 
-export type CapaGateEvidence = Pick<CapaRecord, 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan'> & {
-  evidence: readonly unknown[];
+export type CapaGateEvidence = Pick<
+  CapaRecord,
+  'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan' | 'effectivenessCriteria'
+> & {
+  evidence: ReadonlyArray<Pick<EvidenceRef, 'kind'>>;
 };
+
+/** Implementation-phase evidence: explicit kind, or legacy/task evidence without one. */
+export function isImplementationEvidence(item: Pick<EvidenceRef, 'kind'>): boolean {
+  return (item.kind ?? 'implementation') === 'implementation';
+}
 
 /**
  * Missing requirements for a transition, as complete sentences. Empty when
- * the gate is satisfied. Until C2 introduces evidence kinds, every evidence
- * item counts as implementation evidence.
+ * the gate is satisfied.
  */
 export function capaGateMissing(capa: CapaGateEvidence, target: CapaStatus): string[] {
   const missing: string[] = [];
@@ -45,6 +58,7 @@ export function capaGateMissing(capa: CapaGateEvidence, target: CapaStatus): str
     if (!ok) missing.push(message);
   };
   const has = (value: string | undefined): boolean => !!value?.trim();
+  const implementationCount = capa.evidence.filter(isImplementationEvidence).length;
   switch (target) {
     case 'open':
       break;
@@ -61,7 +75,11 @@ export function capaGateMissing(capa: CapaGateEvidence, target: CapaStatus): str
       need(has(capa.correctivePlan), 'Corrective plan is required to request effectiveness review.');
       need(has(capa.preventivePlan), 'Preventive plan is required to request effectiveness review.');
       need(
-        capa.evidence.length >= 1,
+        has(capa.effectivenessCriteria),
+        'Effectiveness criteria are required to request effectiveness review.'
+      );
+      need(
+        implementationCount >= 1,
         'At least 1 implementation evidence item is required to request effectiveness review.'
       );
       break;
@@ -70,11 +88,41 @@ export function capaGateMissing(capa: CapaGateEvidence, target: CapaStatus): str
       need(has(capa.rootCause), 'Root cause is still required to close.');
       need(has(capa.correctivePlan), 'Corrective plan is still required to close.');
       need(has(capa.preventivePlan), 'Preventive plan is still required to close.');
+      need(has(capa.effectivenessCriteria), 'Effectiveness criteria are still required to close.');
       need(
-        capa.evidence.length >= 1,
+        implementationCount >= 1,
         'At least 1 implementation evidence item is still required to close.'
       );
       break;
   }
   return missing;
+}
+
+/**
+ * Latest entry into effectiveness review (ISO timestamp), or null when the
+ * CAPA never entered review. Review cycles are scoped by this timestamp.
+ */
+export function latestReviewEntryAt(capa: Pick<CapaRecord, 'statusHistory'>): string | null {
+  let latest: string | null = null;
+  for (const entry of capa.statusHistory ?? []) {
+    if (entry.status === 'effectiveness_review' && (latest === null || entry.at > latest)) {
+      latest = entry.at;
+    }
+  }
+  return latest;
+}
+
+/**
+ * Effectiveness evidence belonging to the current review cycle: kind-tagged
+ * items whose custody genesis postdates the latest review entry. Used by the
+ * review endpoint (enforced) and the dashboard picker (mirrored).
+ */
+export function qualifyingEffectivenessEvidence(
+  capa: Pick<CapaRecord, 'evidence' | 'statusHistory'>
+): EvidenceRef[] {
+  const entry = latestReviewEntryAt(capa);
+  if (!entry) return [];
+  return capa.evidence.filter(
+    (item) => item.kind === 'effectiveness' && (item.custody[0]?.at ?? '') > entry
+  );
 }

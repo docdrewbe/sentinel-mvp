@@ -4,7 +4,7 @@ import {
   applySettled,
   beginContext,
   canAct,
-  capaCloseBlockReason,
+  capaReviewBlockReason,
   initialPanels,
   panelData,
   pickerOrgIds,
@@ -454,24 +454,39 @@ describe('action-button states (unit)', () => {
   });
 });
 
-describe('CAPA close gate and send-back label (unit)', () => {
+describe('CAPA review gate and send-back label (unit)', () => {
   const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+  const check = (genesis: string) => ({
+    id: 'ev-check',
+    label: 'check',
+    holder: 'Case File',
+    kind: 'effectiveness' as const,
+    custody: [{ seq: 1, fromHolder: null, toHolder: 'Case File', byUserId: 'u-mgr', at: genesis }],
+    updatedAt: genesis
+  });
+  const history = [{ status: 'effectiveness_review' as const, at: '2026-10-20T00:00:00.000Z', byUserId: 'u-mgr' }];
 
-  it('Close requires effectiveness review, independence, and evidence', () => {
+  it('Review requires the review state, independence, and current-cycle evidence', () => {
     assert.equal(
-      capaCloseBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'action_in_progress', evidence: [{}] }),
-      'Only CAPAs in effectiveness review can be closed.'
+      capaReviewBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'action_in_progress', evidence: [], statusHistory: [] }),
+      'Only CAPAs in effectiveness review can be reviewed.'
     );
     assert.equal(
-      capaCloseBlockReason({ id: 'u-staff' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [{}] }),
+      capaReviewBlockReason(
+        { id: 'u-staff' },
+        { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [check('2026-10-21T00:00:00.000Z')], statusHistory: history }
+      ),
       SOD
     );
     assert.equal(
-      capaCloseBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [] }),
-      'Closing a CAPA requires at least 1 evidence item.'
+      capaReviewBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [], statusHistory: history }),
+      'At least 1 current-cycle effectiveness evidence item is required to review.'
     );
     assert.equal(
-      capaCloseBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [{}] }),
+      capaReviewBlockReason(
+        { id: 'u-officer' },
+        { ownerId: 'u-staff', status: 'effectiveness_review', evidence: [check('2026-10-21T00:00:00.000Z')], statusHistory: history }
+      ),
       null
     );
   });

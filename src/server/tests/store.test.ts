@@ -17,6 +17,7 @@ const {
   emptyDb,
   findOrphanedTempFiles,
   findTasksMissingSubmissionHistory,
+  monotonicNow,
   verifyAuditChain,
   createTask,
   updateTask,
@@ -24,7 +25,9 @@ const {
 } = await import('../store.js');
 const { seedDatabase } = await import('../seed.js');
 const { requiredEvidenceCount } = await import('../../shared/evidence.js');
-const { capaGateMissing, capaRequiredFields } = await import('../../shared/capa.js');
+const { capaGateMissing, capaRequiredFields, qualifyingEffectivenessEvidence } = await import(
+  '../../shared/capa.js'
+);
 
 describe('append-only audit log', () => {
   it('chains events with increasing sequence numbers and a verifiable hash', () => {
@@ -541,7 +544,7 @@ describe('D5c submission-history triage (unit)', () => {
 });
 
 describe('C1 CAPA phase gates (unit)', () => {
-  const bare = { evidence: [] as unknown[] };
+  const bare = { evidence: [] as Array<{ kind?: 'implementation' | 'effectiveness' }> };
 
   it('names the missing fields for each transition', () => {
     assert.deepEqual(capaGateMissing(bare, 'investigation'), [
@@ -552,8 +555,9 @@ describe('C1 CAPA phase gates (unit)', () => {
       'Root cause is required to begin action.'
     ]);
     const missing = capaGateMissing(bare, 'effectiveness_review');
-    assert.equal(missing.length, 5);
+    assert.equal(missing.length, 6);
     assert.ok(missing.some((m) => m.includes('Corrective plan')));
+    assert.ok(missing.some((m) => m.includes('Effectiveness criteria')));
     assert.ok(missing.some((m) => m.includes('implementation evidence')));
     assert.deepEqual(capaGateMissing(bare, 'open'), []);
   });
@@ -564,11 +568,26 @@ describe('C1 CAPA phase gates (unit)', () => {
       rootCause: 'Found.',
       correctivePlan: 'Fix.',
       preventivePlan: 'Prevent.',
+      effectivenessCriteria: 'No recurrence.',
       evidence: [{}]
     };
     for (const target of ['investigation', 'action_in_progress', 'effectiveness_review', 'closed'] as const) {
       assert.deepEqual(capaGateMissing(full, target), []);
     }
+  });
+
+  it('counts only implementation evidence toward the work gate', () => {
+    const onlyCheck = {
+      containment: 'Held.',
+      rootCause: 'Found.',
+      correctivePlan: 'Fix.',
+      preventivePlan: 'Prevent.',
+      effectivenessCriteria: 'No recurrence.',
+      evidence: [{ kind: 'effectiveness' as const }]
+    };
+    assert.deepEqual(capaGateMissing(onlyCheck, 'effectiveness_review'), [
+      'At least 1 implementation evidence item is required to request effectiveness review.'
+    ]);
   });
 
   it('tracks required fields per stage for the erasure rule', () => {
@@ -579,7 +598,44 @@ describe('C1 CAPA phase gates (unit)', () => {
       'containment',
       'rootCause',
       'correctivePlan',
-      'preventivePlan'
+      'preventivePlan',
+      'effectivenessCriteria'
     ]);
+  });
+
+  it('scopes effectiveness evidence to the current review cycle', () => {
+    const at = (day: string): string => `2026-10-${day}T00:00:00.000Z`;
+    const item = (id: string, kind: 'implementation' | 'effectiveness', genesis: string) => ({
+      id,
+      label: id,
+      holder: 'Case File',
+      kind,
+      custody: [{ seq: 1, fromHolder: null, toHolder: 'Case File', byUserId: 'u-mgr', at: genesis }],
+      updatedAt: genesis
+    });
+    const capa = {
+      evidence: [
+        item('impl-1', 'implementation', at('10')),
+        item('check-early', 'effectiveness', at('10')),
+        item('check-1', 'effectiveness', at('21'))
+      ],
+      statusHistory: [
+        { status: 'open' as const, at: at('09'), byUserId: 'u-mgr' },
+        { status: 'effectiveness_review' as const, at: at('20'), byUserId: 'u-mgr' }
+      ]
+    };
+    assert.deepEqual(
+      qualifyingEffectivenessEvidence(capa).map((e) => e.id),
+      ['check-1']
+    );
+    assert.deepEqual(qualifyingEffectivenessEvidence({ evidence: [], statusHistory: [] }), []);
+  });
+
+  it('stamps order-sensitive records with strictly increasing times', () => {
+    const stamps = Array.from({ length: 50 }, () => monotonicNow());
+    const sorted = [...stamps].sort();
+    assert.deepEqual(stamps, sorted);
+    assert.equal(new Set(stamps).size, stamps.length);
+    assert.match(stamps[0], /^\d{4}-\d{2}-\d{2}T/);
   });
 });

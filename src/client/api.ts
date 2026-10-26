@@ -47,6 +47,8 @@ export const api = {
   capas: (orgId: string) => req<CapaRecord[]>(`/api/capas?orgId=${orgId}`),
   patchCapa: (id: string, patch: object) =>
     req<CapaRecord>(`/api/capas/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
-  addCapaEvidence: (id: string, e: { label: string; holder: string }) =>
-    req(`/api/capas/${id}/evidence`, { method: 'POST', body: JSON.stringify(e) })
+  addCapaEvidence: (id: string, e: { label: string; holder: string; kind?: string }) =>
+    req(`/api/capas/${id}/evidence`, { method: 'POST', body: JSON.stringify(e) }),
+  reviewCapa: (id: string, review: { outcome: string; rationale: string; evidenceIds: string[] }) =>
+    req<CapaRecord>(`/api/capas/${id}/effectiveness-review`, { method: 'POST', body: JSON.stringify(review) })
 };

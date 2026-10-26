@@ -2,6 +2,7 @@
 // Kept free of React so the rules are unit-testable without a DOM.
 import { visibleOrgIds } from '../shared/rbac.js';
 import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
+import { qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type {
   AuditEvent,
@@ -225,21 +226,22 @@ export function verifyBlockReason(
 }
 
 /**
- * CAPA close gate for the dashboard: effectiveness review only, an
- * independent reviewer, and at least one evidence item. The effectiveness
- * decision text is form state, checked by the component. Mirrors the server;
- * the server still decides.
+ * C2: CAPA review gate for the dashboard. Effectiveness review only, an
+ * independent reviewer (owner-only until C3 derives involvement history),
+ * and at least one current-cycle effectiveness evidence item. Outcome,
+ * rationale, and the evidence selection are form state, checked by the
+ * component. Mirrors the server; the server still decides.
  */
-export function capaCloseBlockReason(
+export function capaReviewBlockReason(
   me: Pick<DemoUser, 'id'>,
-  capa: Pick<CapaRecord, 'ownerId' | 'status'> & { evidence: readonly unknown[] }
+  capa: Pick<CapaRecord, 'ownerId' | 'status' | 'evidence' | 'statusHistory'>
 ): string | null {
   if (capa.status !== 'effectiveness_review') {
-    return 'Only CAPAs in effectiveness review can be closed.';
+    return 'Only CAPAs in effectiveness review can be reviewed.';
   }
   if (me.id === capa.ownerId) return CAPA_CLOSE_SOD_MESSAGE;
-  if (capa.evidence.length < 1) {
-    return 'Closing a CAPA requires at least 1 evidence item.';
+  if (qualifyingEffectivenessEvidence(capa).length < 1) {
+    return 'At least 1 current-cycle effectiveness evidence item is required to review.';
   }
   return null;
 }

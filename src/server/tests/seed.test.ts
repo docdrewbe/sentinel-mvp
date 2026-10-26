@@ -144,6 +144,11 @@ describe('synthetic demo data', () => {
     assert.ok(
       db.audit.some((e) => e.action === 'capa.created' && e.recordType === 'capa' && e.recordId === capa.id)
     );
+    assert.deepEqual(
+      (capa.statusHistory ?? []).map((e) => e.status),
+      ['open', 'investigation']
+    );
+    assert.equal(capa.effectivenessReviews, undefined);
   });
 
   it('D5d: every seeded verified task shows an independent, authorized verifier', () => {

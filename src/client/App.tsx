@@ -3,8 +3,8 @@ import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { capaGateMissing } from '../shared/capa.js';
-import { applySettled, beginContext, canAct, capaCloseBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { capaGateMissing, qualifyingEffectivenessEvidence } from '../shared/capa.js';
+import { applySettled, beginContext, canAct, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -437,11 +437,14 @@ export default function App(): JSX.Element {
                 domainName={domainById.get(capa.domainId)?.name ?? '—'}
                 linkedTaskTitle={capa.taskId ? (taskById.get(capa.taskId)?.title ?? capa.taskId) : null}
                 trail={capaTrail}
-                onAdvance={(status, effectivenessDecision) =>
-                  run(async () => api.patchCapa(capa.id, { status, ...(effectivenessDecision ? { effectivenessDecision } : {}) }))
+                onAdvance={(status) => run(async () => api.patchCapa(capa.id, { status }))}
+                onAddEvidence={(label, holder, kind) =>
+                  run(async () => api.addCapaEvidence(capa.id, { label, holder, ...(kind ? { kind } : {}) }))
                 }
-                onAddEvidence={(label, holder) => run(async () => api.addCapaEvidence(capa.id, { label, holder }))}
                 onSaveField={(field, text) => run(async () => api.patchCapa(capa.id, { [field]: text }))}
+                onReview={(outcome, rationale, evidenceIds) =>
+                  run(async () => api.reviewCapa(capa.id, { outcome, rationale, evidenceIds }))
+                }
               />
             )}
           </div>
@@ -655,7 +658,7 @@ function CapaFieldEditor({ label, value, canEdit, onSave }: { label: string; val
   );
 }
 
-function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, onAdvance, onAddEvidence, onSaveField }: {
+function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, onAdvance, onAddEvidence, onSaveField, onReview }: {
   me: DemoUser;
   capa: CapaRecord;
   ready: boolean;
@@ -663,26 +666,45 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   domainName: string;
   linkedTaskTitle: string | null;
   trail: AuditEvent[];
-  onAdvance: (status: CapaStatus, effectivenessDecision?: string) => void;
-  onAddEvidence: (label: string, holder: string) => void;
-  onSaveField: (field: 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan', text: string) => void;
+  onAdvance: (status: CapaStatus) => void;
+  onAddEvidence: (label: string, holder: string, kind?: string) => void;
+  onSaveField: (field: 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan' | 'effectivenessCriteria', text: string) => void;
+  onReview: (outcome: string, rationale: string, evidenceIds: string[]) => void;
 }): JSX.Element {
-  const [decision, setDecision] = useState('');
+  const [outcome, setOutcome] = useState('');
+  const [rationale, setRationale] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
   const next = capa.status === 'closed' ? null : CAPA_NEXT[capa.status];
-  const closing = capa.status === 'effectiveness_review';
-  const closeReason = closing ? capaCloseBlockReason(me, capa) : null;
-  // C1: mirror the server phase gates; the first missing item explains the button.
-  const gateReason = next && !closing ? (capaGateMissing(capa, next)[0] ?? null) : null;
-  const closeGateReason = closing ? (capaGateMissing(capa, 'closed')[0] ?? null) : null;
-  const roleOk = can(me, closing ? 'capa.close' : 'capa.update', capa);
-  const decisionOk = !closing || decision.trim().length > 0;
-  const reason = closeReason ?? (!decisionOk ? 'Document the effectiveness decision to close.' : null) ?? closeGateReason ?? gateReason;
-  const allowed = ready && roleOk && reason === null && next !== null;
-  const title = !ready
+  const reviewing = capa.status === 'effectiveness_review';
+  const gateReason = next && !reviewing ? (capaGateMissing(capa, next)[0] ?? null) : null;
+  const reviewReason = reviewing ? capaReviewBlockReason(me, capa) : null;
+  const qualifying = reviewing ? qualifyingEffectivenessEvidence(capa) : [];
+  const advanceRoleOk = can(me, 'capa.update', capa);
+  const advanceAllowed = ready && advanceRoleOk && gateReason === null && next !== null && !reviewing;
+  const advanceTitle = !ready
     ? 'CAPA actions unavailable while data is loading or failed.'
-    : !roleOk
-      ? `Requires: ${closing ? 'compliance officer / admin' : 'owner / manager / officer / admin'}`
-      : (reason ?? '');
+    : !advanceRoleOk
+      ? 'Requires: owner / manager / officer / admin'
+      : (gateReason ?? '');
+  const formReason = !outcome
+    ? 'Choose an outcome.'
+    : !rationale.trim()
+      ? 'Document the rationale.'
+      : selected.length === 0
+        ? 'Select at least 1 current-cycle effectiveness evidence item.'
+        : null;
+  const reviewRoleOk = can(me, 'capa.close', capa);
+  const reviewAllowed = ready && reviewRoleOk && reviewReason === null && formReason === null;
+  const reviewTitle = !ready
+    ? 'CAPA actions unavailable while data is loading or failed.'
+    : !reviewRoleOk
+      ? 'Requires: compliance officer / admin'
+      : (reviewReason ?? formReason ?? '');
+  const noteRoleOk = reviewing ? reviewRoleOk : advanceRoleOk;
+  const note = gateReason ?? reviewReason ?? (reviewing ? formReason : null);
+  const toggle = (id: string): void => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
   return (
     <>
       <h4>{capa.finding}</h4>
@@ -702,7 +724,8 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
           ['containment', 'Containment', capa.containment],
           ['rootCause', 'Root cause', capa.rootCause],
           ['correctivePlan', 'Corrective plan', capa.correctivePlan],
-          ['preventivePlan', 'Preventive plan', capa.preventivePlan]
+          ['preventivePlan', 'Preventive plan', capa.preventivePlan],
+          ['effectivenessCriteria', 'Effectiveness criteria', capa.effectivenessCriteria]
         ] as const
       ).map(([field, label, value]) => (
         <CapaFieldEditor
@@ -714,23 +737,73 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
         />
       ))}
       {capa.effectivenessDecision && <p><strong>Effectiveness decision:</strong> {capa.effectivenessDecision}</p>}
-      {next && (
+      {next && !reviewing && (
         <div className="status-btns">
-          {closing && (
-            <input
-              aria-label="Effectiveness decision"
-              placeholder="Document the effectiveness decision…"
-              value={decision}
-              onChange={(e) => setDecision(e.target.value)}
-              style={{ flexBasis: '100%' }}
-            />
-          )}
-          <button disabled={!allowed} title={title} onClick={() => onAdvance(next, closing ? decision.trim() : undefined)}>
-            {closing ? 'Close CAPA' : `Advance to ${CAPA_STATUS_LABELS[next]}`}
+          <button disabled={!advanceAllowed} title={advanceTitle} onClick={() => onAdvance(next)}>
+            {`Advance to ${CAPA_STATUS_LABELS[next]}`}
           </button>
         </div>
       )}
-      {reason && roleOk && ready && <p className="sod-note">{reason}</p>}
+      {reviewing && (
+        <div className="form">
+          <h5>Effectiveness review</h5>
+          <label>
+            Outcome
+            <select aria-label="Review outcome" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
+              <option value="">Choose…</option>
+              <option value="effective">Effective — close the CAPA</option>
+              <option value="ineffective">Ineffective — return to Action In Progress</option>
+            </select>
+          </label>
+          <label>
+            Rationale
+            <input
+              aria-label="Review rationale"
+              placeholder="Document the rationale…"
+              value={rationale}
+              onChange={(e) => setRationale(e.target.value)}
+            />
+          </label>
+          <fieldset>
+            <legend>Current-cycle effectiveness evidence</legend>
+            {qualifying.length === 0 && <p className="empty">None yet — add effectiveness evidence below.</p>}
+            {qualifying.map((e) => (
+              <label key={e.id}>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(e.id)}
+                  onChange={() => toggle(e.id)}
+                />{' '}
+                {e.label} <span className="holder">({e.holder})</span>
+              </label>
+            ))}
+          </fieldset>
+          <div>
+            <button
+              disabled={!reviewAllowed}
+              title={reviewTitle}
+              onClick={() => onReview(outcome, rationale.trim(), selected)}
+            >
+              {outcome === 'ineffective' ? 'Record Ineffective Review' : 'Record Effective Review'}
+            </button>
+          </div>
+        </div>
+      )}
+      {note && noteRoleOk && ready && <p className="sod-note">{note}</p>}
+      {(capa.effectivenessReviews ?? []).length > 0 && (
+        <>
+          <h5>Review history ({(capa.effectivenessReviews ?? []).length})</h5>
+          <ol className="trail">
+            {(capa.effectivenessReviews ?? []).map((r) => (
+              <li key={r.seq}>
+                <code>#{r.seq}</code> {r.outcome} · {userName.get(r.reviewerId) ?? r.reviewerId} ·{' '}
+                {new Date(r.at).toLocaleString()}
+                <div className="trail-detail">{r.rationale} (evidence: {r.evidenceIds.length})</div>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
       <h5>Evidence ({capa.evidence.length})</h5>
       {capa.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
       <ul className="evidence">
@@ -738,7 +811,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
           <li key={e.id} className="evidence-item">
             <div className="evidence-row">
               <span>{e.label}</span>
-              <span className="holder">Holder: {e.holder}</span>
+              <span className="holder">Holder: {e.holder} · {e.kind === 'effectiveness' ? 'Effectiveness' : 'Implementation'}</span>
             </div>
             {(e.custody ?? []).length > 0 && (
               <ol className="custody">
@@ -756,7 +829,13 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
         ))}
       </ul>
       {ready && can(me, 'capa.evidence.add', capa) && capa.status !== 'closed' && (
-        <EvidenceForm onAdd={onAddEvidence} />
+        <EvidenceForm
+          onAdd={onAddEvidence}
+          kinds={[
+            { value: 'implementation', label: 'Implementation' },
+            { value: 'effectiveness', label: 'Effectiveness' }
+          ]}
+        />
       )}
       <h5>Record history (append-only)</h5>
       {trail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
@@ -833,21 +912,29 @@ function NewTaskForm({ orgId, domains, users, onSubmit }: { orgId: string; domai
   );
 }
 
-function EvidenceForm({ onAdd }: { onAdd: (label: string, holder: string) => void }): JSX.Element {
+function EvidenceForm({ onAdd, kinds }: { onAdd: (label: string, holder: string, kind?: string) => void; kinds?: Array<{ value: string; label: string }> }): JSX.Element {
   const [label, setLabel] = useState('');
   const [holder, setHolder] = useState('');
+  const [kind, setKind] = useState(kinds?.[0]?.value ?? '');
   return (
     <form
       className="form inline"
       onSubmit={(e) => {
         e.preventDefault();
-        onAdd(label, holder);
+        onAdd(label, holder, kinds ? kind : undefined);
         setLabel('');
         setHolder('');
       }}
     >
       <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" required />
       <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" required />
+      {kinds && (
+        <select aria-label="Evidence kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+          {kinds.map((k) => (
+            <option key={k.value} value={k.value}>{k.label}</option>
+          ))}
+        </select>
+      )}
       <button type="submit">Add evidence</button>
     </form>
   );
