@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { seedDatabase } from '../seed.js';
 import { verifyAuditChain } from '../store.js';
+import { requiredEvidenceCount } from '../../shared/evidence.js';
 
 describe('synthetic demo data', () => {
   it('seeds a 25-bed critical access hospital plus clinic and cannabis orgs', () => {
@@ -58,5 +59,25 @@ describe('synthetic demo data', () => {
       }
     }
     assert.ok(count > 0);
+  });
+
+  it('D4b: every submitted/verified seed task meets its evidence requirement', () => {
+    const db = seedDatabase();
+    let count = 0;
+    for (const t of db.tasks) {
+      if (t.status !== 'submitted' && t.status !== 'verified') continue;
+      count++;
+      const required = requiredEvidenceCount(t, db.templates);
+      assert.ok(
+        t.evidence.length >= required,
+        `${t.id}: has ${t.evidence.length}, requires ${required}`
+      );
+      for (const e of t.evidence) {
+        assert.ok(e.custody.length > 0, `${t.id}/${e.id}: missing custody`);
+        assert.equal(e.custody[0].seq, 1);
+        assert.equal(e.custody[0].fromHolder, null);
+      }
+    }
+    assert.ok(count > 0, 'expected seeded submitted/verified tasks');
   });
 });

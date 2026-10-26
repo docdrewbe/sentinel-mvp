@@ -107,7 +107,8 @@ const SEED_TASKS: SeedTask[] = [
     title: 'Patient rights signage check — all units',
     ownerId: 'u-staff',
     dueIn: -10,
-    status: 'submitted'
+    status: 'submitted',
+    evidence: [{ label: 'Unit signage checklist (simulated)', holder: 'T. Nguyen' }]
   },
   {
     key: 'task-baa',
@@ -146,7 +147,8 @@ const SEED_TASKS: SeedTask[] = [
     title: 'Emergency contacts posted at reception',
     ownerId: 'u-clinic-staff',
     dueIn: -6,
-    status: 'verified'
+    status: 'verified',
+    evidence: [{ label: 'Reception photo log (simulated)', holder: 'R. Gomez' }]
   },
   // --- Cannabis microbusiness (secondary demo: model portability) ---
   {

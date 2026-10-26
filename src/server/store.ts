@@ -331,8 +331,13 @@ function assertNotLocked(task: ComplianceTask): void {
   }
 }
 
-/** D4: explain what evidence a blocked submission is missing. */
-function submissionBlockMessage(db: DbShape, task: ComplianceTask, required: number): string {
+/** D4/D4b: explain what evidence a blocked submission or verification lacks. */
+function evidenceBlockMessage(
+  db: DbShape,
+  task: ComplianceTask,
+  required: number,
+  action: 'Submission' | 'Verification'
+): string {
   const template = task.templateId ? db.templates.find((t) => t.id === task.templateId) : undefined;
   const items = required === 1 ? '1 evidence item' : `${required} evidence items`;
   // Name the template only when its own list drives the count; the D4a floor
@@ -341,7 +346,8 @@ function submissionBlockMessage(db: DbShape, task: ComplianceTask, required: num
     template && template.evidenceRequired.length > 0
       ? ` (template '${template.title}' requires ${required})`
       : '';
-  return `Submission requires at least ${items}${source}.`;
+  const have = action === 'Verification' ? ` (has ${task.evidence.length})` : '';
+  return `${action} requires at least ${items}${have}${source}.`;
 }
 
 export function updateTask(
@@ -377,10 +383,14 @@ export function updateTask(
         `Illegal status transition from '${task.status}' to '${patch.status}'.`
       );
     }
-    if (patch.status === 'submitted' && task.status !== 'submitted') {
+    if (
+      (patch.status === 'submitted' && task.status !== 'submitted') ||
+      (patch.status === 'verified' && task.status !== 'verified')
+    ) {
       const required = requiredEvidenceCount(task, db.templates);
       if (task.evidence.length < required) {
-        throw new ValidationError(submissionBlockMessage(db, task, required));
+        const action = patch.status === 'verified' ? 'Verification' : 'Submission';
+        throw new ValidationError(evidenceBlockMessage(db, task, required, action));
       }
     }
     task.status = patch.status;

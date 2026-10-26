@@ -1227,3 +1227,142 @@ describe('D4a zero-requirement templates (HTTP)', () => {
     }
   });
 });
+
+describe('D4b verification evidence gate (HTTP)', () => {
+  interface TaskJson {
+    id: string;
+    status: string;
+    evidence: Array<Record<string, unknown>>;
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  it('rejects verifying legacy submitted tasks with zero evidence', async () => {
+    const { db, base, close } = await startServer((seeded) => {
+      const legacy = seeded.tasks.find((t) => t.id === 'task-sharps-log');
+      assert.ok(legacy);
+      legacy.status = 'submitted';
+      legacy.evidence = [];
+    });
+    try {
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-officer', 'org-cah', 'task-sharps-log');
+      const audits = await auditTotal(base, 'u-officer');
+      for (const verifier of ['u-officer', 'u-admin']) {
+        const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', verifier, {
+          status: 'verified'
+        });
+        assert.equal(denied.status, 400);
+        assert.equal(
+          denied.json.error,
+          'Verification requires at least 1 evidence item (has 0).'
+        );
+      }
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', 'task-sharps-log'), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('enforces template counts at verification too', async () => {
+    const at = new Date().toISOString();
+    const { db, base, close } = await startServer((seeded) => {
+      const legacy = seeded.tasks.find((t) => t.id === 'task-sharps-log');
+      assert.ok(legacy);
+      legacy.status = 'submitted';
+      legacy.templateId = 'tpl-emergency-drill';
+      legacy.evidence = [
+        {
+          id: 'task-sharps-log-ev1',
+          label: 'drill log (simulated)',
+          holder: 'M. Lee',
+          custody: [{ seq: 1, fromHolder: null, toHolder: 'M. Lee', byUserId: 'u-officer', at }],
+          updatedAt: at
+        }
+      ];
+    });
+    try {
+      const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(
+        denied.json.error,
+        "Verification requires at least 2 evidence items (has 1) (template 'Emergency preparedness drill and review' requires 2)."
+      );
+      const added = await call(base, 'POST', '/api/tasks/task-sharps-log/evidence', 'u-officer', {
+        label: 'after-action note (simulated)',
+        holder: 'M. Lee'
+      });
+      assert.equal(added.status, 201);
+      const ok = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps the normal submit-then-verify path working and locked', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D4b probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'attachment (simulated)',
+            holder: 'M. Lee'
+          })
+        ).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', { status: 'submitted' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'verified' })).status,
+        200
+      );
+      const locked = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        title: 'edited after lock'
+      });
+      assert.equal(locked.status, 400);
+      assert.equal((await getTask(base, 'u-officer', 'org-cah', id)).status, 'verified');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('guard: the suite never touches the live database file', () => {
+    assert.ok(dataFile.startsWith(workdir), `data file ${dataFile} is not the temp copy`);
+    assert.notEqual(dataFile, join(process.cwd(), 'data', 'sentinel.json'));
+  });
+});
