@@ -173,6 +173,12 @@ button.primary:hover { background: var(--accent-dark); }
 .trail li { margin-bottom: 8px; }
 .trail-detail { color: var(--muted); }
 
+.panel-error {
+  color: var(--red);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
 .error {
   margin: 12px auto 0; max-width: 1280px;
   background: #f9dcd9; color: #7a1a14;

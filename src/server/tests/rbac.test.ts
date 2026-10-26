@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { can } from '../../shared/rbac.js';
+import { can, visibleOrgIds } from '../../shared/rbac.js';
 import type { ComplianceTask, DemoUser } from '../../shared/types.js';
 
 const task = (over: Partial<ComplianceTask> = {}): ComplianceTask => ({
@@ -53,5 +53,22 @@ describe('role-based workflows (simulated)', () => {
     const other = task({ orgId: 'org-clinic', ownerId: 'u-clinic-staff' });
     assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'task.update', other), false);
     assert.equal(can(user({ role: 'staff' }), 'evidence.add', other), false);
+  });
+});
+
+describe('organization visibility (F3)', () => {
+  const all = ['org-cah', 'org-clinic', 'org-canna'];
+
+  it('scopes managers and staff to their own org', () => {
+    assert.deepEqual(
+      visibleOrgIds(user({ role: 'department_manager', orgId: 'org-cah' }), all),
+      ['org-cah']
+    );
+    assert.deepEqual(visibleOrgIds(user({ role: 'staff', orgId: 'org-clinic' }), all), ['org-clinic']);
+  });
+
+  it('grants admin and officer the documented cross-org demo privilege', () => {
+    assert.deepEqual(visibleOrgIds(user({ role: 'administrator' }), all), all);
+    assert.deepEqual(visibleOrgIds(user({ role: 'compliance_officer' }), all), all);
   });
 });

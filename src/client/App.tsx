@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
-import { can } from '../shared/rbac.js';
+import { can, visibleOrgIds } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
+import { resolveOrgId, settlePanels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -28,6 +29,9 @@ export default function App(): JSX.Element {
   const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState('');
+  const [panelErrors, setPanelErrors] = useState<
+    Partial<Record<'tasks' | 'domains' | 'audit' | 'templates', string>>
+  >({});
 
   const me = users.find((u) => u.id === userId) ?? null;
   const org = orgs.find((o) => o.id === orgId) ?? null;
@@ -36,19 +40,26 @@ export default function App(): JSX.Element {
   const userName = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
   const domainById = useMemo(() => new Map(domains.map((d) => [d.id, d])), [domains]);
   const templateById = useMemo(() => new Map(templates.map((x) => [x.id, x])), [templates]);
+  const orgIds = useMemo(() => orgs.map((o) => o.id), [orgs]);
+  const visibleOrgs = useMemo(
+    () => (me ? orgs.filter((o) => visibleOrgIds(me, orgIds).includes(o.id)) : orgs),
+    [me, orgs, orgIds]
+  );
 
   const refresh = useCallback(async (oid: string) => {
     if (!oid) return;
-    const [t, d, a, tpl] = await Promise.all([
+    const [t, d, a, tpl] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
       api.templates(oid)
     ]);
-    setTasks(t);
-    setDomains(d);
-    setAudit(a);
-    setTemplates(tpl);
+    const { values, errors } = settlePanels(t, d, a, tpl);
+    if (values.tasks !== undefined) setTasks(values.tasks);
+    if (values.domains !== undefined) setDomains(values.domains);
+    if (values.audit !== undefined) setAudit(values.audit);
+    if (values.templates !== undefined) setTemplates(values.templates);
+    setPanelErrors(errors);
   }, []);
 
   useEffect(() => {
@@ -74,10 +85,18 @@ export default function App(): JSX.Element {
   }, [userId]);
 
   useEffect(() => {
+    const current = users.find((u) => u.id === userId) ?? null;
+    if (!current || orgs.length === 0 || !orgId) return;
+    const resolved = resolveOrgId(orgs, current, orgId);
+    if (resolved !== orgId) {
+      setOrgId(resolved);
+      return;
+    }
     setTaskId(null);
     setInstantiateFor(null);
+    setError('');
     refresh(orgId).catch((e: Error) => setError(e.message));
-  }, [orgId, refresh]);
+  }, [userId, orgId, users, orgs, refresh]);
 
   const run = async (fn: () => Promise<unknown>): Promise<void> => {
     setError('');
@@ -124,7 +143,7 @@ export default function App(): JSX.Element {
           <label>
             Organization
             <select value={orgId} onChange={(e) => setOrgId(e.target.value)}>
-              {orgs.map((o) => (
+              {visibleOrgs.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.name} ({KIND_LABELS[o.kind]})
                 </option>
@@ -193,6 +212,8 @@ export default function App(): JSX.Element {
                 )}
               </div>
             </div>
+            {panelErrors.tasks && <p className="panel-error" role="alert">Tasks: {panelErrors.tasks}</p>}
+            {panelErrors.domains && <p className="panel-error" role="alert">Regulatory domains: {panelErrors.domains}</p>}
             {showNew && me && org && (
               <NewTaskForm
                 orgId={org.id}
@@ -305,6 +326,7 @@ export default function App(): JSX.Element {
               </select>
             </div>
           </div>
+          {panelErrors.templates && <p className="panel-error" role="alert">Templates: {panelErrors.templates}</p>}
           <table>
             <thead>
               <tr>
@@ -377,6 +399,7 @@ export default function App(): JSX.Element {
           <div className="panel-head">
             <h3>Audit event log (append-only, hash-chained — simulated)</h3>
           </div>
+          {panelErrors.audit && <p className="panel-error" role="alert">Audit log: {panelErrors.audit}</p>}
           <table>
             <thead>
               <tr>

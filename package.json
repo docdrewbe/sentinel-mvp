@@ -10,7 +10,7 @@
     "dev:client": "vite",
     "build": "vite build",
     "start": "npm run build && tsx src/server/index.ts",
-    "test": "tsx --test \"src/server/tests/*.test.ts\"",
+    "test": "tsx --test \"src/*/tests/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
