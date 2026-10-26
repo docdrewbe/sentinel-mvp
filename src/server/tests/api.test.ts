@@ -190,3 +190,157 @@ describe('D1 atomic persistence (HTTP)', () => {
     }
   });
 });
+
+describe('D2 verified-record locking (HTTP)', () => {
+  async function taskJson(
+    base: string,
+    userId: string,
+    id: string
+  ): Promise<Record<string, unknown>> {
+    const res = await call(base, 'GET', '/api/tasks?orgId=org-cah', userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as Array<Record<string, unknown>>;
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible to ${userId}`);
+    return found;
+  }
+
+  async function auditCount(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  it('rejects field edits on verified tasks for admin, officer, and manager', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const patches: Array<Record<string, string>> = [
+        { title: 'renamed after verification' },
+        { ownerId: 'u-staff' },
+        { dueDate: '2027-01-01' },
+        { domainId: 'dom-osha-h' },
+        {}
+      ];
+      for (const userId of ['u-admin', 'u-officer', 'u-nurse-mgr']) {
+        for (const patch of patches) {
+          const before = await taskJson(base, userId, 'task-baa');
+          const audits = await auditCount(base, userId);
+          const res = await call(base, 'PATCH', '/api/tasks/task-baa', userId, patch);
+          assert.equal(res.status, 400, `${userId} ${JSON.stringify(patch)}`);
+          assert.equal(res.json.error, 'Verified records are locked.');
+          assert.deepEqual(await taskJson(base, userId, 'task-baa'), before);
+          assert.equal(await auditCount(base, userId), audits);
+        }
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects staff-owner edits and evidence on their own verified task', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D2 staff probe task',
+        ownerId: 'u-staff',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-staff', { status: 'submitted' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'verified' })).status,
+        200
+      );
+      const before = await taskJson(base, 'u-staff', id);
+      const audits = await auditCount(base, 'u-staff');
+      const renamed = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-staff', {
+        title: 'staff rename after verification'
+      });
+      assert.equal(renamed.status, 400);
+      assert.equal(renamed.json.error, 'Verified records are locked.');
+      const ev = await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-staff', {
+        label: 'late photo (simulated)',
+        holder: 'T. Nguyen'
+      });
+      assert.equal(ev.status, 400);
+      assert.equal(ev.json.error, 'Verified records are locked.');
+      assert.deepEqual(await taskJson(base, 'u-staff', id), before);
+      assert.equal(await auditCount(base, 'u-staff'), audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects evidence additions and custody transfers on verified tasks', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      for (const userId of ['u-admin', 'u-officer', 'u-nurse-mgr']) {
+        const before = await taskJson(base, userId, 'task-baa');
+        const audits = await auditCount(base, userId);
+        const evidence = before.evidence as Array<Record<string, unknown>>;
+        assert.ok(evidence.length > 0);
+        const ev = await call(base, 'POST', '/api/tasks/task-baa/evidence', userId, {
+          label: 'late addition (simulated)',
+          holder: 'J. Ortiz'
+        });
+        assert.equal(ev.status, 400, userId);
+        assert.equal(ev.json.error, 'Verified records are locked.');
+        const tr = await call(base, 'POST', '/api/tasks/task-baa/transfer', userId, {
+          evidenceId: String(evidence[0].id),
+          toHolder: 'Archive'
+        });
+        assert.equal(tr.status, 400, userId);
+        assert.equal(tr.json.error, 'Verified records are locked.');
+        assert.deepEqual(await taskJson(base, userId, 'task-baa'), before);
+        assert.equal(await auditCount(base, userId), audits);
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('still denies staff custody transfer by role without touching data', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const before = await taskJson(base, 'u-staff', 'task-baa');
+      const audits = await auditCount(base, 'u-staff');
+      const evidence = before.evidence as Array<Record<string, unknown>>;
+      const tr = await call(base, 'POST', '/api/tasks/task-baa/transfer', 'u-staff', {
+        evidenceId: String(evidence[0].id),
+        toHolder: 'Archive'
+      });
+      assert.equal(tr.status, 403);
+      assert.deepEqual(await taskJson(base, 'u-staff', 'task-baa'), before);
+      assert.equal(await auditCount(base, 'u-staff'), audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects status changes out of verified but allows edits on unverified tasks', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const reopen = await call(base, 'PATCH', '/api/tasks/task-baa', 'u-officer', {
+        status: 'open'
+      });
+      assert.equal(reopen.status, 400);
+      const ok = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-nurse-mgr', {
+        title: 'OSHA sharps injury log — quarterly review (retitled)'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

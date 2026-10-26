@@ -263,6 +263,13 @@ export function createTask(db: DbShape, input: TaskInput): ComplianceTask {
   return task;
 }
 
+/** D2: verified records are immutable. No reopen/amendment workflow exists yet. */
+function assertNotLocked(task: ComplianceTask): void {
+  if (task.status === 'verified') {
+    throw new ValidationError('Verified records are locked.');
+  }
+}
+
 export function updateTask(
   db: DbShape,
   id: string,
@@ -270,6 +277,7 @@ export function updateTask(
 ): ComplianceTask {
   const task = db.tasks.find((t) => t.id === id);
   if (!task) throw new ValidationError('Task not found.');
+  assertNotLocked(task);
   if (patch.title !== undefined) {
     if (!patch.title.trim()) throw new ValidationError('Title must not be empty.');
     task.title = patch.title.trim();
@@ -313,6 +321,7 @@ export function addEvidence(
 ): EvidenceRef {
   const task = db.tasks.find((t) => t.id === taskId);
   if (!task) throw new ValidationError('Task not found.');
+  assertNotLocked(task);
   if (!input.label.trim()) throw new ValidationError('Evidence label is required.');
   if (!input.holder.trim()) throw new ValidationError('Evidence holder is required.');
   const ref: EvidenceRef = {
@@ -333,6 +342,7 @@ export function transferCustody(
 ): EvidenceRef {
   const task = db.tasks.find((t) => t.id === taskId);
   if (!task) throw new ValidationError('Task not found.');
+  assertNotLocked(task);
   const ref = task.evidence.find((e) => e.id === input.evidenceId);
   if (!ref) throw new ValidationError('Evidence item not found on this task.');
   if (!input.toHolder.trim()) throw new ValidationError('New holder is required.');
