@@ -116,6 +116,16 @@ export function latestReviewEntryAt(capa: Pick<CapaRecord, 'statusHistory'>): st
  * Effectiveness evidence belonging to the current review cycle: kind-tagged
  * items whose custody genesis postdates the latest review entry. Used by the
  * review endpoint (enforced) and the dashboard picker (mirrored).
+ *
+ * KNOWN LIMITATION (fail-closed, no bypass): a CAPA at
+ * effectiveness_review with no recorded statusHistory entry for that
+ * status — possible only for legacy records predating history tracking —
+ * yields no qualifying evidence, so the review endpoint rejects every
+ * review with 'Each referenced evidence item must be current-cycle
+ * effectiveness evidence.' That record is unclosable through the API until
+ * its history is repaired out of band. Deliberately no recovery bypass is
+ * offered here: any bypass would let a caller launder pre-review evidence
+ * into a review cycle. See the C2 regression tests for the rejection path.
  */
 export function qualifyingEffectivenessEvidence(
   capa: Pick<CapaRecord, 'evidence' | 'statusHistory'>

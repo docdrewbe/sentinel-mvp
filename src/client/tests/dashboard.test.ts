@@ -12,6 +12,7 @@ import {
   reopenBlockReason,
   requiredEvidenceFor,
   resolveOrgId,
+  reviewEvidenceLabels,
   settlePanels,
   startBlockReason,
   startButtonLabel,
@@ -456,7 +457,7 @@ describe('action-button states (unit)', () => {
 });
 
 describe('CAPA review gate and send-back label (unit)', () => {
-  const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must not have owned it or contributed to its work.';
   const check = (genesis: string) => ({
     id: 'ev-check',
     label: 'check',
@@ -595,5 +596,24 @@ describe('CAPA advance gate (C5)', () => {
       capaAdvanceBlockReason(mgr, capa({ status: 'effectiveness_review', ...gated })),
       'Close via an effectiveness review.'
     );
+  });
+});
+
+describe('review history evidence traceability (P4)', () => {
+  const evidence = [
+    { id: 'e1', label: '30-day log audit (simulated)' },
+    { id: 'e2', label: 'Supervisor spot-check (simulated)' }
+  ];
+
+  it('names each supporting item, falling back to the id', () => {
+    assert.deepEqual(reviewEvidenceLabels(evidence, ['e1', 'e2']), [
+      '30-day log audit (simulated)',
+      'Supervisor spot-check (simulated)'
+    ]);
+    assert.deepEqual(reviewEvidenceLabels(evidence, ['e2', 'e-gone']), [
+      'Supervisor spot-check (simulated)',
+      'e-gone'
+    ]);
+    assert.deepEqual(reviewEvidenceLabels(evidence, []), []);
   });
 });

@@ -4,7 +4,7 @@ import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, 
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
 import { qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { CAPA_NEXT, applySettled, beginContext, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -782,7 +782,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
               title={reviewTitle}
               onClick={() => onReview(outcome, rationale.trim(), selected)}
             >
-              {outcome === 'ineffective' ? 'Record Ineffective Review' : 'Record Effective Review'}
+              {!outcome ? 'Record review' : outcome === 'ineffective' ? 'Record Ineffective Review' : 'Record Effective Review'}
             </button>
           </div>
         </div>
@@ -796,7 +796,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
               <li key={r.seq}>
                 <code>#{r.seq}</code> {r.outcome} · {userName.get(r.reviewerId) ?? r.reviewerId} ·{' '}
                 {new Date(r.at).toLocaleString()}
-                <div className="trail-detail">{r.rationale} (evidence: {r.evidenceIds.length})</div>
+                <div className="trail-detail">{r.rationale} (evidence: {reviewEvidenceLabels(capa.evidence, r.evidenceIds).join('; ') || 'none'})</div>
               </li>
             ))}
           </ol>

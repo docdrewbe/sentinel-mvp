@@ -277,7 +277,7 @@ export const CAPA_SEVERITY_LABELS: Record<CapaSeverity, string> = {
 
 /** CAPA closure independence rule (server-enforced; the dashboard mirrors it). */
 export const CAPA_CLOSE_SOD_MESSAGE =
-  'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+  'Separation of duties: the reviewer closing a CAPA must not have owned it or contributed to its work.';
 
 /**
  * C3: every privileged user contributed to or owned the CAPA, so no

@@ -536,6 +536,26 @@ export function createApp(db: DbShape): express.Express {
       const oldStatus = capa.status;
       const ownerBefore = capa.ownerId;
       const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
+      // Polish: a request carrying only ignored or unchanged fields changes
+      // nothing, so return the record without an audit event or a save.
+      // Authorization above still applies: unauthorized no-ops are rejected.
+      const textChanged = (current: string | undefined, incoming: string | undefined): boolean =>
+        incoming !== undefined && incoming.trim() !== (current ?? '');
+      const fieldChanged =
+        textChanged(capa.finding, patch.finding) ||
+        (patch.severity !== undefined && patch.severity !== capa.severity) ||
+        textChanged(capa.containment, patch.containment) ||
+        textChanged(capa.rootCause, patch.rootCause) ||
+        (patch.ownerId !== undefined && patch.ownerId !== capa.ownerId) ||
+        (patch.dueDate !== undefined && patch.dueDate !== capa.dueDate) ||
+        (patch.domainId !== undefined && patch.domainId !== capa.domainId) ||
+        textChanged(capa.correctivePlan, patch.correctivePlan) ||
+        textChanged(capa.preventivePlan, patch.preventivePlan) ||
+        textChanged(capa.effectivenessCriteria, patch.effectivenessCriteria);
+      if (!statusChanged && !fieldChanged) {
+        res.json(capa);
+        return;
+      }
       const updated = mutateDb(db, () => {
         const next = updateCapa(db, capa.id, {
           ...(patch.finding !== undefined ? { finding: patch.finding } : {}),

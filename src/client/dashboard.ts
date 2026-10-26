@@ -10,6 +10,7 @@ import type {
   CapaStatus,
   ComplianceTask,
   DemoUser,
+  EvidenceRef,
   Organization,
   RegulatoryDomain,
   TaskTemplate
@@ -287,6 +288,19 @@ export function capaReviewBlockReason(
     return 'At least 1 current-cycle effectiveness evidence item is required to review.';
   }
   return null;
+}
+
+/**
+ * Polish: review history names each supporting evidence item (falling back
+ * to the id when the item is gone) instead of showing only a count. Labels
+ * come from the already tenant-scoped record, so no new data is exposed.
+ */
+export function reviewEvidenceLabels(
+  evidence: Pick<EvidenceRef, 'id' | 'label'>[],
+  evidenceIds: string[]
+): string[] {
+  const label = new Map(evidence.map((e) => [e.id, e.label]));
+  return evidenceIds.map((id) => label.get(id) ?? id);
 }
 
 /** Task action label: returning a submitted task to in-progress reads as a send-back. */

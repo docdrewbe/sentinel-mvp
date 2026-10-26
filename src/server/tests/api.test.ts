@@ -2534,7 +2534,7 @@ describe('second compliance officer (HTTP)', () => {
 });
 
 describe('CAPA lifecycle (HTTP)', () => {
-  const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must not have owned it or contributed to its work.';
 
   interface CapaJson {
     id: string;
@@ -3567,7 +3567,7 @@ describe('C2 effectiveness reviews (HTTP)', () => {
 });
 
 describe('C3 CAPA reviewer independence (HTTP)', () => {
-  const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must not have owned it or contributed to its work.';
   const DEADLOCK =
     'No eligible independent reviewer: all privileged users contributed to or owned this CAPA.';
 
@@ -4248,6 +4248,131 @@ describe('C5 CAPA workflow ordering and authority (HTTP)', () => {
       assert.equal(direct.status, 400);
       assert.equal(direct.json.error, 'Close via an effectiveness review.');
       assert.equal((await getCapa(base, 'u-officer', 'org-cah', id)).status, 'effectiveness_review');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('CAPA polish: no-op PATCH writes nothing (HTTP)', () => {
+  interface CapaJson {
+    id: string;
+    status: string;
+    finding: string;
+    severity: string;
+    ownerId: string;
+    dueDate: string;
+    containment?: string;
+    rootCause?: string;
+    actionsBy?: string[];
+    updatedAt: string;
+  }
+
+  async function getCapa(base: string, userId: string, id: string): Promise<CapaJson> {
+    const res = await call(base, 'GET', '/api/capas?orgId=org-cah', userId);
+    assert.equal(res.status, 200);
+    const capas = res.json as unknown as CapaJson[];
+    const found = capas.find((c) => c.id === id);
+    assert.ok(found, `capa ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeCapa(base: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'Polish probe finding (simulated).',
+      severity: 'medium',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2026-12-01',
+      containment: 'Held (simulated).'
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  it('returns the record without audit or save for ignored/unchanged/empty patches', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base);
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base);
+      const bodies = [
+        {},
+        { evidence: [{ id: 'forged', holder: 'Mallory', custody: [] }], closedBy: 'u-officer' },
+        {
+          finding: before.finding,
+          severity: before.severity,
+          ownerId: before.ownerId,
+          dueDate: before.dueDate,
+          containment: before.containment,
+          status: before.status
+        },
+        { rootCause: '' }
+      ];
+      for (const body of bodies) {
+        const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', body);
+        assert.equal(res.status, 200);
+        assert.deepEqual(res.json, before);
+      }
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      // A real change still audits and saves.
+      const edited = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+        finding: 'Polish probe finding, clarified (simulated).'
+      });
+      assert.equal(edited.status, 200);
+      assert.equal(await auditTotal(base), audits + 1);
+      assert.notEqual(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not taint reviewers with unchanged resubmissions', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base);
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const audits = await auditTotal(base);
+      const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        containment: before.containment
+      });
+      assert.equal(res.status, 200);
+      const after = await getCapa(base, 'u-nurse-mgr', id);
+      assert.deepEqual(after.actionsBy ?? [], before.actionsBy ?? []);
+      assert.equal(await auditTotal(base), audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('still rejects unauthorized no-op patches', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base);
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base);
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-clinic-staff', {})).status, 403);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-staff', { finding: before.finding })).status,
+        403
+      );
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assertDiskMatchesMemory(db);
     } finally {
       await close();
