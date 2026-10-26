@@ -3,7 +3,15 @@
 // SIMULATED tamper-evidence for demo purposes only: the SHA-256 chain makes
 // casual edits detectable, but file-level protection is NOT production-ready.
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync as fsRenameSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
   AuditEvent,
@@ -51,12 +59,91 @@ export function loadDb(): DbShape {
   return { ...emptyDb(), ...raw };
 }
 
+// Rename step behind a seam so tests can deterministically simulate the
+// intermittent Windows rename failures (EPERM/EBUSY from antivirus/indexers).
+let renameImpl: (tmp: string, file: string) => void = (tmp, file) => fsRenameSync(tmp, file);
+
+/** Test-only seam: replace the atomic rename step, or pass null to restore it. */
+export function __setRenameImpl(impl: ((tmp: string, file: string) => void) | null): void {
+  renameImpl = impl ?? ((tmp, file) => fsRenameSync(tmp, file));
+}
+
+const RETRYABLE_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+function isRetryable(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && RETRYABLE_CODES.has(code);
+}
+
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Persist the whole database with one atomic file replace. On Windows the
+ * rename intermittently fails while the target is briefly locked, so retry a
+ * few times with backoff; on final failure remove the temp file and throw.
+ */
 export function saveDb(db: DbShape): void {
   const file = dataFilePath();
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
-  renameSync(tmp, file); // atomic replace so a crash never leaves a half-written DB
+  try {
+    writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best effort */
+    }
+    throw e;
+  }
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      renameImpl(tmp, file); // atomic replace so a crash never leaves a half-written DB
+      return;
+    } catch (e) {
+      lastError = e;
+      if (!isRetryable(e) || attempt === 6) break;
+      sleepMs(50 * attempt);
+    }
+  }
+  try {
+    unlinkSync(tmp);
+  } catch {
+    /* best effort */
+  }
+  throw lastError;
+}
+
+/** Temp files left by an interrupted save. Callers must warn, never auto-apply. */
+export function findOrphanedTempFiles(): string[] {
+  const file = dataFilePath();
+  const dir = dirname(file);
+  const base = file.split(/[\\/]/).pop() ?? '';
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.startsWith(`${base}.`) && name.endsWith('.tmp'))
+    .map((name) => join(dir, name));
+}
+
+/**
+ * Run in-memory mutations and persist them with a single write. If anything
+ * fails (including the write itself), in-memory state is rolled back to the
+ * snapshot taken beforehand, so callers never observe a partial change.
+ */
+export function mutateDb<T>(db: DbShape, fn: () => T): T {
+  const snapshot = structuredClone(db);
+  try {
+    const result = fn();
+    saveDb(db);
+    return result;
+  } catch (e) {
+    for (const key of Object.keys(db)) delete (db as unknown as Record<string, unknown>)[key];
+    Object.assign(db, snapshot);
+    throw e;
+  }
 }
 
 type HashableEvent = Omit<AuditEvent, 'hash'>;
@@ -108,6 +195,9 @@ export function verifyAuditChain(audit: AuditEvent[]): { ok: boolean; badSeq?: n
 // Audit writer. APPEND-ONLY by design: this module intentionally exposes NO
 // update or delete function for audit events, and the API exposes no
 // POST/PUT/PATCH/DELETE route for them either.
+//
+// Appends in memory only; the caller must persist via mutateDb/saveDb so each
+// state change and its audit event are written together, atomically.
 // ---------------------------------------------------------------------------
 export function appendAudit(
   db: DbShape,
@@ -115,7 +205,6 @@ export function appendAudit(
 ): AuditEvent {
   const event = buildAuditEvent(db.audit, input);
   db.audit.push(event);
-  saveDb(db);
   return event;
 }
 
@@ -171,7 +260,6 @@ export function createTask(db: DbShape, input: TaskInput): ComplianceTask {
     updatedAt: now
   };
   db.tasks.push(task);
-  saveDb(db);
   return task;
 }
 
@@ -210,7 +298,6 @@ export function updateTask(
     task.status = patch.status;
   }
   task.updatedAt = new Date().toISOString();
-  saveDb(db);
   return task;
 }
 
@@ -236,7 +323,6 @@ export function addEvidence(
   };
   task.evidence.push(ref);
   task.updatedAt = ref.updatedAt;
-  saveDb(db);
   return ref;
 }
 
@@ -256,7 +342,6 @@ export function transferCustody(
   ref.holder = input.toHolder.trim();
   ref.updatedAt = new Date().toISOString();
   task.updatedAt = ref.updatedAt;
-  saveDb(db);
   return ref;
 }
 
@@ -336,7 +421,6 @@ export function createTemplate(db: DbShape, input: TemplateInput): TaskTemplate 
     updatedAt: now
   };
   db.templates.push(template);
-  saveDb(db);
   return template;
 }
 
@@ -385,7 +469,6 @@ export function updateTemplate(
     active: patch.active ?? template.active,
     updatedAt: new Date().toISOString()
   });
-  saveDb(db);
   return template;
 }
 
@@ -409,6 +492,5 @@ export function instantiateTemplate(
     dueDate
   });
   task.templateId = template.id;
-  saveDb(db);
   return task;
 }

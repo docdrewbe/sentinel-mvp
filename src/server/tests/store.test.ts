@@ -1,13 +1,20 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 process.env.SENTINEL_DATA_FILE = join(mkdtempSync(join(tmpdir(), 'sentinel-test-')), 'db.json');
 
-const { appendAudit, emptyDb, verifyAuditChain, createTask, updateTask, ValidationError } =
-  await import('../store.js');
+const {
+  appendAudit,
+  emptyDb,
+  findOrphanedTempFiles,
+  verifyAuditChain,
+  createTask,
+  updateTask,
+  ValidationError
+} = await import('../store.js');
 const { seedDatabase } = await import('../seed.js');
 
 describe('append-only audit log', () => {
@@ -70,5 +77,18 @@ describe('task integrity', () => {
     updateTask(db, task.id, { status: 'submitted' });
     updateTask(db, task.id, { status: 'verified' });
     assert.equal(db.tasks.find((t) => t.id === task.id)?.status, 'verified');
+  });
+});
+
+describe('interrupted-save detection', () => {
+  it('finds orphaned temp files without touching them', () => {
+    assert.deepEqual(findOrphanedTempFiles(), []);
+    const orphan = `${process.env.SENTINEL_DATA_FILE as string}.99999.tmp`;
+    writeFileSync(orphan, '{}');
+    try {
+      assert.deepEqual(findOrphanedTempFiles(), [orphan]);
+    } finally {
+      unlinkSync(orphan);
+    }
   });
 });

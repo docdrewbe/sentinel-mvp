@@ -4,8 +4,14 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from './app.js';
-import { loadDb, saveDb } from './store.js';
+import { findOrphanedTempFiles, loadDb, saveDb } from './store.js';
 import { seedDatabase } from './seed.js';
+
+for (const orphan of findOrphanedTempFiles()) {
+  console.warn(
+    `[sentinel] WARNING: orphaned temp file from an interrupted save (NOT auto-applied): ${orphan}`
+  );
+}
 
 const db = loadDb();
 if (db.orgs.length === 0) {

@@ -11,6 +11,7 @@ import {
   createTask,
   createTemplate,
   instantiateTemplate,
+  mutateDb,
   transferCustody,
   updateTask,
   updateTemplate,
@@ -24,11 +25,12 @@ export interface AuthRequest extends Request {
   user?: DemoUser;
 }
 
-function sendError(res: Response, e: unknown): void {
+function sendError(req: Request, res: Response, e: unknown): void {
   if (e instanceof ValidationError) {
     res.status(400).json({ error: e.message });
     return;
   }
+  console.error(`[sentinel] ${req.method} ${req.path} failed:`, e);
   res.status(500).json({ error: 'Internal error.' });
 }
 
@@ -122,17 +124,20 @@ export function createApp(db: DbShape): express.Express {
       return;
     }
     try {
-      const task = createTask(db, input);
-      appendAudit(db, {
-        actorId: user.id,
-        action: 'task.created',
-        recordType: 'task',
-        recordId: task.id,
-        detail: task.title
+      const task = mutateDb(db, () => {
+        const created = createTask(db, input);
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'task.created',
+          recordType: 'task',
+          recordId: created.id,
+          detail: created.title
+        });
+        return created;
       });
       res.status(201).json(task);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
@@ -174,60 +179,69 @@ export function createApp(db: DbShape): express.Express {
       }
       const oldStatus = task.status;
       const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
-      const updated = updateTask(db, task.id, patch);
-      appendAudit(db, {
-        actorId: user.id,
-        action: statusChanged ? `task.${updated.status}` : 'task.updated',
-        recordType: 'task',
-        recordId: task.id,
-        detail: `${updated.title} [${oldStatus} -> ${updated.status}]`
+      const updated = mutateDb(db, () => {
+        const next = updateTask(db, task.id, patch);
+        appendAudit(db, {
+          actorId: user.id,
+          action: statusChanged ? `task.${next.status}` : 'task.updated',
+          recordType: 'task',
+          recordId: task.id,
+          detail: `${next.title} [${oldStatus} -> ${next.status}]`
+        });
+        return next;
       });
       res.json(updated);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
   app.post('/api/tasks/:id/evidence', need('evidence.add'), (req: AuthRequest, res) => {
     const user = req.user as DemoUser;
     try {
-      const ref = addEvidence(db, req.params.id, {
-        label: String(req.body.label ?? ''),
-        holder: String(req.body.holder ?? '')
-      });
-      appendAudit(db, {
-        actorId: user.id,
-        action: 'evidence.added',
-        recordType: 'task',
-        recordId: req.params.id,
-        detail: `${ref.label} (holder: ${ref.holder})`
+      const ref = mutateDb(db, () => {
+        const added = addEvidence(db, req.params.id, {
+          label: String(req.body.label ?? ''),
+          holder: String(req.body.holder ?? '')
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'evidence.added',
+          recordType: 'task',
+          recordId: req.params.id,
+          detail: `${added.label} (holder: ${added.holder})`
+        });
+        return added;
       });
       res.status(201).json(ref);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
   app.post('/api/tasks/:id/transfer', need('custody.transfer'), (req: AuthRequest, res) => {
     const user = req.user as DemoUser;
     try {
-      const before = db.tasks
-        .find((t) => t.id === req.params.id)
-        ?.evidence.find((e) => e.id === String(req.body.evidenceId ?? ''));
-      const ref = transferCustody(db, req.params.id, {
-        evidenceId: String(req.body.evidenceId ?? ''),
-        toHolder: String(req.body.toHolder ?? '')
-      });
-      appendAudit(db, {
-        actorId: user.id,
-        action: 'custody.transferred',
-        recordType: 'task',
-        recordId: req.params.id,
-        detail: `${ref.label}: ${before?.holder ?? '?'} -> ${ref.holder}`
+      const ref = mutateDb(db, () => {
+        const before = db.tasks
+          .find((t) => t.id === req.params.id)
+          ?.evidence.find((e) => e.id === String(req.body.evidenceId ?? ''));
+        const moved = transferCustody(db, req.params.id, {
+          evidenceId: String(req.body.evidenceId ?? ''),
+          toHolder: String(req.body.toHolder ?? '')
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'custody.transferred',
+          recordType: 'task',
+          recordId: req.params.id,
+          detail: `${moved.label}: ${before?.holder ?? '?'} -> ${moved.holder}`
+        });
+        return moved;
       });
       res.json(ref);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
@@ -252,17 +266,20 @@ export function createApp(db: DbShape): express.Express {
       return;
     }
     try {
-      const template = createTemplate(db, req.body);
-      appendAudit(db, {
-        actorId: user.id,
-        action: 'template.created',
-        recordType: 'template',
-        recordId: template.id,
-        detail: `${template.title} [${template.controlType}]`
+      const template = mutateDb(db, () => {
+        const created = createTemplate(db, req.body);
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'template.created',
+          recordType: 'template',
+          recordId: created.id,
+          detail: `${created.title} [${created.controlType}]`
+        });
+        return created;
       });
       res.status(201).json(template);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
@@ -273,17 +290,20 @@ export function createApp(db: DbShape): express.Express {
       return;
     }
     try {
-      const template = updateTemplate(db, req.params.id, req.body);
-      appendAudit(db, {
-        actorId: user.id,
-        action: 'template.updated',
-        recordType: 'template',
-        recordId: template.id,
-        detail: template.title
+      const template = mutateDb(db, () => {
+        const next = updateTemplate(db, req.params.id, req.body);
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'template.updated',
+          recordType: 'template',
+          recordId: next.id,
+          detail: next.title
+        });
+        return next;
       });
       res.json(template);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
@@ -306,20 +326,23 @@ export function createApp(db: DbShape): express.Express {
       return;
     }
     try {
-      const task = instantiateTemplate(db, template.id, {
-        ownerId: String(req.body.ownerId ?? ''),
-        dueDate: req.body.dueDate ? String(req.body.dueDate) : undefined
-      });
-      appendAudit(db, {
-        actorId: user.id,
-        action: 'task.created',
-        recordType: 'task',
-        recordId: task.id,
-        detail: `From template: ${template.title}`
+      const task = mutateDb(db, () => {
+        const created = instantiateTemplate(db, template.id, {
+          ownerId: String(req.body.ownerId ?? ''),
+          dueDate: req.body.dueDate ? String(req.body.dueDate) : undefined
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'task.created',
+          recordType: 'task',
+          recordId: created.id,
+          detail: `From template: ${template.title}`
+        });
+        return created;
       });
       res.status(201).json(task);
     } catch (e) {
-      sendError(res, e);
+      sendError(req, res, e);
     }
   });
 
