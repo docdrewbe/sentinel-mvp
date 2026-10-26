@@ -5,6 +5,7 @@ import { mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEvent } from '../../shared/types.js';
+import { UNKNOWN_AUDIT_ORG } from '../../shared/types.js';
 
 process.env.SENTINEL_DATA_FILE = join(mkdtempSync(join(tmpdir(), 'sentinel-test-')), 'db.json');
 
@@ -406,5 +407,25 @@ describe('audit org backfill', () => {
       }
     }
     assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
+  });
+
+  it('fails closed to unknown for orphaned records', () => {
+    const db = seedDatabase();
+    db.tasks = db.tasks.filter((t) => t.id !== 'task-sharps-log');
+    db.templates = db.templates.filter((t) => t.id !== 'tpl-signage');
+    for (const e of db.audit) delete (e as unknown as Record<string, unknown>).orgId;
+    backfillAuditOrgIds(db);
+    const orphans = db.audit.filter(
+      (e) => e.recordId === 'task-sharps-log' || e.recordId === 'tpl-signage'
+    );
+    assert.equal(orphans.length, 2);
+    assert.ok(orphans.every((e) => e.orgId === UNKNOWN_AUDIT_ORG));
+    assert.ok(
+      db.audit
+        .filter((e) => e.recordType === 'task' || e.recordType === 'template')
+        .filter((e) => e.recordId !== 'task-sharps-log' && e.recordId !== 'tpl-signage')
+        .every((e) => e.orgId !== UNKNOWN_AUDIT_ORG)
+    );
+    assert.equal(db.audit.find((e) => e.action === 'db.seeded')?.orgId, 'system');
   });
 });

@@ -20,7 +20,7 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import type { ComplianceTask, DemoUser } from '../shared/types.js';
-import { SYSTEM_AUDIT_ORG } from '../shared/types.js';
+import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
@@ -393,14 +393,18 @@ export function createApp(db: DbShape): express.Express {
   // Append-only: read-only audit endpoint by design. No write routes exist.
   app.get('/api/audit', (req: AuthRequest, res) => {
     const user = req.user as DemoUser;
-    const allowed = visibleOrgIds(user, db.orgs.map((o) => o.id));
+    const allIds = db.orgs.map((o) => o.id);
+    const allowed = visibleOrgIds(user, allIds);
+    const seesAllOrgs = allIds.every((id) => allowed.includes(id));
     const recordType = String(req.query.recordType ?? '');
     const recordId = String(req.query.recordId ?? '');
     const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
     const events = db.audit
       .filter(
         (e) =>
-          (allowed.includes(e.orgId) || e.orgId === SYSTEM_AUDIT_ORG) &&
+          (allowed.includes(e.orgId) ||
+            e.orgId === SYSTEM_AUDIT_ORG ||
+            (seesAllOrgs && e.orgId === UNKNOWN_AUDIT_ORG)) &&
           (!recordType || e.recordType === recordType) &&
           (!recordId || e.recordId === recordId)
       )

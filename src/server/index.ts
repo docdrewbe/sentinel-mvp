@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createApp } from './app.js';
 import { findOrphanedTempFiles, loadDb, saveDb } from './store.js';
 import { seedDatabase } from './seed.js';
+import { UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 for (const orphan of findOrphanedTempFiles()) {
   console.warn(
@@ -18,6 +19,13 @@ if (db.orgs.length === 0) {
   Object.assign(db, seedDatabase());
   saveDb(db);
   console.log('Seeded synthetic demo data (simulated; no real patient data).');
+}
+
+const unknownCount = db.audit.filter((e) => e.orgId === UNKNOWN_AUDIT_ORG).length;
+if (unknownCount > 0) {
+  console.warn(
+    `[sentinel] WARNING: ${unknownCount} audit event(s) with unknown organization (visible to admins/officers only).`
+  );
 }
 
 const app = createApp(db);

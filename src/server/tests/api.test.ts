@@ -3,6 +3,7 @@
 // ephemeral ports; never touches data/sentinel.json or QA evidence.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, renameSync as realRenameSync } from 'node:fs';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,8 +24,9 @@ interface TestServer {
   close: () => Promise<void>;
 }
 
-async function startServer(): Promise<TestServer> {
+async function startServer(mutate?: (db: ReturnType<typeof seedDatabase>) => void): Promise<TestServer> {
   const db = seedDatabase();
+  if (mutate) mutate(db);
   store.saveDb(db);
   const app = createApp(db);
   const server: Server = await new Promise((resolve) => {
@@ -555,6 +557,67 @@ describe('D6 organization isolation (HTTP)', () => {
       const health = await call(base, 'GET', '/api/health', 'u-admin');
       assert.equal(health.status, 200);
       assert.equal(health.json.auditChainOk, false);
+    } finally {
+      await close();
+    }
+  });
+
+  it('hides unknown-org events from scoped users; privileged roles see them', async () => {
+    // Legacy-shaped fixture: genuine v1 chain (v1 hashes), one orphaned task
+    // record backfilled to 'unknown', plus the seeded marker as 'system'.
+    const { base, close } = await startServer((db) => {
+      db.tasks = db.tasks.filter((t) => t.id !== 'task-sharps-log');
+      for (const e of db.audit) {
+        const rec = e as unknown as Record<string, unknown>;
+        delete rec.hashVersion;
+        delete rec.orgId;
+      }
+      store.backfillAuditOrgIds(db);
+      let prev = 'GENESIS';
+      for (const e of db.audit) {
+        e.prevHash = prev;
+        e.hash = createHash('sha256')
+          .update(
+            [
+              e.seq,
+              e.id,
+              e.actorId,
+              e.action,
+              e.recordType,
+              e.recordId,
+              e.timestamp,
+              e.detail,
+              e.prevHash
+            ].join('|')
+          )
+          .digest('hex');
+        prev = e.hash;
+      }
+    });
+    try {
+      const health = await call(base, 'GET', '/api/health', 'u-admin');
+      assert.equal(health.json.auditChainOk, true);
+      for (const user of ['u-nurse-mgr', 'u-staff', 'u-clinic-mgr', 'u-clinic-staff', 'u-canna-mgr']) {
+        const res = await call(base, 'GET', '/api/audit?limit=500', user);
+        assert.equal(res.status, 200, user);
+        const events = rows(res.json);
+        assert.ok(
+          events.every((e) => e.orgId !== 'unknown'),
+          user
+        );
+        assert.ok(
+          events.some((e) => e.action === 'db.seeded' && e.orgId === 'system'),
+          `${user} sees db.seeded`
+        );
+      }
+      for (const user of ['u-admin', 'u-officer']) {
+        const res = await call(base, 'GET', '/api/audit?limit=500', user);
+        assert.equal(res.status, 200, user);
+        assert.ok(
+          rows(res.json).some((e) => e.orgId === 'unknown'),
+          `${user} sees unknown events`
+        );
+      }
     } finally {
       await close();
     }

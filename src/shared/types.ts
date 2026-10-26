@@ -88,6 +88,12 @@ export interface AuditEvent {
 /** orgId marker for audit events that belong to no tenant (e.g. db.seeded). */
 export const SYSTEM_AUDIT_ORG = 'system';
 
+/**
+ * orgId marker for legacy events whose record no longer exists, so ownership
+ * cannot be determined. Fail-closed: visible to privileged roles only.
+ */
+export const UNKNOWN_AUDIT_ORG = 'unknown';
+
 export const ROLE_LABELS: Record<Role, string> = {
   administrator: 'Administrator',
   compliance_officer: 'Compliance Officer',

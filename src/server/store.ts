@@ -29,7 +29,7 @@ import type {
   TaskStatus,
   TaskTemplate
 } from '../shared/types.js';
-import { SYSTEM_AUDIT_ORG } from '../shared/types.js';
+import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 import { nextDueDate } from '../shared/scheduling.js';
 
 export interface DbShape {
@@ -246,16 +246,22 @@ export function appendAudit(db: DbShape, input: AuditInput): AuditEvent {
   return event;
 }
 
-/** Associate legacy audit events (saved before org tracking) with their org. */
+/**
+ * Associate legacy audit events (saved before org tracking) with their org.
+ * Fail-closed: anything that cannot be matched to a record — or to an
+ * explicitly non-tenant type — becomes 'unknown', never 'system'.
+ */
 export function backfillAuditOrgIds(db: DbShape): void {
   for (const e of db.audit) {
     if (e.orgId) continue;
     if (e.recordType === 'task') {
-      e.orgId = db.tasks.find((t) => t.id === e.recordId)?.orgId ?? SYSTEM_AUDIT_ORG;
+      e.orgId = db.tasks.find((t) => t.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
     } else if (e.recordType === 'template') {
-      e.orgId = db.templates.find((t) => t.id === e.recordId)?.orgId ?? SYSTEM_AUDIT_ORG;
-    } else {
+      e.orgId = db.templates.find((t) => t.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
+    } else if (e.recordType === 'database') {
       e.orgId = SYSTEM_AUDIT_ORG;
+    } else {
+      e.orgId = UNKNOWN_AUDIT_ORG;
     }
   }
 }
