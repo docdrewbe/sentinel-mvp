@@ -10,6 +10,7 @@ import { UNKNOWN_AUDIT_ORG } from '../../shared/types.js';
 process.env.SENTINEL_DATA_FILE = join(mkdtempSync(join(tmpdir(), 'sentinel-test-')), 'db.json');
 
 const {
+  addEvidence,
   appendAudit,
   backfillAuditOrgIds,
   buildAuditEvent,
@@ -79,6 +80,7 @@ describe('task integrity', () => {
       dueDate: '2026-06-01'
     });
     assert.throws(() => updateTask(db, task.id, { status: 'verified' }), ValidationError);
+    addEvidence(db, task.id, { label: 'attachment (simulated)', holder: 'T. Nguyen' }, 'u-staff');
     updateTask(db, task.id, { status: 'submitted' });
     updateTask(db, task.id, { status: 'verified' });
     assert.equal(db.tasks.find((t) => t.id === task.id)?.status, 'verified');

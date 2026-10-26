@@ -253,6 +253,15 @@ describe('D2 verified-record locking (HTTP)', () => {
       assert.equal(created.status, 201);
       const id = String(created.json.id);
       assert.equal(
+        (
+          await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-staff', {
+            label: 'attachment (simulated)',
+            holder: 'T. Nguyen'
+          })
+        ).status,
+        201
+      );
+      assert.equal(
         (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-staff', { status: 'submitted' })).status,
         200
       );
@@ -952,6 +961,162 @@ describe('D3 custody history (HTTP)', () => {
       const task = await getTask(base, 'u-nurse-mgr', 'org-cah', id);
       assert.equal(task.evidence[0].holder, 'Alice');
       assert.equal(task.evidence[0].custody.length, 1);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('D4 evidence-gated submission (HTTP)', () => {
+  interface TaskJson {
+    id: string;
+    status: string;
+    evidence: Array<Record<string, unknown>>;
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeTask(
+    base: string,
+    userId: string,
+    ownerId: string
+  ): Promise<string> {
+    const created = await call(base, 'POST', '/api/tasks', userId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      title: 'D4 probe',
+      ownerId,
+      dueDate: '2026-12-01'
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  it('rejects submission with zero evidence, then allows it', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      const before = await getTask(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        status: 'submitted'
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(denied.json.error, 'Submission requires at least 1 evidence item.');
+      assert.deepEqual(await getTask(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      const added = await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'attachment (simulated)',
+        holder: 'M. Lee'
+      });
+      assert.equal(added.status, 201);
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        status: 'submitted'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('enforces template evidence counts', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const inst = await call(base, 'POST', '/api/templates/tpl-emergency-drill/instantiate', 'u-officer', {
+        ownerId: 'u-officer'
+      });
+      assert.equal(inst.status, 201);
+      const id = String(inst.json.id);
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'submitted'
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(
+        denied.json.error,
+        "Submission requires at least 2 evidence items (template 'Emergency preparedness drill and review' requires 2)."
+      );
+      assert.equal((await getTask(base, 'u-officer', 'org-cah', id)).status, 'open');
+      await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-officer', {
+        label: 'drill log (simulated)',
+        holder: 'J. Ortiz'
+      });
+      const still = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'submitted'
+      });
+      assert.equal(still.status, 400);
+      await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-officer', {
+        label: 'after-action note (simulated)',
+        holder: 'J. Ortiz'
+      });
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'submitted'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects unauthorized submissions without side effects', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = await auditTotal(base, 'u-officer');
+      const other = await call(base, 'PATCH', '/api/tasks/task-emergency-drill', 'u-staff', {
+        status: 'submitted'
+      });
+      assert.equal(other.status, 403);
+      const foreign = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-clinic-mgr', {
+        status: 'submitted'
+      });
+      assert.equal(foreign.status, 403);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back submission when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'attachment (simulated)',
+        holder: 'M. Lee'
+      });
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+          status: 'submitted'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.equal((await getTask(base, 'u-nurse-mgr', 'org-cah', id)).status, 'open');
       assert.equal(await auditTotal(base, 'u-officer'), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assert.deepEqual(tempFiles(), []);

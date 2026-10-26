@@ -30,6 +30,7 @@ import type {
   TaskTemplate
 } from '../shared/types.js';
 import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { requiredEvidenceCount } from '../shared/evidence.js';
 import { nextDueDate } from '../shared/scheduling.js';
 
 export interface DbShape {
@@ -330,6 +331,14 @@ function assertNotLocked(task: ComplianceTask): void {
   }
 }
 
+/** D4: explain what evidence a blocked submission is missing. */
+function submissionBlockMessage(db: DbShape, task: ComplianceTask, required: number): string {
+  const template = task.templateId ? db.templates.find((t) => t.id === task.templateId) : undefined;
+  const items = required === 1 ? '1 evidence item' : `${required} evidence items`;
+  const source = template ? ` (template '${template.title}' requires ${required})` : '';
+  return `Submission requires at least ${items}${source}.`;
+}
+
 export function updateTask(
   db: DbShape,
   id: string,
@@ -362,6 +371,12 @@ export function updateTask(
       throw new ValidationError(
         `Illegal status transition from '${task.status}' to '${patch.status}'.`
       );
+    }
+    if (patch.status === 'submitted' && task.status !== 'submitted') {
+      const required = requiredEvidenceCount(task, db.templates);
+      if (task.evidence.length < required) {
+        throw new ValidationError(submissionBlockMessage(db, task, required));
+      }
     }
     task.status = patch.status;
   }

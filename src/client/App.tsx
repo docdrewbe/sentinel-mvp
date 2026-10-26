@@ -3,6 +3,7 @@ import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
+import { requiredEvidenceCount } from '../shared/evidence.js';
 import { applySettled, beginContext, canAct, initialPanels, panelData, resolveOrgId, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
@@ -289,11 +290,17 @@ export default function App(): JSX.Element {
                   <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
                 </dl>
+                <EvidenceRequirement task={task} templates={templates} />
                 {tasksReady ? (
                   <>
                     <StatusButtons
                       me={me}
                       task={task}
+                      submitBlockReason={
+                        requiredEvidenceCount(task, templates) - task.evidence.length > 0
+                          ? `Requires ${requiredEvidenceCount(task, templates)} evidence items (has ${task.evidence.length})`
+                          : null
+                      }
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
                     <h5>Evidence & chain of custody ({task.evidence.length})</h5>
@@ -516,7 +523,22 @@ function Stat({ label, value, tone }: { label: string; value: number | string; t
   );
 }
 
-function StatusButtons({ me, task, onChange }: { me: DemoUser; task: ComplianceTask; onChange: (s: TaskStatus) => void }): JSX.Element {
+function EvidenceRequirement({ task, templates }: { task: ComplianceTask; templates: TaskTemplate[] }): JSX.Element | null {
+  if (task.status !== 'open' && task.status !== 'in_progress') return null;
+  const required = requiredEvidenceCount(task, templates);
+  const short = required - task.evidence.length;
+  return short > 0 ? (
+    <p className="panel-error" role="alert">
+      Evidence: {task.evidence.length} of {required} required — add {short} more before submitting.
+    </p>
+  ) : (
+    <p className="req-ok">
+      Evidence: {task.evidence.length} of {required} required — ready to submit.
+    </p>
+  );
+}
+
+function StatusButtons({ me, task, submitBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; submitBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
   const btn = (label: string, status: TaskStatus, allowed: boolean, need: string): JSX.Element => (
     <button key={status} disabled={!allowed} title={allowed ? '' : `Requires: ${need}`} onClick={() => onChange(status)}>
       {label}
@@ -525,7 +547,7 @@ function StatusButtons({ me, task, onChange }: { me: DemoUser; task: ComplianceT
   return (
     <div className="status-btns">
       {btn('Start', 'in_progress', can(me, 'task.update', task), 'owner / manager / officer / admin')}
-      {btn('Submit', 'submitted', can(me, 'task.submit', task), 'owner / manager / officer / admin')}
+      {btn('Submit', 'submitted', can(me, 'task.submit', task) && submitBlockReason === null, submitBlockReason ?? 'owner / manager / officer / admin')}
       {btn('Verify', 'verified', can(me, 'task.verify', task), 'compliance officer / admin')}
       {btn('Reopen', 'open', can(me, 'task.update', task), 'owner / manager / officer / admin')}
     </div>

@@ -208,6 +208,12 @@ button.primary:hover { background: var(--accent-dark); }
   margin: 4px 0 8px;
 }
 
+.req-ok {
+  color: var(--green);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
 .error {
   margin: 12px auto 0; max-width: 1280px;
   background: #f9dcd9; color: #7a1a14;
