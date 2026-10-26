@@ -1126,3 +1126,104 @@ describe('D4 evidence-gated submission (HTTP)', () => {
     }
   });
 });
+
+describe('D4a zero-requirement templates (HTTP)', () => {
+  interface TaskJson {
+    id: string;
+    status: string;
+    evidence: Array<Record<string, unknown>>;
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  const ZERO_TEMPLATE = {
+    orgId: 'org-cah',
+    domainId: 'dom-osha-h',
+    title: 'D4a zero-requirement probe (simulated)',
+    description: 'Synthetic template with no evidence requirements.',
+    controlType: 'best_practice',
+    regulatoryRefs: [{ source: 'Internal QA probe', citation: 'not a legal mandate' }],
+    responsibleRoles: ['department_manager'],
+    recurrence: { frequency: 'once' },
+    evidenceRequired: [],
+    escalation: []
+  };
+
+  it('still requires 1 evidence item for zero-requirement templates', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/templates', 'u-officer', ZERO_TEMPLATE);
+      assert.equal(created.status, 201);
+      const templateId = String(created.json.id);
+      const inst = await call(base, 'POST', `/api/templates/${templateId}/instantiate`, 'u-nurse-mgr', {
+        ownerId: 'u-nurse-mgr'
+      });
+      assert.equal(inst.status, 201);
+      const id = String(inst.json.id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        status: 'submitted'
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(denied.json.error, 'Submission requires at least 1 evidence item.');
+      assert.deepEqual(await getTask(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      const added = await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'attachment (simulated)',
+        holder: 'M. Lee'
+      });
+      assert.equal(added.status, 201);
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        status: 'submitted'
+      });
+      assert.equal(ok.status, 200);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('holds after PATCH clears a template to zero requirements', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const patched = await call(base, 'PATCH', '/api/templates/tpl-sharps-review', 'u-officer', {
+        evidenceRequired: []
+      });
+      assert.equal(patched.status, 200);
+      const inst = await call(
+        base,
+        'POST',
+        '/api/templates/tpl-sharps-review/instantiate',
+        'u-nurse-mgr',
+        { ownerId: 'u-nurse-mgr' }
+      );
+      assert.equal(inst.status, 201);
+      const id = String(inst.json.id);
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        status: 'submitted'
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(denied.json.error, 'Submission requires at least 1 evidence item.');
+      assert.equal((await getTask(base, 'u-nurse-mgr', 'org-cah', id)).status, 'open');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

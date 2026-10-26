@@ -22,6 +22,7 @@ const {
   ValidationError
 } = await import('../store.js');
 const { seedDatabase } = await import('../seed.js');
+const { requiredEvidenceCount } = await import('../../shared/evidence.js');
 
 describe('append-only audit log', () => {
   it('chains events with increasing sequence numbers and a verifiable hash', () => {
@@ -500,5 +501,25 @@ describe('audit org backfill', () => {
     target.orgId = 'system';
     backfillAuditOrgIds(forged);
     assert.equal(target.orgId, 'system');
+  });
+});
+
+describe('D4a required-evidence floor (unit)', () => {
+  const req = (label: string) => ({ label, required: true });
+
+  it('returns 1 for empty requirements, missing and dangling templates', () => {
+    const templates = [{ id: 'tpl-empty', evidenceRequired: [] as Array<{ label: string; required: boolean }> }];
+    assert.equal(requiredEvidenceCount({ templateId: 'tpl-empty' }, templates), 1);
+    assert.equal(requiredEvidenceCount({}, templates), 1);
+    assert.equal(requiredEvidenceCount({ templateId: 'tpl-gone' }, templates), 1);
+  });
+
+  it('returns N for templates with N >= 1 requirements', () => {
+    const templates = [
+      { id: 'tpl-one', evidenceRequired: [req('a')] },
+      { id: 'tpl-three', evidenceRequired: [req('a'), req('b'), req('c')] }
+    ];
+    assert.equal(requiredEvidenceCount({ templateId: 'tpl-one' }, templates), 1);
+    assert.equal(requiredEvidenceCount({ templateId: 'tpl-three' }, templates), 3);
   });
 });

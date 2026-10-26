@@ -335,7 +335,12 @@ function assertNotLocked(task: ComplianceTask): void {
 function submissionBlockMessage(db: DbShape, task: ComplianceTask, required: number): string {
   const template = task.templateId ? db.templates.find((t) => t.id === task.templateId) : undefined;
   const items = required === 1 ? '1 evidence item' : `${required} evidence items`;
-  const source = template ? ` (template '${template.title}' requires ${required})` : '';
+  // Name the template only when its own list drives the count; the D4a floor
+  // of 1 for empty templates is an MVP rule, not a template requirement.
+  const source =
+    template && template.evidenceRequired.length > 0
+      ? ` (template '${template.title}' requires ${required})`
+      : '';
   return `Submission requires at least ${items}${source}.`;
 }
 
