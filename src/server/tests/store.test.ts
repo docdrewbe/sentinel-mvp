@@ -201,6 +201,72 @@ describe('hash versions (F1)', () => {
   });
 });
 
+describe('F1a canonical v2 encoding', () => {
+  const piped = () => {
+    const db = emptyDb();
+    appendAudit(db, {
+      actorId: 'u1|X',
+      action: 'a|b',
+      recordType: 't|y',
+      recordId: 'r1|z',
+      orgId: 'org-cah|evil',
+      detail: 'A | B'
+    });
+    return db;
+  };
+
+  it('detects the demonstrated timestamp|detail boundary shift', () => {
+    const db = piped();
+    const e = db.audit[0];
+    e.timestamp = `${e.timestamp}|A `;
+    e.detail = ' B';
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 1 });
+  });
+
+  it('detects boundary shifts across every adjacent string-field pair', () => {
+    const pairs: Array<[string, string]> = [
+      ['actorId', 'action'],
+      ['action', 'recordType'],
+      ['recordType', 'recordId'],
+      ['recordId', 'timestamp'],
+      ['timestamp', 'detail'],
+      ['detail', 'prevHash']
+    ];
+    for (const [f1, f2] of pairs) {
+      const db = piped();
+      const e = db.audit[0] as unknown as Record<string, string>;
+      const full = e[f2];
+      const at = full.indexOf('|');
+      if (at === -1) {
+        e[f1] = `${e[f1]}|${full.slice(0, 2)}`;
+        e[f2] = full.slice(2);
+      } else {
+        e[f1] = `${e[f1]}|${full.slice(0, at)}`;
+        e[f2] = full.slice(at + 1);
+      }
+      assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 1 }, `${f1}|${f2}`);
+    }
+    const db = piped();
+    db.audit[0].orgId = 'org-cah|evil|injected';
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 1 }, 'orgId');
+  });
+
+  it('verifies hostile characters untampered; one-char edits detected', () => {
+    const db = emptyDb();
+    appendAudit(db, {
+      actorId: 'u"1',
+      action: 'a\\b',
+      recordType: 't\nt',
+      recordId: 'r|1',
+      orgId: 'org-cah',
+      detail: 'mix "q" \\ back | pipe\nnewline ünïcode ✓'
+    });
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
+    db.audit[0].detail = 'mix "q" \\ back | pipe\nnewline ünïcode ✗';
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 1 });
+  });
+});
+
 describe('audit org backfill', () => {
   it('associates legacy events with their record org, system events with system', () => {
     const db = seedDatabase();

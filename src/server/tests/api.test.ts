@@ -509,6 +509,30 @@ describe('D6 organization isolation (HTTP)', () => {
     }
   });
 
+  it('keeps the audit chain valid when titles contain pipes', async () => {
+    const { base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'QA-F1 synthetic | pipe in title',
+        ownerId: 'u-staff',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      const patched = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        status: 'in_progress'
+      });
+      assert.equal(patched.status, 200);
+      const health = await call(base, 'GET', '/api/health', 'u-admin');
+      assert.equal(health.status, 200);
+      assert.equal(health.json.auditChainOk, true);
+    } finally {
+      await close();
+    }
+  });
+
   it('seeds every audit event with an org id', async () => {
     const { base, close } = await startServer();
     try {

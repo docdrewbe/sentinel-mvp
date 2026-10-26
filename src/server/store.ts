@@ -152,8 +152,30 @@ export function mutateDb<T>(db: DbShape, fn: () => T): T {
 type HashableEvent = Omit<AuditEvent, 'hash'>;
 
 function eventHash(e: HashableEvent): string {
-  // v1 field list is frozen so pre-F1 chains keep verifying. v2 additionally
-  // binds the version itself and orgId, so re-tagging an event breaks the chain.
+  // v2: canonical JSON array — quoting/escaping makes the encoding unambiguous,
+  // so no two different field sets share a hash input. Field order is frozen.
+  if (e.hashVersion === 2) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          e.seq,
+          e.id,
+          e.actorId,
+          e.action,
+          e.recordType,
+          e.recordId,
+          e.timestamp,
+          e.detail,
+          e.prevHash,
+          e.hashVersion,
+          e.orgId
+        ])
+      )
+      .digest('hex');
+  }
+  // v1: frozen pipe-joined list so pre-F1 chains keep verifying. It keeps a
+  // field-boundary ambiguity (a '|' inside a field), which disappears with the
+  // planned demo-data reset that makes every event v2.
   const parts: Array<string | number> = [
     e.seq,
     e.id,
@@ -165,7 +187,6 @@ function eventHash(e: HashableEvent): string {
     e.detail,
     e.prevHash
   ];
-  if (e.hashVersion === 2) parts.push(e.hashVersion, e.orgId);
   return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
