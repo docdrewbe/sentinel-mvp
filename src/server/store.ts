@@ -31,6 +31,7 @@ import type {
 } from '../shared/types.js';
 import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
+import { missingSubmissionHistory } from '../shared/verification.js';
 import { nextDueDate } from '../shared/scheduling.js';
 
 export interface DbShape {
@@ -119,6 +120,11 @@ export function saveDb(db: DbShape): void {
     /* best effort */
   }
   throw lastError;
+}
+
+/** D5c: ids of submitted tasks with no trustworthy submission history. Read-only triage. */
+export function findTasksMissingSubmissionHistory(db: DbShape): string[] {
+  return db.tasks.filter(missingSubmissionHistory).map((t) => t.id);
 }
 
 /** Temp files left by an interrupted save. Callers must warn, never auto-apply. */

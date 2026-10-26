@@ -4,7 +4,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from './app.js';
-import { findOrphanedTempFiles, loadDb, saveDb } from './store.js';
+import { findOrphanedTempFiles, findTasksMissingSubmissionHistory, loadDb, saveDb } from './store.js';
 import { seedDatabase } from './seed.js';
 import { UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
@@ -25,6 +25,13 @@ const unknownCount = db.audit.filter((e) => e.orgId === UNKNOWN_AUDIT_ORG).lengt
 if (unknownCount > 0) {
   console.warn(
     `[sentinel] WARNING: ${unknownCount} audit event(s) with unknown organization (visible to admins/officers only).`
+  );
+}
+
+const untrusted = findTasksMissingSubmissionHistory(db);
+if (untrusted.length > 0) {
+  console.warn(
+    `[sentinel] WARNING: ${untrusted.length} submitted task(s) without trustworthy submission history (verification refused until send-back + resubmit): ${untrusted.join(', ')}`
   );
 }
 

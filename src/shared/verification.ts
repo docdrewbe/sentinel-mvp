@@ -38,3 +38,14 @@ export function noEligibleVerifier(task: VerificationHistory, privilegedUserIds:
   const blocked = new Set(ineligibleVerifiers(task));
   return privilegedUserIds.every((id) => blocked.has(id));
 }
+
+/**
+ * D5c: fail-closed triage — a submitted task with no recorded submission has
+ * no trustworthy submitter, so verification must wait for a send-back and
+ * resubmit. Never derive eligibility from guesses.
+ */
+export function missingSubmissionHistory(
+  task: Pick<ComplianceTask, 'status' | 'submissions'>
+): boolean {
+  return task.status === 'submitted' && (task.submissions ?? []).length === 0;
+}

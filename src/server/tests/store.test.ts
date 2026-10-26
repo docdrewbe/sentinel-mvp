@@ -16,6 +16,7 @@ const {
   buildAuditEvent,
   emptyDb,
   findOrphanedTempFiles,
+  findTasksMissingSubmissionHistory,
   verifyAuditChain,
   createTask,
   updateTask,
@@ -521,5 +522,26 @@ describe('D4a required-evidence floor (unit)', () => {
     ];
     assert.equal(requiredEvidenceCount({ templateId: 'tpl-one' }, templates), 1);
     assert.equal(requiredEvidenceCount({ templateId: 'tpl-three' }, templates), 3);
+  });
+});
+
+describe('D5c submission-history triage (unit)', () => {
+  it('lists submitted tasks without recorded submissions', () => {
+    const db = seedDatabase();
+    assert.deepEqual(
+      findTasksMissingSubmissionHistory(db).sort(),
+      ['task-med-storage', 'task-patient-rights']
+    );
+    const task = db.tasks.find((t) => t.id === 'task-med-storage');
+    assert.ok(task);
+    task.submissions = [
+      {
+        seq: 1,
+        submittedBy: 'u-nurse-mgr',
+        ownerAtSubmission: 'u-nurse-mgr',
+        at: new Date().toISOString()
+      }
+    ];
+    assert.deepEqual(findTasksMissingSubmissionHistory(db), ['task-patient-rights']);
   });
 });

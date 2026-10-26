@@ -276,22 +276,47 @@ describe('D5 separation-of-duties hint (unit)', () => {
   const MSG = 'Separation of duties: verifier must differ from owner/submitter.';
 
   it('blocks the owner and the submitter of a submitted task', () => {
-    const task = { ownerId: 'u-nurse-mgr', submittedBy: 'u-officer', status: 'submitted' as const };
+    const task = {
+      ownerId: 'u-nurse-mgr',
+      submittedBy: 'u-officer',
+      submissions: [
+        { seq: 1, submittedBy: 'u-officer', ownerAtSubmission: 'u-nurse-mgr', at: '2026-10-26T00:00:00.000Z' }
+      ],
+      status: 'submitted' as const
+    };
     assert.equal(verifyBlockReason({ id: 'u-nurse-mgr' }, task), MSG);
     assert.equal(verifyBlockReason({ id: 'u-officer' }, task), MSG);
   });
 
-  it('allows an independent verifier, including with legacy missing submittedBy', () => {
+  it('allows an independent verifier once a submission is recorded', () => {
     assert.equal(
       verifyBlockReason(
         { id: 'u-admin' },
-        { ownerId: 'u-nurse-mgr', submittedBy: 'u-officer', status: 'submitted' }
+        {
+          ownerId: 'u-nurse-mgr',
+          submittedBy: 'u-officer',
+          submissions: [
+            { seq: 1, submittedBy: 'u-officer', ownerAtSubmission: 'u-nurse-mgr', at: '2026-10-26T00:00:00.000Z' }
+          ],
+          status: 'submitted'
+        }
       ),
       null
     );
+  });
+
+  it('D5c: fails closed on submitted tasks without submission history', () => {
+    const unknown = 'Submitter unknown for this task — send it back and resubmit to establish a verifiable submission.';
     assert.equal(
       verifyBlockReason({ id: 'u-officer' }, { ownerId: 'u-staff', status: 'submitted' }),
-      null
+      unknown
+    );
+    assert.equal(
+      verifyBlockReason(
+        { id: 'u-officer' },
+        { ownerId: 'u-staff', submittedBy: 'u-staff', submissions: [], status: 'submitted' }
+      ),
+      unknown
     );
   });
 

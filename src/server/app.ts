@@ -20,9 +20,9 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
-import { ineligibleVerifiers, noEligibleVerifier } from '../shared/verification.js';
+import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type { ComplianceTask, DemoUser } from '../shared/types.js';
-import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
@@ -208,22 +208,28 @@ export function createApp(db: DbShape): express.Express {
         // D5/D5a: separation of duties lives here, outside can(), so the
         // role matrix stays simple. Eligibility comes from the full
         // submission/ownership history, not just the current owner.
-        if (
-          action === 'task.verify' &&
-          task.status === 'submitted' &&
-          ineligibleVerifiers(task).includes(user.id)
-        ) {
-          // D5b: say so explicitly when the history excludes every
-          // privileged user, so the deadlock is diagnosable. No override.
-          const privileged = db.users
-            .filter((u) => u.role === 'administrator' || u.role === 'compliance_officer')
-            .map((u) => u.id);
-          res.status(403).json({
-            error: noEligibleVerifier(task, privileged)
-              ? NO_ELIGIBLE_VERIFIER_MESSAGE
-              : SEPARATION_OF_DUTIES_MESSAGE
-          });
-          return;
+        if (action === 'task.verify' && task.status === 'submitted') {
+          // D5c: fail closed — without a recorded submission there is no
+          // trustworthy submitter, so nobody may verify until a send-back
+          // and resubmit establish one. Checked before membership, since
+          // membership cannot be evaluated without history.
+          if (missingSubmissionHistory(task)) {
+            res.status(409).json({ error: SUBMITTER_UNKNOWN_MESSAGE });
+            return;
+          }
+          if (ineligibleVerifiers(task).includes(user.id)) {
+            // D5b: say so explicitly when the history excludes every
+            // privileged user, so the deadlock is diagnosable. No override.
+            const privileged = db.users
+              .filter((u) => u.role === 'administrator' || u.role === 'compliance_officer')
+              .map((u) => u.id);
+            res.status(403).json({
+              error: noEligibleVerifier(task, privileged)
+                ? NO_ELIGIBLE_VERIFIER_MESSAGE
+                : SEPARATION_OF_DUTIES_MESSAGE
+            });
+            return;
+          }
         }
       }
       const touchesFields =

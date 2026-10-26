@@ -118,6 +118,13 @@ export const SEPARATION_OF_DUTIES_MESSAGE =
 export const NO_ELIGIBLE_VERIFIER_MESSAGE =
   'No eligible independent verifier: all privileged users submitted or owned this task.';
 
+/**
+ * D5c: verification refused for a submitted task with no trustworthy
+ * submission history. Send-back + resubmit establishes a record.
+ */
+export const SUBMITTER_UNKNOWN_MESSAGE =
+  'Submitter unknown for this task — send it back and resubmit to establish a verifiable submission.';
+
 export interface AuditEvent {
   seq: number;
   id: string;

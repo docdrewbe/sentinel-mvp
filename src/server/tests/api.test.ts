@@ -77,6 +77,17 @@ describe('D1 atomic persistence (HTTP)', () => {
   it('persists a status change and its audit event together', async () => {
     const { db, base, close } = await startServer();
     try {
+      // D5c: seeded legacy tasks need a recorded submission first.
+      assert.equal(
+        (await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-officer', { status: 'in_progress' }))
+          .status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-nurse-mgr', { status: 'submitted' }))
+          .status,
+        200
+      );
       const before = db.audit.length;
       const res = await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-officer', {
         status: 'verified'
@@ -93,6 +104,17 @@ describe('D1 atomic persistence (HTTP)', () => {
 
   it('rolls back memory and disk when persistence fails, and logs the error', async () => {
     const { db, base, close } = await startServer();
+    // D5c: seeded legacy tasks need a recorded submission first.
+    assert.equal(
+      (await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-officer', { status: 'in_progress' }))
+        .status,
+      200
+    );
+    assert.equal(
+      (await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-nurse-mgr', { status: 'submitted' }))
+        .status,
+      200
+    );
     const logged: unknown[][] = [];
     const origError = console.error;
     console.error = (...args: unknown[]) => {
@@ -130,6 +152,17 @@ describe('D1 atomic persistence (HTTP)', () => {
 
   it('succeeds after a transient rename failure', async () => {
     const { db, base, close } = await startServer();
+    // D5c: seeded legacy tasks need a recorded submission first.
+    assert.equal(
+      (await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-officer', { status: 'in_progress' }))
+        .status,
+      200
+    );
+    assert.equal(
+      (await call(base, 'PATCH', '/api/tasks/task-med-storage', 'u-nurse-mgr', { status: 'submitted' }))
+        .status,
+      200
+    );
     let calls = 0;
     store.__setRenameImpl((tmp, file) => {
       calls++;
@@ -1256,6 +1289,15 @@ describe('D4b verification evidence gate (HTTP)', () => {
       assert.ok(legacy);
       legacy.status = 'submitted';
       legacy.evidence = [];
+      // D5c: history recorded so the test reaches the evidence gate.
+      legacy.submissions = [
+        {
+          seq: 1,
+          submittedBy: 'u-staff',
+          ownerAtSubmission: 'u-staff',
+          at: new Date().toISOString()
+        }
+      ];
     });
     try {
       const diskBefore = readFileSync(dataFile, 'utf8');
@@ -1287,6 +1329,10 @@ describe('D4b verification evidence gate (HTTP)', () => {
       assert.ok(legacy);
       legacy.status = 'submitted';
       legacy.templateId = 'tpl-emergency-drill';
+      // D5c: history recorded so the test reaches the evidence gate.
+      legacy.submissions = [
+        { seq: 1, submittedBy: 'u-staff', ownerAtSubmission: 'u-staff', at }
+      ];
       legacy.evidence = [
         {
           id: 'task-sharps-log-ev1',
@@ -1617,6 +1663,15 @@ describe('D5 separation of duties (HTTP)', () => {
       assert.ok(legacy);
       legacy.status = 'submitted';
       legacy.evidence = [];
+      // D5c: history recorded so the test reaches the evidence gate.
+      legacy.submissions = [
+        {
+          seq: 1,
+          submittedBy: 'u-staff',
+          ownerAtSubmission: 'u-staff',
+          at: new Date().toISOString()
+        }
+      ];
     });
     try {
       const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-admin', {
@@ -1640,6 +1695,15 @@ describe('D5 separation of duties (HTTP)', () => {
       legacy.status = 'submitted';
       legacy.evidence = [];
       legacy.ownerId = 'u-officer';
+      // D5c: history recorded so the test reaches the membership check.
+      legacy.submissions = [
+        {
+          seq: 1,
+          submittedBy: 'u-staff',
+          ownerAtSubmission: 'u-officer',
+          at: new Date().toISOString()
+        }
+      ];
     });
     try {
       const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', {
@@ -2134,6 +2198,143 @@ describe('D5b resubmission laundering (HTTP)', () => {
         [1, 2]
       );
       assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('D5c legacy submission history (HTTP)', () => {
+  const UNKNOWN =
+    'Submitter unknown for this task — send it back and resubmit to establish a verifiable submission.';
+
+  interface TaskJson {
+    id: string;
+    status: string;
+    evidence: Array<Record<string, unknown>>;
+    submittedBy?: string;
+    submissions?: Array<Record<string, unknown>>;
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  function legacySubmitted(seeded: ReturnType<typeof seedDatabase>): void {
+    const legacy = seeded.tasks.find((t) => t.id === 'task-sharps-log');
+    assert.ok(legacy);
+    legacy.status = 'submitted';
+  }
+
+  it('refuses verification when no submission is recorded', async () => {
+    const { db, base, close } = await startServer(legacySubmitted);
+    try {
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-officer', 'org-cah', 'task-sharps-log');
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 409);
+      assert.equal(denied.json.error, UNKNOWN);
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', 'task-sharps-log'), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('recovers through send-back, resubmit, and independent verify', async () => {
+    const { db, base, close } = await startServer(legacySubmitted);
+    try {
+      assert.equal(
+        (await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', { status: 'in_progress' }))
+          .status,
+        200
+      );
+      assert.equal(
+        (
+          await call(base, 'POST', '/api/tasks/task-sharps-log/evidence', 'u-staff', {
+            label: 'attachment (simulated)',
+            holder: 'T. Nguyen'
+          })
+        ).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-staff', { status: 'submitted' }))
+          .status,
+        200
+      );
+      const resubmitted = await getTask(base, 'u-staff', 'org-cah', 'task-sharps-log');
+      assert.equal(resubmitted.submissions?.length, 1);
+      assert.equal(
+        (await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-admin', { status: 'verified' }))
+          .status,
+        200
+      );
+      assert.equal((await getTask(base, 'u-admin', 'org-cah', 'task-sharps-log')).status, 'verified');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('still refuses when only an audit event records the submission', async () => {
+    // Simplest safe rule (chosen): audit trails are not trusted as
+    // submission history. Send-back + resubmit is required either way.
+    const { db, base, close } = await startServer((seeded) => {
+      legacySubmitted(seeded);
+      store.appendAudit(seeded, {
+        actorId: 'u-admin',
+        action: 'task.submitted',
+        recordType: 'task',
+        recordId: 'task-sharps-log',
+        orgId: 'org-cah',
+        detail: 'D5c probe submission (simulated legacy audit trail)'
+      });
+    });
+    try {
+      const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 409);
+      assert.equal(denied.json.error, UNKNOWN);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('refuses verification when the audit chain is broken', async () => {
+    const { db, base, close } = await startServer((seeded) => {
+      legacySubmitted(seeded);
+      seeded.audit[seeded.audit.length - 1].hash = 'broken-by-qa-fixture';
+    });
+    try {
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-officer', 'org-cah', 'task-sharps-log');
+      const denied = await call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 409);
+      assert.equal(denied.json.error, UNKNOWN);
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', 'task-sharps-log'), before);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(db.tasks, JSON.parse(diskBefore).tasks);
     } finally {
       await close();
     }

@@ -1,8 +1,8 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
 import { visibleOrgIds } from '../shared/rbac.js';
-import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE } from '../shared/types.js';
-import { ineligibleVerifiers, noEligibleVerifier } from '../shared/verification.js';
+import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
+import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type {
   AuditEvent,
   ComplianceTask,
@@ -131,7 +131,8 @@ export function submitBlockReason(
  * Eligibility comes from the full submission/ownership history. Only
  * submitted tasks are verifiable, so anything else returns null. When the
  * privileged roster is supplied and nobody on it is eligible, reports the
- * deadlock instead. Mirrors the server message; the server still decides.
+ * deadlock instead. Submitted tasks with no recorded submission fail
+ * closed. Mirrors the server message; the server still decides.
  */
 export function verifyBlockReason(
   me: Pick<DemoUser, 'id'>,
@@ -139,6 +140,7 @@ export function verifyBlockReason(
   privilegedUserIds: string[] = []
 ): string | null {
   if (task.status !== 'submitted') return null;
+  if (missingSubmissionHistory(task)) return SUBMITTER_UNKNOWN_MESSAGE;
   if (ineligibleVerifiers(task).includes(me.id)) {
     return noEligibleVerifier(task, privilegedUserIds)
       ? NO_ELIGIBLE_VERIFIER_MESSAGE
