@@ -377,18 +377,23 @@ export function updateTask(
 export function addEvidence(
   db: DbShape,
   taskId: string,
-  input: { label: string; holder: string }
+  input: { label: string; holder: string },
+  byUserId: string
 ): EvidenceRef {
   const task = db.tasks.find((t) => t.id === taskId);
   if (!task) throw new ValidationError('Task not found.');
   assertNotLocked(task);
   if (!input.label.trim()) throw new ValidationError('Evidence label is required.');
   if (!input.holder.trim()) throw new ValidationError('Evidence holder is required.');
+  const now = new Date().toISOString();
   const ref: EvidenceRef = {
     id: randomUUID(),
     label: input.label.trim(),
     holder: input.holder.trim(),
-    updatedAt: new Date().toISOString()
+    custody: [
+      { seq: 1, fromHolder: null, toHolder: input.holder.trim(), byUserId, at: now }
+    ],
+    updatedAt: now
   };
   task.evidence.push(ref);
   task.updatedAt = ref.updatedAt;
@@ -398,21 +403,35 @@ export function addEvidence(
 export function transferCustody(
   db: DbShape,
   taskId: string,
-  input: { evidenceId: string; toHolder: string }
-): EvidenceRef {
+  input: { evidenceId: string; toHolder: string; reason?: string },
+  byUserId: string
+): { ref: EvidenceRef; fromHolder: string } {
   const task = db.tasks.find((t) => t.id === taskId);
   if (!task) throw new ValidationError('Task not found.');
   assertNotLocked(task);
   const ref = task.evidence.find((e) => e.id === input.evidenceId);
   if (!ref) throw new ValidationError('Evidence item not found on this task.');
   if (!input.toHolder.trim()) throw new ValidationError('New holder is required.');
-  if (ref.holder === input.toHolder.trim()) {
+  if (!ref.custody) ref.custody = [];
+  // Capture the previous holder BEFORE mutating: the audit detail and the new
+  // custody entry must record where the item came from, not where it went.
+  const fromHolder = ref.holder;
+  if (fromHolder === input.toHolder.trim()) {
     throw new ValidationError('New holder must differ from the current holder.');
   }
+  const reason = input.reason?.trim() ? input.reason.trim() : undefined;
+  ref.custody.push({
+    seq: ref.custody.length + 1,
+    fromHolder,
+    toHolder: input.toHolder.trim(),
+    byUserId,
+    at: new Date().toISOString(),
+    ...(reason ? { reason } : {})
+  });
   ref.holder = input.toHolder.trim();
   ref.updatedAt = new Date().toISOString();
   task.updatedAt = ref.updatedAt;
-  return ref;
+  return { ref, fromHolder };
 }
 
 // ---------------------------------------------------------------------------

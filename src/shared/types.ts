@@ -41,11 +41,23 @@ export interface DemoUser {
 
 export type TaskStatus = 'open' | 'in_progress' | 'submitted' | 'verified';
 
+export interface CustodyEntry {
+  seq: number;
+  /** Previous holder; null for the initial custody entry. */
+  fromHolder: string | null;
+  toHolder: string;
+  byUserId: string;
+  at: string;
+  reason?: string;
+}
+
 export interface EvidenceRef {
   id: string;
   label: string;
   /** Person currently holding / responsible for this evidence item. */
   holder: string;
+  /** Append-only custody history; entries are never edited or removed. */
+  custody: CustodyEntry[];
   updatedAt: string;
 }
 

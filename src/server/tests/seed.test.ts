@@ -40,4 +40,23 @@ describe('synthetic demo data', () => {
     assert.ok(db.audit.length > 0);
     assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
   });
+
+  it('gives every evidence item a genesis custody entry', () => {
+    const db = seedDatabase();
+    let count = 0;
+    for (const t of db.tasks) {
+      for (const e of t.evidence) {
+        count++;
+        assert.equal(e.custody.length, 1);
+        assert.deepEqual(e.custody[0], {
+          seq: 1,
+          fromHolder: null,
+          toHolder: e.holder,
+          byUserId: 'system',
+          at: e.custody[0].at
+        });
+      }
+    }
+    assert.ok(count > 0);
+  });
 });

@@ -748,3 +748,216 @@ describe('D6 organization isolation (HTTP)', () => {
     }
   });
 });
+
+describe('D3 custody history (HTTP)', () => {
+  interface CustodyJson {
+    seq: number;
+    fromHolder: string | null;
+    toHolder: string;
+    byUserId: string;
+    at: string;
+    reason?: string;
+  }
+  interface EvidenceJson {
+    id: string;
+    label: string;
+    holder: string;
+    custody: CustodyJson[];
+  }
+  interface TaskJson {
+    id: string;
+    evidence: EvidenceJson[];
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function trail(base: string, userId: string, id: string): Promise<Array<Record<string, unknown>>> {
+    const res = await call(base, 'GET', `/api/audit?recordId=${id}&limit=50`, userId);
+    assert.equal(res.status, 200);
+    return res.json as unknown as Array<Record<string, unknown>>;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  const shape = (c: CustodyJson): object => ({
+    seq: c.seq,
+    fromHolder: c.fromHolder,
+    toHolder: c.toHolder,
+    byUserId: c.byUserId,
+    reason: c.reason ?? null
+  });
+
+  it('records a correct append-only custody chain across transfers', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D3 custody probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      const ev = await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'D3 probe item',
+        holder: 'Alice'
+      });
+      assert.equal(ev.status, 201);
+      const evId = String((ev.json as Record<string, unknown>).id);
+      const genesis = ((ev.json as Record<string, unknown>).custody as CustodyJson[])[0];
+      assert.deepEqual(shape(genesis), {
+        seq: 1,
+        fromHolder: null,
+        toHolder: 'Alice',
+        byUserId: 'u-nurse-mgr',
+        reason: null
+      });
+      const t1 = await call(base, 'POST', `/api/tasks/${id}/transfer`, 'u-nurse-mgr', {
+        evidenceId: evId,
+        toHolder: 'Bob',
+        reason: 'shift handoff'
+      });
+      assert.equal(t1.status, 200);
+      const t2 = await call(base, 'POST', `/api/tasks/${id}/transfer`, 'u-officer', {
+        evidenceId: evId,
+        toHolder: 'Carol'
+      });
+      assert.equal(t2.status, 200);
+      const task = await getTask(base, 'u-officer', 'org-cah', id);
+      const item = task.evidence.find((e) => e.id === evId) as EvidenceJson;
+      assert.equal(item.holder, 'Carol');
+      assert.deepEqual(
+        item.custody.map(shape),
+        [
+          { seq: 1, fromHolder: null, toHolder: 'Alice', byUserId: 'u-nurse-mgr', reason: null },
+          { seq: 2, fromHolder: 'Alice', toHolder: 'Bob', byUserId: 'u-nurse-mgr', reason: 'shift handoff' },
+          { seq: 3, fromHolder: 'Bob', toHolder: 'Carol', byUserId: 'u-officer', reason: null }
+        ]
+      );
+      for (const c of item.custody) assert.ok(!Number.isNaN(Date.parse(c.at)), 'at is ISO time');
+      assert.deepEqual(item.custody[0], genesis, 'genesis entry never edited');
+      const events = await trail(base, 'u-officer', id);
+      assert.deepEqual(
+        events.filter((e) => e.action === 'custody.transferred').map((e) => e.detail),
+        ['D3 probe item: Alice -> Bob — shift handoff', 'D3 probe item: Bob -> Carol']
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects transfer to the current holder without side effects', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D3 same-holder probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01'
+      });
+      const id = String(created.json.id);
+      const ev = await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'item',
+        holder: 'Alice'
+      });
+      const evId = String((ev.json as Record<string, unknown>).id);
+      const before = await getTask(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const res = await call(base, 'POST', `/api/tasks/${id}/transfer`, 'u-nurse-mgr', {
+        evidenceId: evId,
+        toHolder: 'Alice'
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.json.error, 'New holder must differ from the current holder.');
+      assert.deepEqual(await getTask(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects unauthorized transfers without side effects', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = await auditTotal(base, 'u-officer');
+      const foreign = await call(base, 'POST', '/api/tasks/task-eyewash/transfer', 'u-nurse-mgr', {
+        evidenceId: 'task-eyewash-ev1',
+        toHolder: 'Mallory'
+      });
+      assert.equal(foreign.status, 403);
+      const staff = await call(base, 'POST', '/api/tasks/task-med-storage/transfer', 'u-staff', {
+        evidenceId: 'task-med-storage-ev1',
+        toHolder: 'Mallory'
+      });
+      assert.equal(staff.status, 403);
+      const locked = await call(base, 'POST', '/api/tasks/task-baa/transfer', 'u-officer', {
+        evidenceId: 'task-baa-ev1',
+        toHolder: 'Mallory'
+      });
+      assert.equal(locked.status, 400);
+      assert.equal(locked.json.error, 'Verified records are locked.');
+      assert.equal((await getTask(base, 'u-officer', 'org-cah', 'task-med-storage')).evidence[0].holder, 'J. Ortiz');
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back custody changes when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D3 atomic probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01'
+      });
+      const id = String(created.json.id);
+      const ev = await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'item',
+        holder: 'Alice'
+      });
+      const evId = String((ev.json as Record<string, unknown>).id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'POST', `/api/tasks/${id}/transfer`, 'u-nurse-mgr', {
+          evidenceId: evId,
+          toHolder: 'Bob'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      const task = await getTask(base, 'u-nurse-mgr', 'org-cah', id);
+      assert.equal(task.evidence[0].holder, 'Alice');
+      assert.equal(task.evidence[0].custody.length, 1);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

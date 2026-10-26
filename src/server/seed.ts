@@ -214,6 +214,7 @@ export function seedDatabase(): DbShape {
       id: `${s.key}-ev${i + 1}`,
       label: e.label,
       holder: e.holder,
+      custody: [{ seq: 1, fromHolder: null, toHolder: e.holder, byUserId: 'system', at: t }],
       updatedAt: t
     }));
     return {

@@ -233,10 +233,15 @@ export function createApp(db: DbShape): express.Express {
     }
     try {
       const ref = mutateDb(db, () => {
-        const added = addEvidence(db, req.params.id, {
-          label: String(req.body.label ?? ''),
-          holder: String(req.body.holder ?? '')
-        });
+        const added = addEvidence(
+          db,
+          req.params.id,
+          {
+            label: String(req.body.label ?? ''),
+            holder: String(req.body.holder ?? '')
+          },
+          user.id
+        );
         appendAudit(db, {
           actorId: user.id,
           action: 'evidence.added',
@@ -262,20 +267,24 @@ export function createApp(db: DbShape): express.Express {
     }
     try {
       const ref = mutateDb(db, () => {
-        const before = db.tasks
-          .find((t) => t.id === req.params.id)
-          ?.evidence.find((e) => e.id === String(req.body.evidenceId ?? ''));
-        const moved = transferCustody(db, req.params.id, {
-          evidenceId: String(req.body.evidenceId ?? ''),
-          toHolder: String(req.body.toHolder ?? '')
-        });
+        const reason = String(req.body.reason ?? '').trim() || undefined;
+        const { ref: moved, fromHolder } = transferCustody(
+          db,
+          req.params.id,
+          {
+            evidenceId: String(req.body.evidenceId ?? ''),
+            toHolder: String(req.body.toHolder ?? ''),
+            ...(reason ? { reason } : {})
+          },
+          user.id
+        );
         appendAudit(db, {
           actorId: user.id,
           action: 'custody.transferred',
           recordType: 'task',
           recordId: req.params.id,
           orgId: target.orgId,
-          detail: `${moved.label}: ${before?.holder ?? '?'} -> ${moved.holder}`
+          detail: `${moved.label}: ${fromHolder} -> ${moved.holder}${reason ? ` — ${reason}` : ''}`
         });
         return moved;
       });

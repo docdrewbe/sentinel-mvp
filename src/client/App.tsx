@@ -300,9 +300,23 @@ export default function App(): JSX.Element {
                     {task.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
                     <ul className="evidence">
                       {task.evidence.map((e) => (
-                        <li key={e.id}>
-                          <span>{e.label}</span>
-                          <span className="holder">Holder: {e.holder}</span>
+                        <li key={e.id} className="evidence-item">
+                          <div className="evidence-row">
+                            <span>{e.label}</span>
+                            <span className="holder">Holder: {e.holder}</span>
+                          </div>
+                          {(e.custody ?? []).length > 0 && (
+                            <ol className="custody">
+                              {(e.custody ?? []).map((c) => (
+                                <li key={c.seq}>
+                                  {c.fromHolder ?? '—'} → {c.toHolder} ·{' '}
+                                  {userName.get(c.byUserId) ?? c.byUserId} ·{' '}
+                                  {new Date(c.at).toLocaleString()}
+                                  {c.reason ? ` — ${c.reason}` : ''}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -314,8 +328,8 @@ export default function App(): JSX.Element {
                     {can(me, 'custody.transfer', task) && task.evidence.length > 0 && (
                       <TransferForm
                         evidence={task.evidence}
-                        onTransfer={(evidenceId, toHolder) =>
-                          run(async () => api.transfer(task.id, { evidenceId, toHolder }))
+                        onTransfer={(evidenceId, toHolder, reason) =>
+                          run(async () => api.transfer(task.id, { evidenceId, toHolder, reason }))
                         }
                       />
                     )}
@@ -575,9 +589,10 @@ function EvidenceForm({ onAdd }: { onAdd: (label: string, holder: string) => voi
   );
 }
 
-function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evidence']; onTransfer: (id: string, holder: string) => void }): JSX.Element {
+function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evidence']; onTransfer: (id: string, holder: string, reason?: string) => void }): JSX.Element {
   const [evidenceId, setEvidenceId] = useState(evidence[0]?.id ?? '');
   const [toHolder, setToHolder] = useState('');
+  const [reason, setReason] = useState('');
   useEffect(() => {
     setEvidenceId(evidence[0]?.id ?? '');
   }, [evidence]);
@@ -586,8 +601,9 @@ function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evid
       className="form inline"
       onSubmit={(e) => {
         e.preventDefault();
-        onTransfer(evidenceId, toHolder);
+        onTransfer(evidenceId, toHolder, reason.trim() || undefined);
         setToHolder('');
+        setReason('');
       }}
     >
       <select value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item">
@@ -596,6 +612,7 @@ function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evid
         ))}
       </select>
       <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required />
+      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" />
       <button type="submit">Transfer custody</button>
     </form>
   );

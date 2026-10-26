@@ -38,7 +38,7 @@ export const api = {
     req<ComplianceTask>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   addEvidence: (id: string, e: { label: string; holder: string }) =>
     req(`/api/tasks/${id}/evidence`, { method: 'POST', body: JSON.stringify(e) }),
-  transfer: (id: string, t: { evidenceId: string; toHolder: string }) =>
+  transfer: (id: string, t: { evidenceId: string; toHolder: string; reason?: string }) =>
     req(`/api/tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify(t) }),
   audit: (limit = 100) => req<AuditEvent[]>(`/api/audit?limit=${limit}`),
   templates: (orgId: string) => req<TaskTemplate[]>(`/api/templates?orgId=${orgId}`),

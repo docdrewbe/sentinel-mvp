@@ -167,6 +167,10 @@ button.primary:hover { background: var(--accent-dark); }
   display: flex; justify-content: space-between; gap: 8px;
   padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px;
 }
+.evidence-item { flex-direction: column; align-items: stretch; }
+.evidence-row { display: flex; justify-content: space-between; gap: 8px; }
+.custody { margin: 6px 0 0; padding-left: 20px; font-size: 12px; color: var(--muted); }
+.custody li { border: none; padding: 1px 0; margin: 0; }
 .holder { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
 .trail { margin: 0; padding-left: 20px; font-size: 12px; }
