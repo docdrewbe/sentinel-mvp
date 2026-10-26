@@ -4,6 +4,7 @@ import {
   applySettled,
   beginContext,
   canAct,
+  capaAdvanceBlockReason,
   capaReviewBlockReason,
   initialPanels,
   panelData,
@@ -20,7 +21,7 @@ import {
   verifyEvidenceReason,
   verifyStatusReason
 } from '../dashboard.js';
-import type { ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
+import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
 const orgs: Organization[] = [
   { id: 'org-cah', name: 'Hospital', kind: 'hospital', beds: 25, location: 'x', createdAt: 't' },
@@ -532,5 +533,67 @@ describe('CAPA review gate and send-back label (unit)', () => {
     assert.equal(startButtonLabel({ status: 'open' }), 'Start');
     assert.equal(startButtonLabel({ status: 'in_progress' }), 'Start');
     assert.equal(startButtonLabel({ status: 'verified' }), 'Start');
+  });
+});
+
+describe('CAPA advance gate (C5)', () => {
+  const capa = (over: Partial<CapaRecord> & { status: CapaStatus }): CapaRecord => ({
+    id: 'c',
+    orgId: 'org-cah',
+    domainId: 'dom-osha-h',
+    finding: 'F (simulated).',
+    severity: 'medium',
+    ownerId: 'u-staff',
+    dueDate: '2026-12-01',
+    evidence: [],
+    createdAt: 't',
+    updatedAt: 't',
+    ...over
+  });
+  const gated = {
+    containment: 'Held (simulated).',
+    rootCause: 'Found (simulated).',
+    correctivePlan: 'Fix (simulated).',
+    preventivePlan: 'Prevent (simulated).',
+    effectivenessCriteria: 'No recurrence in 30 days (simulated).'
+  };
+  const proof = {
+    id: 'e',
+    label: 'proof (simulated)',
+    holder: 'H',
+    custody: [{ seq: 1, fromHolder: null, toHolder: 'H', byUserId: 'u-staff', at: 't' }],
+    updatedAt: 't',
+    kind: 'implementation' as const
+  };
+  const staff = user({ id: 'u-staff', role: 'staff', orgId: 'org-cah' });
+  const mgr = user({ id: 'u-nurse-mgr', role: 'department_manager', orgId: 'org-cah' });
+
+  it('owner-staff advance early phases but never request review', () => {
+    assert.equal(capaAdvanceBlockReason(staff, capa({ status: 'open', ...gated })), null);
+    assert.equal(
+      capaAdvanceBlockReason(staff, capa({ status: 'action_in_progress', ...gated, evidence: [proof] })),
+      'Requires: manager / compliance officer / admin'
+    );
+    assert.equal(capaAdvanceBlockReason(mgr, capa({ status: 'action_in_progress', ...gated, evidence: [proof] })), null);
+  });
+
+  it('reports missing gates verbatim after the role check', () => {
+    assert.equal(
+      capaAdvanceBlockReason(staff, capa({ status: 'open', ownerId: 'u-staff' })),
+      'Containment is required to start the investigation.'
+    );
+    // Role first: a non-owner staffer sees the authority hint, not the gate.
+    assert.equal(
+      capaAdvanceBlockReason(user({ id: 'u-other', role: 'staff', orgId: 'org-cah' }), capa({ status: 'open' })),
+      'Requires: owner / manager / officer / admin'
+    );
+  });
+
+  it('locks closed CAPAs and defers review closure to the review form', () => {
+    assert.equal(capaAdvanceBlockReason(mgr, capa({ status: 'closed', ...gated })), 'Closed CAPA records are locked.');
+    assert.equal(
+      capaAdvanceBlockReason(mgr, capa({ status: 'effectiveness_review', ...gated })),
+      'Close via an effectiveness review.'
+    );
   });
 });

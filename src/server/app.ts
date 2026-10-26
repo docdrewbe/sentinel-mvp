@@ -8,6 +8,7 @@ import {
   ValidationError,
   addEvidence,
   appendAudit,
+  assertLegalCapaTransition,
   capaAddEvidence,
   capaTransferCustody,
   createCapa,
@@ -486,11 +487,22 @@ export function createApp(db: DbShape): express.Express {
     };
     try {
       if (patch.status !== undefined && patch.status !== capa.status) {
-        const action: Action = patch.status === 'closed' ? 'capa.close' : 'capa.update';
+        // C5: requesting effectiveness review needs manager-or-above
+        // authority; owner-staff may advance only as far as Action In
+        // Progress. Unknown statuses fall through to updateCapa.
+        const action: Action =
+          patch.status === 'closed'
+            ? 'capa.close'
+            : patch.status === 'effectiveness_review'
+              ? 'capa.review.request'
+              : 'capa.update';
         if (!can(user, action, capa)) {
           forbidden(res, user, action);
           return;
         }
+        // C5: transition legality reports before the closure checks, so an
+        // illegal jump never surfaces a gate or independence error.
+        assertLegalCapaTransition(capa.status, patch.status);
         if (action === 'capa.close') {
           // C2/C3: closure happens only through an effectiveness review, but
           // an ineligible reviewer is still told so (checked before any

@@ -19,7 +19,8 @@ export type Action =
   | 'capa.create'
   | 'capa.update'
   | 'capa.close'
-  | 'capa.evidence.add';
+  | 'capa.evidence.add'
+  | 'capa.review.request';
 
 /**
  * DEMO PRIVILEGE (explicit): administrators and compliance officers have
@@ -43,7 +44,9 @@ export function can(user: DemoUser, action: Action, record?: OwnedRecord): boole
     return action !== 'task.verify' && action !== 'template.manage' && action !== 'capa.close';
   }
   if (user.role === 'staff') {
-    // Staff may only work on records they own, and may never verify or close.
+    // Staff may only work on records they own, and may never verify or
+    // close. Advancing into effectiveness review needs capa.review.request,
+    // which staff never hold, so owner-staff stop at Action In Progress.
     if (
       action === 'task.update' ||
       action === 'task.submit' ||

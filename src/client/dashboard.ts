@@ -1,12 +1,13 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
-import { visibleOrgIds } from '../shared/rbac.js';
+import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
-import { capaNoEligibleReviewer, capaReviewIneligible, qualifyingEffectivenessEvidence } from '../shared/capa.js';
+import { capaGateMissing, capaNoEligibleReviewer, capaReviewIneligible, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type {
   AuditEvent,
   CapaRecord,
+  CapaStatus,
   ComplianceTask,
   DemoUser,
   Organization,
@@ -222,6 +223,39 @@ export function verifyBlockReason(
       ? NO_ELIGIBLE_VERIFIER_MESSAGE
       : SEPARATION_OF_DUTIES_MESSAGE;
   }
+  return null;
+}
+
+/** C5: the one legal forward step from each non-terminal CAPA status. */
+export const CAPA_NEXT: Record<Exclude<CapaStatus, 'closed'>, CapaStatus> = {
+  open: 'investigation',
+  investigation: 'action_in_progress',
+  action_in_progress: 'effectiveness_review',
+  effectiveness_review: 'closed'
+};
+
+/**
+ * C5: CAPA advance gate for the dashboard. Mirrors the PATCH route order:
+ * role authority first (requesting effectiveness review needs
+ * capa.review.request, which owner-staff never hold), then the shared C1/C2
+ * gate list verbatim. Closed CAPAs are locked; effectiveness review has its
+ * own review form. Mirrors the server; the server still decides.
+ */
+export function capaAdvanceBlockReason(
+  me: DemoUser,
+  capa: CapaRecord
+): string | null {
+  if (capa.status === 'closed') return 'Closed CAPA records are locked.';
+  if (capa.status === 'effectiveness_review') return 'Close via an effectiveness review.';
+  const next = CAPA_NEXT[capa.status];
+  const action: Action = next === 'effectiveness_review' ? 'capa.review.request' : 'capa.update';
+  if (!can(me, action, capa)) {
+    return next === 'effectiveness_review'
+      ? 'Requires: manager / compliance officer / admin'
+      : 'Requires: owner / manager / officer / admin';
+  }
+  const missing = capaGateMissing(capa, next);
+  if (missing.length > 0) return missing.join(' ');
   return null;
 }
 

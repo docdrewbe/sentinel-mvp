@@ -3,8 +3,8 @@ import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { capaGateMissing, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { applySettled, beginContext, canAct, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { qualifyingEffectivenessEvidence } from '../shared/capa.js';
+import { CAPA_NEXT, applySettled, beginContext, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -637,13 +637,6 @@ function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | 
   );
 }
 
-const CAPA_NEXT: Record<Exclude<CapaStatus, 'closed'>, CapaStatus> = {
-  open: 'investigation',
-  investigation: 'action_in_progress',
-  action_in_progress: 'effectiveness_review',
-  effectiveness_review: 'closed'
-};
-
 function CapaFieldEditor({ label, value, canEdit, onSave }: { label: string; value: string | undefined; canEdit: boolean; onSave: (text: string) => void }): JSX.Element | null {
   const [text, setText] = useState(value ?? '');
   if (!canEdit) {
@@ -682,16 +675,15 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   const [selected, setSelected] = useState<string[]>([]);
   const next = capa.status === 'closed' ? null : CAPA_NEXT[capa.status];
   const reviewing = capa.status === 'effectiveness_review';
-  const gateReason = next && !reviewing ? (capaGateMissing(capa, next)[0] ?? null) : null;
+  const advanceBlock = next && !reviewing ? capaAdvanceBlockReason(me, capa) : null;
   const reviewReason = reviewing ? capaReviewBlockReason(me, capa, privilegedIds) : null;
   const qualifying = reviewing ? qualifyingEffectivenessEvidence(capa) : [];
-  const advanceRoleOk = can(me, 'capa.update', capa);
-  const advanceAllowed = ready && advanceRoleOk && gateReason === null && next !== null && !reviewing;
+  const advanceAction = next === 'effectiveness_review' ? 'capa.review.request' : 'capa.update';
+  const advanceRoleOk = can(me, advanceAction, capa);
+  const advanceAllowed = ready && advanceBlock === null && next !== null && !reviewing;
   const advanceTitle = !ready
     ? 'CAPA actions unavailable while data is loading or failed.'
-    : !advanceRoleOk
-      ? 'Requires: owner / manager / officer / admin'
-      : (gateReason ?? '');
+    : (advanceBlock ?? '');
   const formReason = !outcome
     ? 'Choose an outcome.'
     : !rationale.trim()
@@ -707,7 +699,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
       ? 'Requires: compliance officer / admin'
       : (reviewReason ?? formReason ?? '');
   const noteRoleOk = reviewing ? reviewRoleOk : advanceRoleOk;
-  const note = gateReason ?? reviewReason ?? (reviewing ? formReason : null);
+  const note = (advanceRoleOk ? advanceBlock : null) ?? reviewReason ?? (reviewing ? formReason : null);
   const toggle = (id: string): void => {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };

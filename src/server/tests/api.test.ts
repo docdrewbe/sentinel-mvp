@@ -2704,7 +2704,8 @@ describe('CAPA lifecycle (HTTP)', () => {
         status: 'closed'
       });
       assert.equal(jump.status, 400);
-      assert.equal(jump.json.error, 'Close via an effectiveness review.');
+      // C5: the illegal jump reports before the closure checks.
+      assert.match(String(jump.json.error), /Illegal CAPA transition/);
       const skip = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
         status: 'action_in_progress'
       });
@@ -4084,6 +4085,169 @@ describe('C4 CAPA custody transfers (HTTP)', () => {
       assert.equal(forged.status, 200);
       const after = await getCapa(base, 'u-nurse-mgr', 'org-cah', id);
       assert.deepEqual(after.evidence, before.evidence);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('C5 CAPA workflow ordering and authority (HTTP)', () => {
+  interface CapaJson {
+    id: string;
+    status: string;
+    ownerId: string;
+  }
+
+  async function getCapa(base: string, userId: string, orgId: string, id: string): Promise<CapaJson> {
+    const res = await call(base, 'GET', `/api/capas?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const capas = res.json as unknown as CapaJson[];
+    const found = capas.find((c) => c.id === id);
+    assert.ok(found, `capa ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeGatedCapa(base: string, actorId: string, ownerId: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', actorId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'C5 probe finding (simulated).',
+      severity: 'medium',
+      ownerId,
+      dueDate: '2026-12-01',
+      containment: 'Held (simulated).',
+      rootCause: 'Found (simulated).',
+      correctivePlan: 'Fix (simulated).',
+      preventivePlan: 'Prevent (simulated).',
+      effectivenessCriteria: 'No recurrence in 30 days (simulated).'
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function advance(base: string, userId: string, id: string, status: string) {
+    return call(base, 'PATCH', `/api/capas/${id}`, userId, { status });
+  }
+
+  it('reports illegal transitions before closure checks', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeGatedCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      // An involved officer (in actionsBy) still sees the transition error,
+      // not an independence error, when jumping investigation -> closed.
+      assert.equal((await advance(base, 'u-officer', id, 'investigation')).status, 200);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const jump = await advance(base, 'u-officer', id, 'closed');
+      assert.equal(jump.status, 400);
+      assert.match(String(jump.json.error), /Illegal CAPA transition/);
+      const skip = await advance(base, 'u-officer', id, 'effectiveness_review');
+      assert.equal(skip.status, 400);
+      assert.match(String(skip.json.error), /Illegal CAPA transition/);
+      assert.deepEqual(await getCapa(base, 'u-officer', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('lets owner-staff advance to Action In Progress but not into review', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeGatedCapa(base, 'u-nurse-mgr', 'u-staff');
+      assert.equal((await advance(base, 'u-staff', id, 'investigation')).status, 200);
+      assert.equal((await advance(base, 'u-staff', id, 'action_in_progress')).status, 200);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-staff', {
+            label: 'implementation proof (simulated)',
+            holder: 'T. Nguyen'
+          })
+        ).status,
+        201
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await advance(base, 'u-staff', id, 'effectiveness_review');
+      assert.equal(denied.status, 403);
+      assert.match(String(denied.json.error), /capa\.review\.request/);
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      // A same-org manager completes the legitimate path.
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'effectiveness_review')).status, 200);
+      assert.equal((await getCapa(base, 'u-nurse-mgr', 'org-cah', id)).status, 'effectiveness_review');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects non-owner and cross-org review requests', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeGatedCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'investigation')).status, 200);
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'action_in_progress')).status, 200);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'implementation proof (simulated)',
+            holder: 'M. Lee'
+          })
+        ).status,
+        201
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      assert.equal((await advance(base, 'u-staff', id, 'effectiveness_review')).status, 403);
+      assert.equal((await advance(base, 'u-clinic-mgr', id, 'effectiveness_review')).status, 403);
+      assert.equal((await advance(base, 'u-clinic-staff', id, 'investigation')).status, 403);
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('preserves unknown-status and close-via-review reporting', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeGatedCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      const unknown = await advance(base, 'u-nurse-mgr', id, 'archived');
+      assert.equal(unknown.status, 400);
+      assert.equal(unknown.json.error, 'Unknown CAPA status.');
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'investigation')).status, 200);
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'action_in_progress')).status, 200);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'implementation proof (simulated)',
+            holder: 'M. Lee'
+          })
+        ).status,
+        201
+      );
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'effectiveness_review')).status, 200);
+      // Legal transition, eligible reviewer: the review endpoint owns closure.
+      const direct = await advance(base, 'u-officer', id, 'closed');
+      assert.equal(direct.status, 400);
+      assert.equal(direct.json.error, 'Close via an effectiveness review.');
+      assert.equal((await getCapa(base, 'u-officer', 'org-cah', id)).status, 'effectiveness_review');
       assertDiskMatchesMemory(db);
     } finally {
       await close();

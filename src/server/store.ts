@@ -536,6 +536,19 @@ const CAPA_TRANSITIONS: Record<CapaStatus, CapaStatus[]> = {
 
 const CAPA_SEVERITIES: CapaSeverity[] = ['low', 'medium', 'high', 'critical'];
 
+/**
+ * C5: one source for transition legality. The PATCH route calls this before
+ * the closure checks so an illegal jump reports the transition — never a
+ * gate or independence error. Unknown statuses are left for updateCapa,
+ * which still reports 'Unknown CAPA status.'
+ */
+export function assertLegalCapaTransition(from: CapaStatus, to: string): void {
+  if (!CAPA_STATUSES.includes(to as CapaStatus)) return;
+  if (!CAPA_TRANSITIONS[from].includes(to as CapaStatus)) {
+    throw new ValidationError(`Illegal CAPA transition from '${from}' to '${to}'.`);
+  }
+}
+
 function assertCapaNotLocked(capa: CapaRecord): void {
   if (capa.status === 'closed') {
     throw new ValidationError('Closed CAPA records are locked.');
@@ -649,11 +662,7 @@ export function updateCapa(
   if (patch.status !== undefined) {
     if (!CAPA_STATUSES.includes(patch.status)) throw new ValidationError('Unknown CAPA status.');
     if (patch.status !== capa.status) {
-      if (!CAPA_TRANSITIONS[capa.status].includes(patch.status)) {
-        throw new ValidationError(
-          `Illegal CAPA transition from '${capa.status}' to '${patch.status}'.`
-        );
-      }
+      assertLegalCapaTransition(capa.status, patch.status);
       // C1: phase gates run against the record as patched (fields apply
       // first), so one request can document a field and advance on it.
       const missing = capaGateMissing(capa, patch.status);
