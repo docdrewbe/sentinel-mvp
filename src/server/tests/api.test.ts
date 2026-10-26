@@ -1682,3 +1682,266 @@ describe('D5 separation of duties (HTTP)', () => {
     }
   });
 });
+
+describe('D5a reassignment bypass (HTTP)', () => {
+  const SOD = 'Separation of duties: verifier must differ from owner/submitter.';
+
+  interface SubmissionJson {
+    seq: number;
+    submittedBy: string;
+    ownerAtSubmission: string;
+    at: string;
+  }
+
+  interface TaskJson {
+    id: string;
+    status: string;
+    ownerId: string;
+    evidence: Array<Record<string, unknown>>;
+    submittedBy?: string;
+    submissions?: SubmissionJson[];
+    ownersWhileSubmitted?: string[];
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeTask(base: string, actorId: string, ownerId: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/tasks', actorId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      title: 'D5a probe',
+      ownerId,
+      dueDate: '2026-12-01'
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function addEvidence(base: string, actorId: string, id: string): Promise<void> {
+    assert.equal(
+      (
+        await call(base, 'POST', `/api/tasks/${id}/evidence`, actorId, {
+          label: 'attachment (simulated)',
+          holder: 'Case File'
+        })
+      ).status,
+      201
+    );
+  }
+
+  it('blocks verifying after reassigning away a submitted task', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-officer', 'u-officer');
+      await addEvidence(base, 'u-nurse-mgr', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', { status: 'submitted' })).status,
+        200
+      );
+      const submitted = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(submitted.submissions?.length, 1);
+      assert.equal(submitted.submissions?.[0].submittedBy, 'u-nurse-mgr');
+      assert.equal(submitted.submissions?.[0].ownerAtSubmission, 'u-officer');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { ownerId: 'u-nurse-mgr' })).status,
+        200
+      );
+      const moved = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.deepEqual([...(moved.ownersWhileSubmitted ?? [])].sort(), ['u-nurse-mgr', 'u-officer']);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', id), moved);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('blocks the admin variant: own, reassign to staff, verify', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-admin', 'u-admin');
+      await addEvidence(base, 'u-nurse-mgr', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', { status: 'submitted' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', { ownerId: 'u-staff' })).status,
+        200
+      );
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects combined owner+verify requests without applying the owner change', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-officer', 'u-officer');
+      await addEvidence(base, 'u-officer', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'submitted' })).status,
+        200
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        ownerId: 'u-nurse-mgr',
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      const after = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.deepEqual(after, before);
+      assert.equal(after.ownerId, 'u-officer');
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('blocks multi-step reassignment chains', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-officer', 'u-officer');
+      await addEvidence(base, 'u-officer', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'submitted' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { ownerId: 'u-staff' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { ownerId: 'u-nurse-mgr' })).status,
+        200
+      );
+      const moved = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.deepEqual(
+        [...(moved.ownersWhileSubmitted ?? [])].sort(),
+        ['u-nurse-mgr', 'u-officer', 'u-staff']
+      );
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('still allows a genuinely independent verifier', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-officer', 'u-officer');
+      await addEvidence(base, 'u-nurse-mgr', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', { status: 'submitted' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', { status: 'verified' })).status,
+        200
+      );
+      assert.equal((await getTask(base, 'u-admin', 'org-cah', id)).status, 'verified');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('allows handover before submission: prior owner may verify', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-officer', 'u-officer');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'in_progress' })).status,
+        200
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { ownerId: 'u-staff' })).status,
+        200
+      );
+      await addEvidence(base, 'u-staff', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-staff', { status: 'submitted' })).status,
+        200
+      );
+      const submitted = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(submitted.ownersWhileSubmitted, undefined);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'verified' })).status,
+        200
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back a submitted-task reassignment when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeTask(base, 'u-officer', 'u-officer');
+      await addEvidence(base, 'u-officer', id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', { status: 'submitted' })).status,
+        200
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getTask(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+          ownerId: 'u-nurse-mgr'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

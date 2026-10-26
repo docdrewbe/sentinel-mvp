@@ -299,4 +299,31 @@ describe('D5 separation-of-duties hint (unit)', () => {
     const own = { ownerId: 'u-officer', submittedBy: 'u-officer', status: 'open' as const };
     assert.equal(verifyBlockReason({ id: 'u-officer' }, own), null);
   });
+
+  it('D5a: blocks owners at submission and while submitted, not just current', () => {
+    const task = {
+      ownerId: 'u-nurse-mgr',
+      submittedBy: 'u-nurse-mgr',
+      submissions: [
+        { seq: 1, submittedBy: 'u-nurse-mgr', ownerAtSubmission: 'u-officer', at: '2026-10-26T00:00:00.000Z' }
+      ],
+      ownersWhileSubmitted: ['u-officer', 'u-nurse-mgr'],
+      status: 'submitted' as const
+    };
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, task), MSG);
+    assert.equal(verifyBlockReason({ id: 'u-nurse-mgr' }, task), MSG);
+    assert.equal(verifyBlockReason({ id: 'u-admin' }, task), null);
+  });
+
+  it('D5a: a handover before submission keeps the prior owner eligible', () => {
+    const task = {
+      ownerId: 'u-staff',
+      submittedBy: 'u-staff',
+      submissions: [
+        { seq: 1, submittedBy: 'u-staff', ownerAtSubmission: 'u-staff', at: '2026-10-26T00:00:00.000Z' }
+      ],
+      status: 'submitted' as const
+    };
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, task), null);
+  });
 });

@@ -20,6 +20,7 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
+import { ineligibleVerifiers } from '../shared/verification.js';
 import type { ComplianceTask, DemoUser } from '../shared/types.js';
 import { SEPARATION_OF_DUTIES_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
@@ -204,13 +205,13 @@ export function createApp(db: DbShape): express.Express {
           forbidden(res, user, action);
           return;
         }
-        // D5: separation of duties lives here, outside can(), so the role
-        // matrix stays simple. The verifier must differ from the task owner
-        // and from the user who submitted it.
+        // D5/D5a: separation of duties lives here, outside can(), so the
+        // role matrix stays simple. Eligibility comes from the full
+        // submission/ownership history, not just the current owner.
         if (
           action === 'task.verify' &&
           task.status === 'submitted' &&
-          (user.id === task.ownerId || user.id === task.submittedBy)
+          ineligibleVerifiers(task).includes(user.id)
         ) {
           res.status(403).json({ error: SEPARATION_OF_DUTIES_MESSAGE });
           return;
@@ -226,21 +227,44 @@ export function createApp(db: DbShape): express.Express {
         return;
       }
       const oldStatus = task.status;
+      const ownerBefore = task.ownerId;
       const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
       const updated = mutateDb(db, () => {
         const next = updateTask(db, task.id, patch);
-        // D5: record the submitter atomically with the transition into
-        // `submitted`, so verification can always tell who submitted.
+        const now = new Date().toISOString();
+        // D5/D5a: record the submission atomically with the transition into
+        // `submitted`: latest submitter plus an append-only history entry.
         if (next.status === 'submitted' && oldStatus !== 'submitted') {
           next.submittedBy = user.id;
+          next.submissions = [
+            ...(next.submissions ?? []),
+            {
+              seq: (next.submissions ?? []).length + 1,
+              submittedBy: user.id,
+              ownerAtSubmission: next.ownerId,
+              at: now
+            }
+          ];
         }
+        // D5a: reassigning submitted work stays allowed (legitimate cover),
+        // but both sides join the ownership-while-submitted record, so the
+        // move can never make anyone eligible to verify.
+        if (next.ownerId !== ownerBefore && oldStatus === 'submitted') {
+          const seen = new Set(next.ownersWhileSubmitted ?? []);
+          seen.add(ownerBefore);
+          seen.add(next.ownerId);
+          next.ownersWhileSubmitted = [...seen];
+        }
+        const reassigned = next.ownerId !== ownerBefore;
         appendAudit(db, {
           actorId: user.id,
           action: statusChanged ? `task.${next.status}` : 'task.updated',
           recordType: 'task',
           recordId: task.id,
           orgId: task.orgId,
-          detail: `${next.title} [${oldStatus} -> ${next.status}]`
+          detail:
+            `${next.title} [${oldStatus} -> ${next.status}]` +
+            (reassigned ? ` (owner ${ownerBefore} -> ${next.ownerId})` : '')
         });
         return next;
       });

@@ -2,6 +2,7 @@
 // Kept free of React so the rules are unit-testable without a DOM.
 import { visibleOrgIds } from '../shared/rbac.js';
 import { SEPARATION_OF_DUTIES_MESSAGE } from '../shared/types.js';
+import { ineligibleVerifiers } from '../shared/verification.js';
 import type {
   AuditEvent,
   ComplianceTask,
@@ -126,16 +127,17 @@ export function submitBlockReason(
 }
 
 /**
- * D5: separation-of-duties reason when `me` must not verify `task` (they own
- * it or submitted it). Only submitted tasks are verifiable, so anything else
- * returns null. Mirrors the server message; the server still decides.
+ * D5/D5a: separation-of-duties reason when `me` must not verify `task`.
+ * Eligibility comes from the full submission/ownership history. Only
+ * submitted tasks are verifiable, so anything else returns null. Mirrors
+ * the server message; the server still decides.
  */
 export function verifyBlockReason(
   me: Pick<DemoUser, 'id'>,
-  task: Pick<ComplianceTask, 'ownerId' | 'submittedBy' | 'status'>
+  task: Pick<ComplianceTask, 'ownerId' | 'submittedBy' | 'submissions' | 'ownersWhileSubmitted' | 'status'>
 ): string | null {
   if (task.status !== 'submitted') return null;
-  if (me.id === task.ownerId || me.id === task.submittedBy) {
+  if (ineligibleVerifiers(task).includes(me.id)) {
     return SEPARATION_OF_DUTIES_MESSAGE;
   }
   return null;

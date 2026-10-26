@@ -87,6 +87,24 @@ export interface ComplianceTask {
    * submitted.
    */
   submittedBy?: string;
+  /**
+   * D5a: append-only, server-maintained submission history. One entry per
+   * transition into `submitted`; never accepted from clients.
+   */
+  submissions?: SubmissionRecord[];
+  /**
+   * D5a: every user who owned the task while it was `submitted`
+   * (reassignments of submitted tasks add both sides). Server-maintained.
+   */
+  ownersWhileSubmitted?: string[];
+}
+
+/** D5a: one recorded submission: who submitted whose work, and when. */
+export interface SubmissionRecord {
+  seq: number;
+  submittedBy: string;
+  ownerAtSubmission: string;
+  at: string;
 }
 
 /** D5: shared server/dashboard separation-of-duties rejection message. */
