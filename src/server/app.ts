@@ -23,6 +23,7 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
+import { capaGateMissing } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser } from '../shared/types.js';
 import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
@@ -480,20 +481,31 @@ export function createApp(db: DbShape): express.Express {
             res.status(400).json({ error: 'Closing a CAPA requires a documented effectiveness decision.' });
             return;
           }
+          // C1: re-check every phase gate at closure against the unpatched
+          // record; blanking attempts in the same request are caught by the
+          // erasure rule inside updateCapa and rolled back.
+          const missing = capaGateMissing(capa, 'closed');
+          if (missing.length > 0) {
+            res.status(400).json({ error: missing.join(' ') });
+            return;
+          }
         }
       }
-      const touchesFields =
-        patch.finding !== undefined ||
-        patch.severity !== undefined ||
-        patch.containment !== undefined ||
-        patch.rootCause !== undefined ||
-        patch.ownerId !== undefined ||
-        patch.dueDate !== undefined ||
-        patch.domainId !== undefined ||
-        patch.correctivePlan !== undefined ||
-        patch.preventivePlan !== undefined ||
-        patch.effectivenessDecision !== undefined;
-      if (touchesFields && !can(user, 'capa.update', capa)) {
+      const editedFields = (
+        [
+          'finding',
+          'severity',
+          'containment',
+          'rootCause',
+          'ownerId',
+          'dueDate',
+          'domainId',
+          'correctivePlan',
+          'preventivePlan',
+          'effectivenessDecision'
+        ] as const
+      ).filter((field) => patch[field] !== undefined);
+      if (editedFields.length > 0 && !can(user, 'capa.update', capa)) {
         forbidden(res, user, 'capa.update');
         return;
       }
@@ -525,7 +537,9 @@ export function createApp(db: DbShape): express.Express {
           recordType: 'capa',
           recordId: capa.id,
           orgId: capa.orgId,
-          detail: `${next.finding.slice(0, 80)} [${oldStatus} -> ${next.status}]`
+          detail:
+            `${next.finding.slice(0, 80)} [${oldStatus} -> ${next.status}]` +
+            (editedFields.length > 0 ? ` (fields: ${editedFields.join(', ')})` : '')
         });
         return next;
       });

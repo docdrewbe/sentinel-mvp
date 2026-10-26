@@ -34,6 +34,7 @@ import type {
 } from '../shared/types.js';
 import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
+import { CAPA_GATE_FIELD_LABELS, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
 import { nextDueDate } from '../shared/scheduling.js';
 
@@ -598,6 +599,11 @@ export function updateCapa(
   for (const field of ['containment', 'rootCause', 'correctivePlan', 'preventivePlan', 'effectivenessDecision'] as const) {
     if (patch[field] !== undefined) {
       const text = patch[field]?.trim() ?? '';
+      if (!text && (capaRequiredFields(capa.status) as string[]).includes(field)) {
+        throw new ValidationError(
+          `${CAPA_GATE_FIELD_LABELS[field as keyof typeof CAPA_GATE_FIELD_LABELS]} is required at this stage and cannot be removed.`
+        );
+      }
       if (text) capa[field] = text;
       else delete capa[field];
     }
@@ -618,10 +624,16 @@ export function updateCapa(
   }
   if (patch.status !== undefined) {
     if (!CAPA_STATUSES.includes(patch.status)) throw new ValidationError('Unknown CAPA status.');
-    if (patch.status !== capa.status && !CAPA_TRANSITIONS[capa.status].includes(patch.status)) {
-      throw new ValidationError(
-        `Illegal CAPA transition from '${capa.status}' to '${patch.status}'.`
-      );
+    if (patch.status !== capa.status) {
+      if (!CAPA_TRANSITIONS[capa.status].includes(patch.status)) {
+        throw new ValidationError(
+          `Illegal CAPA transition from '${capa.status}' to '${patch.status}'.`
+        );
+      }
+      // C1: phase gates run against the record as patched (fields apply
+      // first), so one request can document a field and advance on it.
+      const missing = capaGateMissing(capa, patch.status);
+      if (missing.length > 0) throw new ValidationError(missing.join(' '));
     }
     capa.status = patch.status;
   }

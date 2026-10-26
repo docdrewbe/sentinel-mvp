@@ -3,6 +3,7 @@ import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
+import { capaGateMissing } from '../shared/capa.js';
 import { applySettled, beginContext, canAct, capaCloseBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
@@ -440,6 +441,7 @@ export default function App(): JSX.Element {
                   run(async () => api.patchCapa(capa.id, { status, ...(effectivenessDecision ? { effectivenessDecision } : {}) }))
                 }
                 onAddEvidence={(label, holder) => run(async () => api.addCapaEvidence(capa.id, { label, holder }))}
+                onSaveField={(field, text) => run(async () => api.patchCapa(capa.id, { [field]: text }))}
               />
             )}
           </div>
@@ -635,7 +637,25 @@ const CAPA_NEXT: Record<Exclude<CapaStatus, 'closed'>, CapaStatus> = {
   effectiveness_review: 'closed'
 };
 
-function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, onAdvance, onAddEvidence }: {
+function CapaFieldEditor({ label, value, canEdit, onSave }: { label: string; value: string | undefined; canEdit: boolean; onSave: (text: string) => void }): JSX.Element | null {
+  const [text, setText] = useState(value ?? '');
+  if (!canEdit) {
+    return value ? (<p><strong>{label}:</strong> {value}</p>) : null;
+  }
+  return (
+    <div className="form">
+      <label>{label}</label>
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder={`${label} (simulated)…`} />
+      <div>
+        <button disabled={text.trim() === (value ?? '').trim()} onClick={() => onSave(text)}>
+          Save {label.toLowerCase()}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, onAdvance, onAddEvidence, onSaveField }: {
   me: DemoUser;
   capa: CapaRecord;
   ready: boolean;
@@ -645,19 +665,24 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   trail: AuditEvent[];
   onAdvance: (status: CapaStatus, effectivenessDecision?: string) => void;
   onAddEvidence: (label: string, holder: string) => void;
+  onSaveField: (field: 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan', text: string) => void;
 }): JSX.Element {
   const [decision, setDecision] = useState('');
   const next = capa.status === 'closed' ? null : CAPA_NEXT[capa.status];
   const closing = capa.status === 'effectiveness_review';
   const closeReason = closing ? capaCloseBlockReason(me, capa) : null;
+  // C1: mirror the server phase gates; the first missing item explains the button.
+  const gateReason = next && !closing ? (capaGateMissing(capa, next)[0] ?? null) : null;
+  const closeGateReason = closing ? (capaGateMissing(capa, 'closed')[0] ?? null) : null;
   const roleOk = can(me, closing ? 'capa.close' : 'capa.update', capa);
   const decisionOk = !closing || decision.trim().length > 0;
-  const allowed = ready && roleOk && closeReason === null && decisionOk && next !== null;
+  const reason = closeReason ?? (!decisionOk ? 'Document the effectiveness decision to close.' : null) ?? closeGateReason ?? gateReason;
+  const allowed = ready && roleOk && reason === null && next !== null;
   const title = !ready
     ? 'CAPA actions unavailable while data is loading or failed.'
     : !roleOk
       ? `Requires: ${closing ? 'compliance officer / admin' : 'owner / manager / officer / admin'}`
-      : (closeReason ?? (!decisionOk ? 'Document the effectiveness decision to close.' : ''));
+      : (reason ?? '');
   return (
     <>
       <h4>{capa.finding}</h4>
@@ -672,10 +697,22 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
           <div><dt>Closed by</dt><dd>{userName.get(capa.closedBy) ?? capa.closedBy}{capa.closedAt ? ` · ${new Date(capa.closedAt).toLocaleString()}` : ''}</dd></div>
         )}
       </dl>
-      {capa.containment && <p><strong>Containment:</strong> {capa.containment}</p>}
-      {capa.rootCause && <p><strong>Root cause:</strong> {capa.rootCause}</p>}
-      {capa.correctivePlan && <p><strong>Corrective plan:</strong> {capa.correctivePlan}</p>}
-      {capa.preventivePlan && <p><strong>Preventive plan:</strong> {capa.preventivePlan}</p>}
+      {(
+        [
+          ['containment', 'Containment', capa.containment],
+          ['rootCause', 'Root cause', capa.rootCause],
+          ['correctivePlan', 'Corrective plan', capa.correctivePlan],
+          ['preventivePlan', 'Preventive plan', capa.preventivePlan]
+        ] as const
+      ).map(([field, label, value]) => (
+        <CapaFieldEditor
+          key={`${capa.id}-${field}-${value ?? ''}`}
+          label={label}
+          value={value}
+          canEdit={ready && can(me, 'capa.update', capa) && capa.status !== 'closed'}
+          onSave={(text) => onSaveField(field, text)}
+        />
+      ))}
       {capa.effectivenessDecision && <p><strong>Effectiveness decision:</strong> {capa.effectivenessDecision}</p>}
       {next && (
         <div className="status-btns">
@@ -693,7 +730,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
           </button>
         </div>
       )}
-      {closeReason && roleOk && <p className="sod-note">{closeReason}</p>}
+      {reason && roleOk && ready && <p className="sod-note">{reason}</p>}
       <h5>Evidence ({capa.evidence.length})</h5>
       {capa.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
       <ul className="evidence">

@@ -24,6 +24,7 @@ const {
 } = await import('../store.js');
 const { seedDatabase } = await import('../seed.js');
 const { requiredEvidenceCount } = await import('../../shared/evidence.js');
+const { capaGateMissing, capaRequiredFields } = await import('../../shared/capa.js');
 
 describe('append-only audit log', () => {
   it('chains events with increasing sequence numbers and a verifiable hash', () => {
@@ -536,5 +537,49 @@ describe('D5c submission-history triage (unit)', () => {
     assert.ok(task);
     task.submissions = [];
     assert.deepEqual(findTasksMissingSubmissionHistory(db), ['task-med-storage']);
+  });
+});
+
+describe('C1 CAPA phase gates (unit)', () => {
+  const bare = { evidence: [] as unknown[] };
+
+  it('names the missing fields for each transition', () => {
+    assert.deepEqual(capaGateMissing(bare, 'investigation'), [
+      'Containment is required to start the investigation.'
+    ]);
+    assert.deepEqual(capaGateMissing(bare, 'action_in_progress'), [
+      'Containment is required to begin action.',
+      'Root cause is required to begin action.'
+    ]);
+    const missing = capaGateMissing(bare, 'effectiveness_review');
+    assert.equal(missing.length, 5);
+    assert.ok(missing.some((m) => m.includes('Corrective plan')));
+    assert.ok(missing.some((m) => m.includes('implementation evidence')));
+    assert.deepEqual(capaGateMissing(bare, 'open'), []);
+  });
+
+  it('passes a fully documented record at every gate', () => {
+    const full = {
+      containment: 'Held.',
+      rootCause: 'Found.',
+      correctivePlan: 'Fix.',
+      preventivePlan: 'Prevent.',
+      evidence: [{}]
+    };
+    for (const target of ['investigation', 'action_in_progress', 'effectiveness_review', 'closed'] as const) {
+      assert.deepEqual(capaGateMissing(full, target), []);
+    }
+  });
+
+  it('tracks required fields per stage for the erasure rule', () => {
+    assert.deepEqual(capaRequiredFields('open'), []);
+    assert.deepEqual(capaRequiredFields('investigation'), ['containment']);
+    assert.deepEqual(capaRequiredFields('action_in_progress'), ['containment', 'rootCause']);
+    assert.deepEqual(capaRequiredFields('effectiveness_review'), [
+      'containment',
+      'rootCause',
+      'correctivePlan',
+      'preventivePlan'
+    ]);
   });
 });
