@@ -547,4 +547,16 @@ describe('D6 organization isolation (HTTP)', () => {
       await close();
     }
   });
+
+  it('reports an unhealthy chain when a version is unsupported', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      (db.audit[0] as unknown as Record<string, unknown>).hashVersion = 99;
+      const health = await call(base, 'GET', '/api/health', 'u-admin');
+      assert.equal(health.status, 200);
+      assert.equal(health.json.auditChainOk, false);
+    } finally {
+      await close();
+    }
+  });
 });

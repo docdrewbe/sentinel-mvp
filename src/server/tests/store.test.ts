@@ -97,56 +97,109 @@ describe('interrupted-save detection', () => {
   });
 });
 
-describe('hash versions (F1)', () => {
-  // Pinned copy of the pre-F1 (v1) hash computation. The v1 field list is
-  // frozen; this independent copy fails loudly if it ever drifts.
-  const v1hash = (e: {
-    seq: number;
-    id: string;
-    actorId: string;
-    action: string;
-    recordType: string;
-    recordId: string;
-    timestamp: string;
-    detail: string;
-    prevHash: string;
-  }): string =>
-    createHash('sha256')
-      .update(
-        [
-          e.seq,
-          e.id,
-          e.actorId,
-          e.action,
-          e.recordType,
-          e.recordId,
-          e.timestamp,
-          e.detail,
-          e.prevHash
-        ].join('|')
-      )
-      .digest('hex');
+// Pinned copy of the pre-F1 (v1) hash computation. The v1 field list is
+// frozen; this independent copy fails loudly if it ever drifts.
+const v1hash = (e: {
+  seq: number;
+  id: string;
+  actorId: string;
+  action: string;
+  recordType: string;
+  recordId: string;
+  timestamp: string;
+  detail: string;
+  prevHash: string;
+}): string =>
+  createHash('sha256')
+    .update(
+      [
+        e.seq,
+        e.id,
+        e.actorId,
+        e.action,
+        e.recordType,
+        e.recordId,
+        e.timestamp,
+        e.detail,
+        e.prevHash
+      ].join('|')
+    )
+    .digest('hex');
 
-  // A genuine v1-shaped chain: backfilled orgId present, no hashVersion.
-  function v1chain(): AuditEvent[] {
-    const t = '2026-10-26T00:00:00.000Z';
-    const e1 = {
-      seq: 1,
-      id: 'v1-a',
-      actorId: 'u-admin',
-      action: 'task.created',
-      recordType: 'task',
-      recordId: 't1',
-      orgId: 'org-cah',
-      timestamp: t,
-      detail: 'first',
-      prevHash: 'GENESIS'
+// Pinned copy of the v2 hash computation (canonical JSON array, frozen order).
+const v2hash = (e: {
+  seq: number;
+  id: string;
+  actorId: string;
+  action: string;
+  recordType: string;
+  recordId: string;
+  timestamp: string;
+  detail: string;
+  prevHash: string;
+  hashVersion: number;
+  orgId: string;
+}): string =>
+  createHash('sha256')
+    .update(
+      JSON.stringify([
+        e.seq,
+        e.id,
+        e.actorId,
+        e.action,
+        e.recordType,
+        e.recordId,
+        e.timestamp,
+        e.detail,
+        e.prevHash,
+        e.hashVersion,
+        e.orgId
+      ])
+    )
+    .digest('hex');
+
+// A genuine v1-shaped chain: backfilled orgId present, no hashVersion.
+function v1chain(): AuditEvent[] {
+  const t = '2026-10-26T00:00:00.000Z';
+  const e1 = {
+    seq: 1,
+    id: 'v1-a',
+    actorId: 'u-admin',
+    action: 'task.created',
+    recordType: 'task',
+    recordId: 't1',
+    orgId: 'org-cah',
+    timestamp: t,
+    detail: 'first',
+    prevHash: 'GENESIS'
+  };
+  const h1 = { ...e1, hash: v1hash(e1) };
+  const e2 = { ...e1, seq: 2, id: 'v1-b', recordId: 't2', detail: 'second', prevHash: h1.hash };
+  return [h1, { ...e2, hash: v1hash(e2) }] as AuditEvent[];
+}
+
+// Attacker simulation: re-link and re-hash from index onward, using the form
+// production applies to each event's own version.
+function rehashFrom(chain: AuditEvent[], from: number): void {
+  for (let i = from; i < chain.length; i++) {
+    const e = chain[i];
+    e.prevHash = i === 0 ? 'GENESIS' : chain[i - 1].hash;
+    const base = {
+      seq: e.seq,
+      id: e.id,
+      actorId: e.actorId,
+      action: e.action,
+      recordType: e.recordType,
+      recordId: e.recordId,
+      timestamp: e.timestamp,
+      detail: e.detail,
+      prevHash: e.prevHash
     };
-    const h1 = { ...e1, hash: v1hash(e1) };
-    const e2 = { ...e1, seq: 2, id: 'v1-b', recordId: 't2', detail: 'second', prevHash: h1.hash };
-    return [h1, { ...e2, hash: v1hash(e2) }] as AuditEvent[];
+    e.hash = e.hashVersion === 2 ? v2hash({ ...base, hashVersion: 2, orgId: e.orgId }) : v1hash(base);
   }
+}
 
+describe('hash versions (F1)', () => {
   const freshV2 = () => {
     const db = emptyDb();
     appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', orgId: 'org-cah', detail: 'first' });
@@ -264,6 +317,77 @@ describe('F1a canonical v2 encoding', () => {
     assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
     db.audit[0].detail = 'mix "q" \\ back | pipe\nnewline ünïcode ✗';
     assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 1 });
+  });
+});
+
+describe('F1b version allow-list', () => {
+  const freshV2x3 = () => {
+    const db = emptyDb();
+    const rows = [
+      ['u1', 'r1', 'first'],
+      ['u2', 'r2', 'second'],
+      ['u3', 'r3', 'third']
+    ] as const;
+    for (const [actorId, recordId, detail] of rows) {
+      appendAudit(db, { actorId, action: 'a', recordType: 't', recordId, orgId: 'org-cah', detail });
+    }
+    return db;
+  };
+
+  it('rejects unsupported versions even when the chain is re-hashed', () => {
+    const bad: unknown[] = [1, 0, 3, 99, '2', null, 2.5];
+    for (const version of bad) {
+      const db = freshV2x3();
+      (db.audit[1] as unknown as Record<string, unknown>).hashVersion = version;
+      db.audit[1].orgId = 'org-clinic';
+      rehashFrom(db.audit, 1);
+      assert.deepEqual(
+        verifyAuditChain(db.audit),
+        { ok: false, badSeq: 2 },
+        `hashVersion=${String(version)}`
+      );
+    }
+  });
+
+  it('rejects downgrades to v1 after v2 events', () => {
+    const db = freshV2x3();
+    delete (db.audit[1] as unknown as Record<string, unknown>).hashVersion;
+    db.audit[1].orgId = 'org-clinic';
+    rehashFrom(db.audit, 1);
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 2 });
+  });
+
+  it('accepts v1-then-v2 but rejects v2-then-v1', () => {
+    const mixed = v1chain();
+    mixed.push(
+      buildAuditEvent(mixed, {
+        actorId: 'u1',
+        action: 'c',
+        recordType: 't',
+        recordId: 'r3',
+        orgId: 'org-cah',
+        detail: 'third'
+      })
+    );
+    assert.deepEqual(verifyAuditChain(mixed), { ok: true });
+    const db = emptyDb();
+    appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', orgId: 'org-cah', detail: 'first' });
+    const tail = {
+      seq: 2,
+      id: 'v1-tail',
+      actorId: 'u2',
+      action: 'b',
+      recordType: 't',
+      recordId: 'r2',
+      orgId: 'org-cah',
+      timestamp: new Date().toISOString(),
+      detail: 'second',
+      prevHash: db.audit[0].hash,
+      hash: ''
+    };
+    tail.hash = v1hash(tail);
+    db.audit.push(tail as AuditEvent);
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: false, badSeq: 2 });
   });
 });
 

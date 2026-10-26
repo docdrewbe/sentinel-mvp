@@ -216,7 +216,14 @@ export function buildAuditEvent(audit: AuditEvent[], input: AuditInput): AuditEv
 /** Verify the full hash chain. Returns the first bad sequence number, if any. */
 export function verifyAuditChain(audit: AuditEvent[]): { ok: boolean; badSeq?: number } {
   let prev = 'GENESIS';
+  let seenV2 = false;
   for (const e of audit) {
+    // Allow-list: absent (legacy v1) or exactly 2. Anything else fails here,
+    // even if its hash was recomputed — the format itself is unauthorized.
+    if ('hashVersion' in e && e.hashVersion !== 2) return { ok: false, badSeq: e.seq };
+    // Monotonic: once v2 appears, every later event must be v2.
+    if (seenV2 && e.hashVersion !== 2) return { ok: false, badSeq: e.seq };
+    if (e.hashVersion === 2) seenV2 = true;
     if (e.prevHash !== prev) return { ok: false, badSeq: e.seq };
     const { hash, ...rest } = e;
     if (eventHash(rest) !== hash) return { ok: false, badSeq: e.seq };
