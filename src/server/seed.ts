@@ -378,6 +378,37 @@ export function seedDatabase(): DbShape {
     })
   );
 
+  // Calendar slice 1: synthetic hospital obligation schedules. Target dates
+  // are illustrative organization-selected targets, not legal mandates.
+  const oblTargetA = dueInDays(10);
+  const oblTargetB = dueInDays(25);
+  db.obligations = [
+    {
+      id: 'obl-access-review',
+      orgId: 'org-cah',
+      templateId: 'tpl-access-review',
+      nextDueDate: oblTargetA,
+      anchorDay: Number(oblTargetA.slice(8, 10)),
+      assigneeId: 'u-officer',
+      active: true,
+      generatedPeriods: [],
+      createdAt: t,
+      updatedAt: t
+    },
+    {
+      id: 'obl-med-storage',
+      orgId: 'org-cah',
+      templateId: 'tpl-med-storage',
+      nextDueDate: oblTargetB,
+      anchorDay: Number(oblTargetB.slice(8, 10)),
+      assigneeId: 'u-nurse-mgr',
+      active: true,
+      generatedPeriods: [],
+      createdAt: t,
+      updatedAt: t
+    }
+  ];
+
   // First-slice CAPA example (synthetic hospital finding; no PHI).
   db.capas = [
     {

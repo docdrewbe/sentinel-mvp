@@ -12,13 +12,16 @@ import {
   capaAddEvidence,
   capaTransferCustody,
   createCapa,
+  createObligation,
   createTask,
   createTemplate,
+  generateObligationInstance,
   instantiateTemplate,
   mutateDb,
   monotonicNow,
   transferCustody,
   updateCapa,
+  updateObligation,
   updateTask,
   updateTemplate,
   verifyAuditChain,
@@ -1018,6 +1021,162 @@ export function createApp(db: DbShape): express.Express {
         return created;
       });
       res.status(201).json(presentTask(task));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Recurring obligations (calendar slice 1): template cadences bound to
+  // organization-selected target dates. Reads are tenant-scoped; writes
+  // reuse the task.create/task.update matrix; generation is atomic with
+  // its audit events. Target dates are illustrative, never legal mandates.
+  // ---------------------------------------------------------------------------
+  app.get('/api/obligations', (req: AuthRequest, res) => {
+    const scope = readScope(req, res);
+    if (!scope) return;
+    const active = String(req.query.active ?? '');
+    res.json(
+      db.obligations.filter(
+        (o) => scope.includes(o.orgId) && (!active || String(o.active) === active)
+      )
+    );
+  });
+
+  app.post('/api/obligations', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const input = req.body as {
+      orgId: string;
+      templateId: string;
+      nextDueDate: string;
+      assigneeId?: string;
+    };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    if (!can(user, 'task.create')) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    if (rejectBadText(res, req.body, ['orgId', 'templateId', 'nextDueDate', 'assigneeId'])) return;
+    try {
+      const obligation = mutateDb(db, () => {
+        const created = createObligation(db, {
+          orgId: input.orgId,
+          templateId: input.templateId,
+          nextDueDate: input.nextDueDate,
+          ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {})
+        });
+        const template = db.templates.find((t) => t.id === created.templateId);
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'obligation.created',
+          recordType: 'obligation',
+          recordId: created.id,
+          orgId: created.orgId,
+          detail: `From template: ${template?.title ?? created.templateId}; target ${created.nextDueDate} (illustrative)`
+        });
+        return created;
+      });
+      res.status(201).json(obligation);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.patch('/api/obligations/:id', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const obligation = db.obligations.find((o) => o.id === req.params.id);
+    if (!obligation) {
+      res.status(404).json({ error: 'Obligation not found.' });
+      return;
+    }
+    if (!visibleOrgIds(user, db.orgs.map((o) => o.id)).includes(obligation.orgId)) {
+      orgForbidden(req, res);
+      return;
+    }
+    // Scheduling follows the task matrix: managers run their own org's
+    // schedules, and assigned staff may adjust their own targets.
+    if (!can(user, 'task.update', { orgId: obligation.orgId, ownerId: obligation.assigneeId ?? '' })) {
+      forbidden(res, user, 'task.update');
+      return;
+    }
+    if (rejectBadText(res, req.body, ['nextDueDate', 'assigneeId'])) return;
+    const patch = req.body as { nextDueDate?: string; assigneeId?: string; active?: boolean };
+    if (patch.active !== undefined && typeof patch.active !== 'boolean') {
+      res.status(400).json({ error: 'active must be true or false.' });
+      return;
+    }
+    try {
+      const updated = mutateDb(db, () => {
+        const next = updateObligation(db, obligation.id, {
+          ...(patch.nextDueDate !== undefined ? { nextDueDate: patch.nextDueDate } : {}),
+          ...(patch.assigneeId !== undefined ? { assigneeId: patch.assigneeId } : {}),
+          ...(patch.active !== undefined ? { active: patch.active } : {})
+        });
+        const fields = ['nextDueDate', 'assigneeId', 'active'].filter(
+          (f) => (patch as Record<string, unknown>)[f] !== undefined
+        );
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'obligation.updated',
+          recordType: 'obligation',
+          recordId: obligation.id,
+          orgId: obligation.orgId,
+          detail: `Target ${next.nextDueDate} (illustrative)${fields.length > 0 ? ` (fields: ${fields.join(', ')})` : ''}`
+        });
+        return next;
+      });
+      res.json(updated);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.post('/api/obligations/:id/generate', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const obligation = db.obligations.find((o) => o.id === req.params.id);
+    if (!obligation) {
+      res.status(404).json({ error: 'Obligation not found.' });
+      return;
+    }
+    if (
+      (user.role === 'department_manager' || user.role === 'staff') &&
+      obligation.orgId !== user.orgId
+    ) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    if (!can(user, 'task.create')) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    try {
+      const { task, obligation: advanced } = mutateDb(db, () => {
+        const out = generateObligationInstance(db, obligation.id, user.id);
+        const template = db.templates.find((t) => t.id === out.obligation.templateId);
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'task.created',
+          recordType: 'task',
+          recordId: out.task.id,
+          orgId: out.task.orgId,
+          detail: `From obligation: ${template?.title ?? out.obligation.templateId} (${out.task.periodKey})`
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'obligation.instance.generated',
+          recordType: 'obligation',
+          recordId: out.obligation.id,
+          orgId: out.obligation.orgId,
+          detail: out.obligation.active
+            ? `Generated ${out.task.id} for ${out.task.periodKey}; next target ${out.obligation.nextDueDate}`
+            : `Generated ${out.task.id} for ${out.task.periodKey}; schedule complete`
+        });
+        return out;
+      });
+      res.status(201).json({ task: presentTask(task), obligation: advanced });
     } catch (e) {
       sendError(req, res, e);
     }

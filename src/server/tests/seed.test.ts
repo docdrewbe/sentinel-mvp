@@ -152,6 +152,25 @@ describe('synthetic demo data', () => {
     assert.equal(capa.effectivenessReviews, undefined);
   });
 
+  it('seeds synthetic hospital obligations with valid references', () => {
+    const db = seedDatabase();
+    assert.equal(db.obligations.length, 2);
+    for (const o of db.obligations) {
+      assert.equal(o.orgId, 'org-cah');
+      const template = db.templates.find((t) => t.id === o.templateId);
+      assert.ok(template, `${o.id}: template missing`);
+      assert.equal(template?.orgId, o.orgId);
+      assert.equal(template?.active, true);
+      if (o.assigneeId) {
+        assert.ok(db.users.some((u) => u.id === o.assigneeId && u.orgId === o.orgId));
+      }
+      assert.match(o.nextDueDate, /^\d{4}-\d{2}-\d{2}$/);
+      assert.equal(o.anchorDay, Number(o.nextDueDate.slice(8, 10)));
+      assert.equal(o.active, true);
+      assert.deepEqual(o.generatedPeriods, []);
+    }
+  });
+
   it('seeds CAPA involvement history with an eligible reviewer left', () => {
     const db = seedDatabase();
     const capa = db.capas[0];

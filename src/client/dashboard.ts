@@ -1,6 +1,7 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
+import { addDaysISO } from '../shared/scheduling.js';
 import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
 import { capaGateMissing, capaNoEligibleReviewer, capaReviewIneligible, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
@@ -12,6 +13,7 @@ import type {
   DemoUser,
   EvidenceRef,
   Organization,
+  RecurringObligation,
   RegulatoryDomain,
   TaskTemplate
 } from '../shared/types.js';
@@ -37,20 +39,21 @@ export interface Panels {
   audit: PanelState<AuditEvent>;
   templates: PanelState<TaskTemplate>;
   capas: PanelState<CapaRecord>;
+  obligations: PanelState<RecurringObligation>;
 }
 
 export type PanelName = keyof Panels;
 
 export function initialPanels(): Panels {
   const fresh = <T,>(): PanelState<T> => ({ key: '', status: 'loading', data: [] });
-  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh(), capas: fresh() };
+  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh(), capas: fresh(), obligations: fresh() };
 }
 
 /** On a context change, synchronously clear every panel; same key → unchanged. */
 export function beginContext(prevKey: string, nextKey: string, panels: Panels): Panels {
   if (prevKey === nextKey) return panels;
   const fresh = <T,>(): PanelState<T> => ({ key: nextKey, status: 'loading', data: [] });
-  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh(), capas: fresh() };
+  return { tasks: fresh(), domains: fresh(), audit: fresh(), templates: fresh(), capas: fresh(), obligations: fresh() };
 }
 
 function nextPanel<T>(
@@ -83,16 +86,18 @@ export function applySettled(
   domains: PromiseSettledResult<RegulatoryDomain[]>,
   audit: PromiseSettledResult<AuditEvent[]>,
   templates: PromiseSettledResult<TaskTemplate[]>,
-  capas: PromiseSettledResult<CapaRecord[]>
+  capas: PromiseSettledResult<CapaRecord[]>,
+  obligations: PromiseSettledResult<RecurringObligation[]>
 ): Panels {
   if (key !== currentKey || seq !== currentSeq) return panels;
-  const { values, errors } = settlePanels(tasks, domains, audit, templates, capas);
+  const { values, errors } = settlePanels(tasks, domains, audit, templates, capas, obligations);
   return {
     tasks: nextPanel(panels.tasks, key, values.tasks, errors.tasks),
     domains: nextPanel(panels.domains, key, values.domains, errors.domains),
     audit: nextPanel(panels.audit, key, values.audit, errors.audit),
     templates: nextPanel(panels.templates, key, values.templates, errors.templates),
-    capas: nextPanel(panels.capas, key, values.capas, errors.capas)
+    capas: nextPanel(panels.capas, key, values.capas, errors.capas),
+    obligations: nextPanel(panels.obligations, key, values.obligations, errors.obligations)
   };
 }
 
@@ -303,6 +308,26 @@ export function reviewEvidenceLabels(
   return evidenceIds.map((id) => label.get(id) ?? id);
 }
 
+/** Calendar timeline buckets (slice 1 list view). */
+export type CalendarBucket = 'overdue' | 'dueSoon' | 'upcoming' | 'submitted' | 'verified';
+
+/**
+ * Bucket a task for the compliance calendar as of an org-local `today`
+ * (YYYY-MM-DD): verified and submitted (completed, awaiting verification)
+ * first, then overdue, due-within-7-days, and future upcoming work.
+ */
+export function calendarBucket(
+  task: Pick<ComplianceTask, 'dueDate' | 'status'>,
+  todayISODate: string
+): CalendarBucket {
+  if (task.status === 'verified') return 'verified';
+  if (task.status === 'submitted') return 'submitted';
+  if (task.dueDate < todayISODate) return 'overdue';
+  const edge = addDaysISO(todayISODate, 7);
+  if (edge !== null && task.dueDate <= edge) return 'dueSoon';
+  return 'upcoming';
+}
+
 /** Task action label: returning a submitted task to in-progress reads as a send-back. */
 export function startButtonLabel(task: Pick<ComplianceTask, 'status'>): string {
   return task.status === 'submitted' ? 'Send back' : 'Start';
@@ -332,6 +357,7 @@ export interface PanelResults {
   audit: AuditEvent[];
   templates: TaskTemplate[];
   capas: CapaRecord[];
+  obligations: RecurringObligation[];
 }
 
 export interface SettledPanels {
@@ -353,7 +379,8 @@ export function settlePanels(
   domains: PromiseSettledResult<RegulatoryDomain[]>,
   audit: PromiseSettledResult<AuditEvent[]>,
   templates: PromiseSettledResult<TaskTemplate[]>,
-  capas: PromiseSettledResult<CapaRecord[]>
+  capas: PromiseSettledResult<CapaRecord[]>,
+  obligations: PromiseSettledResult<RecurringObligation[]>
 ): SettledPanels {
   const values: Partial<PanelResults> = {};
   const errors: Partial<Record<keyof PanelResults, string>> = {};
@@ -367,5 +394,7 @@ export function settlePanels(
   else errors.templates = reasonMessage(templates.reason);
   if (capas.status === 'fulfilled') values.capas = capas.value;
   else errors.capas = reasonMessage(capas.reason);
+  if (obligations.status === 'fulfilled') values.obligations = obligations.value;
+  else errors.obligations = reasonMessage(obligations.reason);
   return { values, errors };
 }

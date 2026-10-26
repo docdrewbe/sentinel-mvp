@@ -5135,3 +5135,456 @@ describe('P2 CAPA input validation (HTTP)', () => {
     }
   });
 });
+
+describe('Calendar slice 1: obligations (HTTP)', () => {
+  interface ObligationJson {
+    id: string;
+    orgId: string;
+    templateId: string;
+    nextDueDate: string;
+    anchorDay: number;
+    assigneeId?: string;
+    active: boolean;
+    generatedPeriods: string[];
+  }
+
+  interface TaskJson {
+    id: string;
+    orgId: string;
+    title: string;
+    ownerId: string;
+    dueDate: string;
+    status: string;
+    templateId?: string;
+    obligationId?: string;
+    periodKey?: string;
+    requiredEvidence?: number;
+  }
+
+  interface AuditJson {
+    action: string;
+    recordType: string;
+    recordId: string;
+    orgId: string;
+    hashVersion?: number;
+  }
+
+  async function obligations(base: string, userId: string, orgId: string): Promise<ObligationJson[]> {
+    const res = await call(base, 'GET', `/api/obligations?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    return res.json as unknown as ObligationJson[];
+  }
+
+  async function obligationById(base: string, userId: string, orgId: string, id: string): Promise<ObligationJson> {
+    const found = (await obligations(base, userId, orgId)).find((o) => o.id === id);
+    assert.ok(found, `obligation ${id} visible`);
+    return found;
+  }
+
+  async function taskById(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const found = (res.json as unknown as TaskJson[]).find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function recordAudits(base: string, recordId: string): Promise<AuditJson[]> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as AuditJson[]).filter((e) => e.recordId === recordId);
+  }
+
+  async function makeObligation(
+    base: string,
+    userId: string,
+    over: Record<string, unknown> = {}
+  ): Promise<string> {
+    const created = await call(base, 'POST', '/api/obligations', userId, {
+      orgId: 'org-cah',
+      templateId: 'tpl-access-review',
+      nextDueDate: '2026-11-15',
+      assigneeId: 'u-nurse-mgr',
+      ...over
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  it('creates tenant-scoped obligations with role checks', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base);
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const created = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      assert.equal(created.orgId, 'org-cah');
+      assert.equal(created.nextDueDate, '2026-11-15');
+      assert.equal(created.anchorDay, 15);
+      assert.equal(created.assigneeId, 'u-nurse-mgr');
+      assert.equal(created.active, true);
+      assert.deepEqual(created.generatedPeriods, []);
+      const events = await recordAudits(base, id);
+      assert.ok(events.some((e) => e.action === 'obligation.created' && e.recordType === 'obligation'));
+      assert.ok(events.every((e) => e.orgId === 'org-cah' && e.hashVersion === 2));
+      // Staff cannot schedule; cross-org managers cannot reach in.
+      assert.equal(
+        (
+          await call(base, 'POST', '/api/obligations', 'u-staff', {
+            orgId: 'org-cah',
+            templateId: 'tpl-access-review',
+            nextDueDate: '2026-11-15'
+          })
+        ).status,
+        403
+      );
+      assert.equal(
+        (
+          await call(base, 'POST', '/api/obligations', 'u-clinic-mgr', {
+            orgId: 'org-cah',
+            templateId: 'tpl-access-review',
+            nextDueDate: '2026-11-15'
+          })
+        ).status,
+        403
+      );
+      // Unknown template, cross-org template, bad date, foreign assignee.
+      assert.equal(
+        (await call(base, 'POST', '/api/obligations', 'u-admin', {
+          orgId: 'org-cah',
+          templateId: 'tpl-missing',
+          nextDueDate: '2026-11-15'
+        })).status,
+        400
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/obligations', 'u-admin', {
+          orgId: 'org-clinic',
+          templateId: 'tpl-access-review',
+          nextDueDate: '2026-11-15'
+        })).status,
+        400
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/obligations', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          templateId: 'tpl-access-review',
+          nextDueDate: 'not-a-date'
+        })).status,
+        400
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/obligations', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          templateId: 'tpl-access-review',
+          nextDueDate: '2026-11-15',
+          assigneeId: 'u-clinic-staff'
+        })).status,
+        400
+      );
+      const badType = await call(base, 'POST', '/api/obligations', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        templateId: 'tpl-access-review',
+        nextDueDate: 20261115
+      });
+      assert.equal(badType.status, 400);
+      assert.equal(badType.json.error, 'nextDueDate must be text.');
+      // Reads stay tenant-scoped.
+      assert.equal((await call(base, 'GET', '/api/obligations?orgId=org-cah', 'u-clinic-staff')).status, 403);
+      assert.equal(
+        (await obligations(base, 'u-nurse-mgr', 'org-cah')).filter((o) => o.orgId !== 'org-cah').length,
+        0
+      );
+      assert.ok((await obligations(base, 'u-officer', 'org-cah')).some((o) => o.id === id));
+      assert.notEqual(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.ok((await auditTotal(base)) > audits);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('updates schedules with assignee-scoped staff access', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr', { assigneeId: 'u-staff' });
+      const moved = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        nextDueDate: '2026-12-31'
+      });
+      assert.equal(moved.status, 200);
+      const reset = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      assert.equal(reset.nextDueDate, '2026-12-31');
+      assert.equal(reset.anchorDay, 31);
+      // Assigned staff may adjust their own target; others may not.
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-staff', { nextDueDate: '2026-12-20' })).status,
+        200
+      );
+      assert.equal((await call(base, 'PATCH', `/api/obligations/${id}`, 'u-clinic-mgr', { active: false })).status, 403);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2026-13-45' })).status,
+        400
+      );
+      const badActive = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { active: 'yes' });
+      assert.equal(badActive.status, 400);
+      assert.equal(badActive.json.error, 'active must be true or false.');
+      assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.equal((await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { active: false })).status, 200);
+      assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', id)).active, false);
+      assert.ok((await recordAudits(base, id)).some((e) => e.action === 'obligation.updated'));
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('generates linked instances and advances the target', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const audits = await auditTotal(base);
+      const generated = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(generated.status, 201);
+      const body = generated.json as unknown as { task: TaskJson; obligation: ObligationJson };
+      assert.equal(body.task.title, 'Separated-workforce access review');
+      assert.equal(body.task.dueDate, '2026-11-15');
+      assert.equal(body.task.status, 'open');
+      assert.equal(body.task.ownerId, 'u-nurse-mgr');
+      assert.equal(body.task.templateId, 'tpl-access-review');
+      assert.equal(body.task.obligationId, id);
+      assert.equal(body.task.periodKey, '2026-11-15');
+      assert.equal(body.task.requiredEvidence, 1);
+      assert.equal(body.obligation.nextDueDate, '2026-12-15');
+      assert.deepEqual(body.obligation.generatedPeriods, ['2026-11-15']);
+      const fetched = await taskById(base, 'u-nurse-mgr', 'org-cah', body.task.id);
+      assert.equal(fetched.obligationId, id);
+      const taskEvents = await recordAudits(base, body.task.id);
+      assert.ok(taskEvents.some((e) => e.action === 'task.created' && e.recordType === 'task'));
+      const obligationEvents = await recordAudits(base, id);
+      assert.ok(
+        obligationEvents.some((e) => e.action === 'obligation.instance.generated' && e.recordType === 'obligation')
+      );
+      assert.ok(
+        [...taskEvents, ...obligationEvents].every((e) => e.orgId === 'org-cah' && e.hashVersion === 2)
+      );
+      assert.equal(await auditTotal(base), audits + 2);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('prevents duplicate instances for the same due period', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr')).status, 201);
+      // Rewinding the target to a generated period must not mint a twin.
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2026-11-15' })).status,
+        200
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base);
+      const duplicate = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(duplicate.status, 400);
+      assert.equal(duplicate.json.error, 'An instance for this obligation and due period already exists.');
+      assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      // A fresh period still generates.
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2026-12-15' })).status,
+        200
+      );
+      const second = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(second.status, 201);
+      assert.deepEqual(
+        (await obligationById(base, 'u-nurse-mgr', 'org-cah', id)).generatedPeriods,
+        ['2026-11-15', '2026-12-15']
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('advances month-end, year-end, quarterly, weekly, and one-time schedules', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const monthly = await makeObligation(base, 'u-nurse-mgr', { nextDueDate: '2026-01-31' });
+      const first = await call(base, 'POST', `/api/obligations/${monthly}/generate`, 'u-nurse-mgr');
+      assert.equal(first.status, 201);
+      assert.equal(
+        (first.json as unknown as { task: TaskJson }).task.dueDate,
+        '2026-01-31'
+      );
+      assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', monthly)).nextDueDate, '2026-02-28');
+      // The anchor survives the short month: no drift to the 28th.
+      assert.equal((await call(base, 'POST', `/api/obligations/${monthly}/generate`, 'u-nurse-mgr')).status, 201);
+      assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', monthly)).nextDueDate, '2026-03-31');
+      const yearEnd = await makeObligation(base, 'u-nurse-mgr', { nextDueDate: '2026-12-15' });
+      assert.equal((await call(base, 'POST', `/api/obligations/${yearEnd}/generate`, 'u-nurse-mgr')).status, 201);
+      assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', yearEnd)).nextDueDate, '2027-01-15');
+      const quarterly = await makeObligation(base, 'u-nurse-mgr', {
+        templateId: 'tpl-sharps-review',
+        nextDueDate: '2026-01-31'
+      });
+      assert.equal((await call(base, 'POST', `/api/obligations/${quarterly}/generate`, 'u-nurse-mgr')).status, 201);
+      assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', quarterly)).nextDueDate, '2026-04-30');
+      // Weekly and one-time templates do not ship in seed data; create them.
+      const weeklyTemplate = await call(base, 'POST', '/api/templates', 'u-admin', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'Weekly check (simulated).',
+        description: 'Weekly probe (simulated).',
+        controlType: 'best_practice',
+        regulatoryRefs: [],
+        responsibleRoles: ['department_manager'],
+        recurrence: { frequency: 'weekly' },
+        evidenceRequired: [],
+        escalation: []
+      });
+      assert.equal(weeklyTemplate.status, 201);
+      const weekly = await makeObligation(base, 'u-nurse-mgr', {
+        templateId: String(weeklyTemplate.json.id),
+        nextDueDate: '2026-10-26'
+      });
+      assert.equal((await call(base, 'POST', `/api/obligations/${weekly}/generate`, 'u-nurse-mgr')).status, 201);
+      assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', weekly)).nextDueDate, '2026-11-02');
+      const onceTemplate = await call(base, 'POST', '/api/templates', 'u-admin', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'One-time check (simulated).',
+        description: 'One-time probe (simulated).',
+        controlType: 'best_practice',
+        regulatoryRefs: [],
+        responsibleRoles: ['department_manager'],
+        recurrence: { frequency: 'once' },
+        evidenceRequired: [],
+        escalation: []
+      });
+      assert.equal(onceTemplate.status, 201);
+      const once = await makeObligation(base, 'u-nurse-mgr', {
+        templateId: String(onceTemplate.json.id),
+        nextDueDate: '2026-11-15'
+      });
+      assert.equal((await call(base, 'POST', `/api/obligations/${once}/generate`, 'u-nurse-mgr')).status, 201);
+      const done = await obligationById(base, 'u-nurse-mgr', 'org-cah', once);
+      assert.equal(done.active, false);
+      assert.deepEqual(done.generatedPeriods, ['2026-11-15']);
+      assert.equal((await call(base, 'POST', `/api/obligations/${once}/generate`, 'u-nurse-mgr')).status, 400);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('restricts generation by role, org, state, and owner', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base);
+      assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-staff')).status, 403);
+      assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-clinic-mgr')).status, 403);
+      assert.equal((await call(base, 'POST', '/api/obligations/missing/generate', 'u-nurse-mgr')).status, 404);
+      assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.equal((await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { active: false })).status, 200);
+      const inactive = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(inactive.status, 400);
+      assert.equal(inactive.json.error, 'Obligation is inactive.');
+      // Without an assignee, a same-org manager owns the instance.
+      const unassigned = await makeObligation(base, 'u-nurse-mgr', { assigneeId: '' });
+      const fallback = await call(base, 'POST', `/api/obligations/${unassigned}/generate`, 'u-nurse-mgr');
+      assert.equal(fallback.status, 201);
+      assert.equal((fallback.json as unknown as { task: TaskJson }).task.ownerId, 'u-nurse-mgr');
+      const after = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      assert.equal(after.active, false);
+      assert.equal(after.nextDueDate, before.nextDueDate);
+      assert.deepEqual(after.generatedPeriods, before.generatedPeriods);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('holds generated instances to evidence and separation-of-duties gates', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-officer', { assigneeId: 'u-officer' });
+      const generated = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-officer');
+      assert.equal(generated.status, 201);
+      const taskId = (generated.json as unknown as { task: TaskJson }).task.id;
+      const bare = await call(base, 'PATCH', `/api/tasks/${taskId}`, 'u-officer', { status: 'submitted' });
+      assert.equal(bare.status, 400);
+      assert.match(String(bare.json.error), /at least 1 evidence item/);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/tasks/${taskId}/evidence`, 'u-officer', {
+            label: 'Deprovisioning checklist (simulated)',
+            holder: 'J. Ortiz'
+          })
+        ).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${taskId}`, 'u-officer', { status: 'submitted' })).status,
+        200
+      );
+      const self = await call(base, 'PATCH', `/api/tasks/${taskId}`, 'u-officer', { status: 'verified' });
+      assert.equal(self.status, 403);
+      assert.match(String(self.json.error), /Separation of duties/);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${taskId}`, 'u-officer2', { status: 'verified' })).status,
+        200
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back generation when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
+      const tasksBefore = JSON.stringify(db.tasks);
+      const audits = await auditTotal(base);
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(JSON.stringify(db.tasks), tasksBefore);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

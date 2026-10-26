@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
-import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
+import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -27,6 +27,10 @@ export default function App(): JSX.Element {
   const [capaId, setCapaId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [controlFilter, setControlFilter] = useState('all');
+  const [calDomain, setCalDomain] = useState('all');
+  const [calPerson, setCalPerson] = useState('all');
+  const [calBucket, setCalBucket] = useState('all');
+  const [showNewObligation, setShowNewObligation] = useState(false);
   const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState('');
@@ -40,11 +44,13 @@ export default function App(): JSX.Element {
   const audit = panelData(panels.audit, contextKey);
   const templates = panelData(panels.templates, contextKey);
   const capas = panelData(panels.capas, contextKey);
+  const obligations = panelData(panels.obligations, contextKey);
   const tasksReady = canAct(panels.tasks, contextKey);
   const domainsReady = canAct(panels.domains, contextKey);
   const auditReady = canAct(panels.audit, contextKey);
   const templatesReady = canAct(panels.templates, contextKey);
   const capasReady = canAct(panels.capas, contextKey);
+  const obligationsReady = canAct(panels.obligations, contextKey);
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const capa = capas.find((c) => c.id === capaId) ?? null;
 
@@ -59,6 +65,20 @@ export default function App(): JSX.Element {
   const domainById = useMemo(() => new Map(domains.map((d) => [d.id, d])), [domains]);
   const taskById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
   const templateById = useMemo(() => new Map(templates.map((x) => [x.id, x])), [templates]);
+  const orgUsers = useMemo(() => users.filter((u) => !orgId || u.orgId === orgId), [users, orgId]);
+  const today = todayISO();
+  const calendarTasks = useMemo(
+    () =>
+      tasks
+        .filter(
+          (t) =>
+            (calDomain === 'all' || t.domainId === calDomain) &&
+            (calPerson === 'all' || t.ownerId === calPerson) &&
+            (calBucket === 'all' || calendarBucket(t, today) === calBucket)
+        )
+        .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    [tasks, calDomain, calPerson, calBucket, today]
+  );
   const orgIds = useMemo(() => orgs.map((o) => o.id), [orgs]);
   const visibleOrgs = useMemo(
     () => (me ? orgs.filter((o) => visibleOrgIds(me, orgIds).includes(o.id)) : orgs),
@@ -68,15 +88,16 @@ export default function App(): JSX.Element {
   const refresh = useCallback(async (oid: string, key: string) => {
     if (!oid) return;
     const mySeq = ++requestSeq.current;
-    const [t, d, a, tpl, c] = await Promise.allSettled([
+    const [t, d, a, tpl, c, o] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
       api.templates(oid),
-      api.capas(oid)
+      api.capas(oid),
+      api.obligations(oid)
     ]);
     setPanels((prev) =>
-      applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c)
+      applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c, o)
     );
   }, []);
 
@@ -120,6 +141,7 @@ export default function App(): JSX.Element {
       setCapaId(null);
       setInstantiateFor(null);
       setShowNew(false);
+      setShowNewObligation(false);
       setError('');
     }
     refresh(orgId, nextKey).catch((e: Error) => setError(e.message));
@@ -225,6 +247,124 @@ export default function App(): JSX.Element {
           <Stat label="Verified" value={tasksReady ? stats.verified : '—'} tone="green" />
         </section>
 
+        <section className="panel">
+          <div className="panel-head">
+            <h3>Compliance calendar (illustrative targets — org-selected, not legal mandates)</h3>
+            <div className="panel-actions">
+              <select value={calDomain} onChange={(e) => setCalDomain(e.target.value)} aria-label="Filter calendar by domain" disabled={!tasksReady}>
+                <option value="all">All domains</option>
+                {domains.map((d) => (
+                  <option key={d.id} value={d.id}>{d.code}</option>
+                ))}
+              </select>
+              <select value={calPerson} onChange={(e) => setCalPerson(e.target.value)} aria-label="Filter calendar by responsible person" disabled={!tasksReady}>
+                <option value="all">All people</option>
+                {orgUsers.map((u) => (
+                  <option key={u.id} value={u.id}>{u.name}</option>
+                ))}
+              </select>
+              <select value={calBucket} onChange={(e) => setCalBucket(e.target.value)} aria-label="Filter calendar by status" disabled={!tasksReady}>
+                <option value="all">All work</option>
+                <option value="upcoming">Upcoming</option>
+                <option value="dueSoon">Due within 7 days</option>
+                <option value="overdue">Overdue</option>
+                <option value="submitted">Submitted (completed)</option>
+                <option value="verified">Verified</option>
+              </select>
+            </div>
+          </div>
+          <PanelNotice panel={panels.tasks} contextKey={contextKey} name="calendar tasks" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+          <table>
+            <thead>
+              <tr>
+                <th>Due</th>
+                <th>Task</th>
+                <th>Domain</th>
+                <th>Owner</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {calendarTasks.map((t) => (
+                <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => setTaskId(t.id)}>
+                  <td className={isOverdue(t) ? 'overdue' : ''}>{t.dueDate}</td>
+                  <td className="task-title">{t.title}</td>
+                  <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
+                  <td>{userName.get(t.ownerId) ?? '—'}</td>
+                  <td>
+                    <span className={`status status-${t.status}`}>{STATUS_LABELS[t.status]}</span>
+                    {isOverdue(t) && <span className="status status-overdue">Overdue</span>}
+                    {!isOverdue(t) && dueSoon(t) && <span className="status status-submitted">Due soon</span>}
+                  </td>
+                </tr>
+              ))}
+              {calendarTasks.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="empty">No work matches these calendar filters.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+          <div className="panel-head">
+            <h3>Recurring obligations (synthetic schedules — illustrative)</h3>
+            <div className="panel-actions">
+              {me && can(me, 'task.create') && (
+                <button className="primary" onClick={() => setShowNewObligation((s) => !s)} disabled={!obligationsReady || !templatesReady}>
+                  {showNewObligation ? 'Close' : 'New obligation'}
+                </button>
+              )}
+            </div>
+          </div>
+          <PanelNotice panel={panels.obligations} contextKey={contextKey} name="obligations" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+          {showNewObligation && me && org && (
+            <NewObligationForm
+              orgId={org.id}
+              templates={templates.filter((x) => x.active)}
+              users={orgUsers}
+              onSubmit={(o) => run(async () => api.createObligation(o)).then(() => setShowNewObligation(false))}
+            />
+          )}
+          <table>
+            <thead>
+              <tr>
+                <th>Schedule</th>
+                <th>Cadence</th>
+                <th>Control</th>
+                <th>Next target</th>
+                <th>Assignee</th>
+                <th>Generated</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {obligations.map((o) => (
+                <ObligationRow
+                  key={o.id}
+                  obligation={o}
+                  template={templateById.get(o.templateId)}
+                  ready={obligationsReady && tasksReady && templatesReady}
+                  userName={userName}
+                  canGenerate={!!me && can(me, 'task.create')}
+                  onGenerate={() => {
+                    setError('');
+                    api.generateObligation(o.id)
+                      .then((out) => {
+                        setTaskId(out.task.id);
+                        return refresh(orgId, contextKey);
+                      })
+                      .catch((e: Error) => setError(e.message));
+                  }}
+                />
+              ))}
+              {obligations.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="empty">No recurring obligations for this organization yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+
         <section className="columns">
           <div className="tasklist panel">
             <div className="panel-head">
@@ -300,6 +440,9 @@ export default function App(): JSX.Element {
                   <div><dt>Domain</dt><dd>{domainById.get(task.domainId)?.name ?? '—'}</dd></div>
                   {task.templateId && (
                     <div><dt>Template</dt><dd>{templateById.get(task.templateId)?.title ?? task.templateId}</dd></div>
+                  )}
+                  {task.obligationId && (
+                    <div><dt>Obligation</dt><dd>Due period {task.periodKey ?? '—'} (recurring schedule)</dd></div>
                   )}
                   <div><dt>Owner</dt><dd>{userName.get(task.ownerId) ?? '—'}</dd></div>
                   {task.submittedBy && (
@@ -907,6 +1050,97 @@ function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBl
       {task.status === 'submitted' && verifyBlockReason && can(me, 'task.verify', task) && <p className="sod-note">{verifyBlockReason}</p>}
       {btn('Reopen', 'open', 'task.update', reopenBlockReason, 'owner / manager / officer / admin')}
     </div>
+  );
+}
+
+function ObligationRow({ obligation: o, template, ready, userName, canGenerate, onGenerate }: {
+  obligation: RecurringObligation;
+  template: TaskTemplate | undefined;
+  ready: boolean;
+  userName: Map<string, string>;
+  canGenerate: boolean;
+  onGenerate: () => void;
+}): JSX.Element {
+  const duplicate = o.generatedPeriods.includes(o.nextDueDate);
+  const allowed = ready && canGenerate && o.active && !duplicate;
+  const reason = !ready
+    ? 'Unavailable while data is loading or failed.'
+    : !canGenerate
+      ? 'Requires: manager / compliance officer / admin'
+      : !o.active
+        ? 'Obligation is inactive.'
+        : duplicate
+          ? 'Instance already exists for this due period.'
+          : `Generate the ${o.nextDueDate} instance.`;
+  const targetLate = o.active && o.nextDueDate < todayISO();
+  return (
+    <tr>
+      <td className="task-title">
+        {template?.title ?? o.templateId}
+        {!o.active && <span className="status">Inactive</span>}
+        <div className="trail-detail">
+          {template?.regulatoryRefs.map((r) => `${r.source} — ${r.citation}`).join(' · ') || 'No source refs'}
+        </div>
+      </td>
+      <td>{template ? RECURRENCE_LABELS[template.recurrence.frequency] : '—'}</td>
+      <td>
+        {template ? (
+          <span className={`status ${template.controlType === 'legally_required' ? 'status-submitted' : 'status-in_progress'}`}>
+            {CONTROL_LABELS[template.controlType]}
+          </span>
+        ) : '—'}
+      </td>
+      <td className={targetLate ? 'overdue' : ''}>
+        {o.nextDueDate}
+        {targetLate && <span className="status status-overdue">Target passed</span>}
+      </td>
+      <td>{o.assigneeId ? (userName.get(o.assigneeId) ?? '—') : 'Unassigned'}</td>
+      <td>{o.generatedPeriods.length}</td>
+      <td>
+        <button disabled={!allowed} title={reason} onClick={onGenerate}>
+          Generate
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function NewObligationForm({ orgId, templates, users, onSubmit }: {
+  orgId: string;
+  templates: TaskTemplate[];
+  users: DemoUser[];
+  onSubmit: (o: { orgId: string; templateId: string; nextDueDate: string; assigneeId?: string }) => void;
+}): JSX.Element {
+  const [templateId, setTemplateId] = useState(templates[0]?.id ?? '');
+  const [nextDueDate, setNextDueDate] = useState(todayISO());
+  const [assigneeId, setAssigneeId] = useState('');
+  useEffect(() => {
+    setTemplateId(templates[0]?.id ?? '');
+  }, [templates]);
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit({ orgId, templateId, nextDueDate, ...(assigneeId ? { assigneeId } : {}) });
+      }}
+    >
+      <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} aria-label="Source template">
+        {templates.map((x) => (
+          <option key={x.id} value={x.id}>{x.title} ({RECURRENCE_LABELS[x.recurrence.frequency]})</option>
+        ))}
+      </select>
+      <input type="date" value={nextDueDate} onChange={(e) => setNextDueDate(e.target.value)} aria-label="Next target date (illustrative)" required />
+      <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} aria-label="Assignee">
+        <option value="">Unassigned (instances fall back to you)</option>
+        {users.map((u) => (
+          <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
+        ))}
+      </select>
+      <button className="primary" type="submit" disabled={!templateId || !/^\d{4}-\d{2}-\d{2}$/.test(nextDueDate)}>
+        Create obligation
+      </button>
+    </form>
   );
 }
 

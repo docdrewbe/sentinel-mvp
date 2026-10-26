@@ -73,6 +73,10 @@ export interface ComplianceTask {
   domainId: string;
   /** Source template, when this task was instantiated from one. */
   templateId?: string;
+  /** Source obligation, when generated from a recurring obligation. */
+  obligationId?: string;
+  /** Due period this instance covers (the obligation's target date). */
+  periodKey?: string;
   title: string;
   ownerId: string;
   /** ISO calendar date (YYYY-MM-DD). */
@@ -370,3 +374,29 @@ export const RECURRENCE_LABELS: Record<RecurrenceFrequency, string> = {
   quarterly: 'Quarterly',
   annually: 'Annually'
 };
+
+/**
+ * A recurring compliance obligation: a template's cadence bound to an
+ * organization-selected scheduling target. Frequency, regulatory source,
+ * and control classification always resolve from the linked template
+ * (single source of truth); the obligation owns only the operational
+ * schedule: the next target date, the responsible person, and which due
+ * periods already have instances. Target dates are illustrative
+ * organization-selected targets — never legal mandates.
+ */
+export interface RecurringObligation {
+  id: string;
+  orgId: string;
+  templateId: string;
+  /** Next organization-selected target date (YYYY-MM-DD, org-local). */
+  nextDueDate: string;
+  /** Day-of-month anchor (1-31) keeping monthly+ steps off month-end drift. */
+  anchorDay: number;
+  /** Responsible person; generated instances are owned by them. */
+  assigneeId?: string;
+  active: boolean;
+  /** Due periods already generated (period keys), append-only. */
+  generatedPeriods: string[];
+  createdAt: string;
+  updatedAt: string;
+}

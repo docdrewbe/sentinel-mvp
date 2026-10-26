@@ -26,6 +26,7 @@ import type {
   EvidenceRequirement,
   Organization,
   RecurrenceFrequency,
+  RecurringObligation,
   RegulatoryDomain,
   RegulatorySourceRef,
   Role,
@@ -36,7 +37,7 @@ import { CAPA_CRITERIA_LOCKED_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } fro
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
-import { nextDueDate } from '../shared/scheduling.js';
+import { nextDueDate, nextOccurrence } from '../shared/scheduling.js';
 
 export interface DbShape {
   version: 1;
@@ -46,6 +47,7 @@ export interface DbShape {
   tasks: ComplianceTask[];
   templates: TaskTemplate[];
   capas: CapaRecord[];
+  obligations: RecurringObligation[];
   audit: AuditEvent[];
 }
 
@@ -56,7 +58,7 @@ export function dataFilePath(): string {
 }
 
 export function emptyDb(): DbShape {
-  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], audit: [] };
+  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], audit: [] };
 }
 
 let lastStamp = '';
@@ -894,4 +896,128 @@ export function instantiateTemplate(
   });
   task.templateId = template.id;
   return task;
+}
+
+// ---------------------------------------------------------------------------
+// Recurring obligations. A template's cadence bound to an
+// organization-selected target date. Frequency, regulatory source, and
+// control classification resolve from the linked template; the obligation
+// owns only the schedule state.
+// ---------------------------------------------------------------------------
+
+export interface ObligationInput {
+  orgId: string;
+  templateId: string;
+  nextDueDate: string;
+  assigneeId?: string;
+}
+
+export function createObligation(db: DbShape, input: ObligationInput): RecurringObligation {
+  const org = db.orgs.find((o) => o.id === input.orgId);
+  if (!org) throw new ValidationError('Unknown organization.');
+  const template = db.templates.find((t) => t.id === input.templateId);
+  if (!template) throw new ValidationError('Template not found.');
+  if (template.orgId !== input.orgId) {
+    throw new ValidationError('Template must belong to the obligation organization.');
+  }
+  if (!template.active) throw new ValidationError('Template is inactive.');
+  assertDueDate(input.nextDueDate);
+  if (input.assigneeId !== undefined && input.assigneeId !== '') {
+    const assignee = db.users.find((u) => u.id === input.assigneeId && u.orgId === input.orgId);
+    if (!assignee) throw new ValidationError('Assignee must be a user of the same organization.');
+  }
+  const now = new Date().toISOString();
+  const obligation: RecurringObligation = {
+    id: randomUUID(),
+    orgId: input.orgId,
+    templateId: template.id,
+    nextDueDate: input.nextDueDate,
+    anchorDay: Number(input.nextDueDate.slice(8, 10)),
+    ...(input.assigneeId ? { assigneeId: input.assigneeId } : {}),
+    active: true,
+    generatedPeriods: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  db.obligations.push(obligation);
+  return obligation;
+}
+
+export function updateObligation(
+  db: DbShape,
+  id: string,
+  patch: Partial<Pick<RecurringObligation, 'nextDueDate' | 'assigneeId' | 'active'>>
+): RecurringObligation {
+  const obligation = db.obligations.find((o) => o.id === id);
+  if (!obligation) throw new ValidationError('Obligation not found.');
+  if (patch.nextDueDate !== undefined) {
+    assertDueDate(patch.nextDueDate);
+    obligation.nextDueDate = patch.nextDueDate;
+    // A manually reset target re-anchors the schedule to its day-of-month.
+    obligation.anchorDay = Number(patch.nextDueDate.slice(8, 10));
+  }
+  if (patch.assigneeId !== undefined) {
+    if (patch.assigneeId === '') {
+      delete obligation.assigneeId;
+    } else {
+      const assignee = db.users.find((u) => u.id === patch.assigneeId && u.orgId === obligation.orgId);
+      if (!assignee) throw new ValidationError('Assignee must be a user of the same organization.');
+      obligation.assigneeId = patch.assigneeId;
+    }
+  }
+  if (patch.active !== undefined) {
+    obligation.active = patch.active;
+  }
+  obligation.updatedAt = new Date().toISOString();
+  return obligation;
+}
+
+/**
+ * Generate the next task instance for an obligation: one task due on the
+ * current target date, then advance the target deterministically. Refuses
+ * duplicates for an already-generated due period, inactive obligations,
+ * and generation without a responsible owner. Instances are ordinary
+ * tasks, so evidence, verification, and separation-of-duties gates apply.
+ */
+export function generateObligationInstance(
+  db: DbShape,
+  obligationId: string,
+  byUserId: string
+): { task: ComplianceTask; obligation: RecurringObligation } {
+  const obligation = db.obligations.find((o) => o.id === obligationId);
+  if (!obligation) throw new ValidationError('Obligation not found.');
+  if (!obligation.active) throw new ValidationError('Obligation is inactive.');
+  const template = db.templates.find((t) => t.id === obligation.templateId);
+  if (!template) throw new ValidationError('Template not found.');
+  if (!template.active) throw new ValidationError('Template is inactive.');
+  const periodKey = obligation.nextDueDate;
+  const duplicate =
+    obligation.generatedPeriods.includes(periodKey) ||
+    db.tasks.some((t) => t.obligationId === obligation.id && t.periodKey === periodKey);
+  if (duplicate) {
+    throw new ValidationError('An instance for this obligation and due period already exists.');
+  }
+  const caller = db.users.find((u) => u.id === byUserId);
+  const ownerId =
+    obligation.assigneeId ?? (caller && caller.orgId === obligation.orgId ? caller.id : undefined);
+  if (!ownerId) throw new ValidationError('Assign a responsible person before generating.');
+  const task = createTask(db, {
+    orgId: obligation.orgId,
+    domainId: template.domainId,
+    title: template.title,
+    ownerId,
+    dueDate: periodKey
+  });
+  task.templateId = template.id;
+  task.obligationId = obligation.id;
+  task.periodKey = periodKey;
+  const next = nextOccurrence(periodKey, template.recurrence.frequency, obligation.anchorDay);
+  if (next === null) {
+    obligation.active = false;
+  } else {
+    obligation.nextDueDate = next;
+  }
+  obligation.generatedPeriods = [...obligation.generatedPeriods, periodKey];
+  obligation.updatedAt = new Date().toISOString();
+  return { task, obligation };
 }

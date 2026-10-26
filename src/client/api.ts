@@ -1,4 +1,4 @@
-import type { AuditEvent, CapaRecord, ComplianceTask, DemoUser, Organization, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
+import type { AuditEvent, CapaRecord, ComplianceTask, DemoUser, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -52,5 +52,12 @@ export const api = {
   reviewCapa: (id: string, review: { outcome: string; rationale: string; evidenceIds: string[] }) =>
     req<CapaRecord>(`/api/capas/${id}/effectiveness-review`, { method: 'POST', body: JSON.stringify(review) }),
   transferCapaEvidence: (id: string, t: { evidenceId: string; toHolder: string; reason?: string }) =>
-    req(`/api/capas/${id}/transfer`, { method: 'POST', body: JSON.stringify(t) })
+    req(`/api/capas/${id}/transfer`, { method: 'POST', body: JSON.stringify(t) }),
+  obligations: (orgId: string) => req<RecurringObligation[]>(`/api/obligations?orgId=${orgId}`),
+  createObligation: (o: { orgId: string; templateId: string; nextDueDate: string; assigneeId?: string }) =>
+    req<RecurringObligation>('/api/obligations', { method: 'POST', body: JSON.stringify(o) }),
+  patchObligation: (id: string, patch: object) =>
+    req<RecurringObligation>(`/api/obligations/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  generateObligation: (id: string) =>
+    req<{ task: ComplianceTask; obligation: RecurringObligation }>(`/api/obligations/${id}/generate`, { method: 'POST' })
 };
