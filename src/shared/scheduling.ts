@@ -44,6 +44,16 @@ function parseIsoDate(value: string): { y: number; m: number; d: number } | null
   return { y, m, d };
 }
 
+/**
+ * CAL1: strict org-local date check — shape, month 1–12, and a day that
+ * really exists (no February 30, no 2100-02-29). `Date.parse` is
+ * deliberately not used: V8 leniently rolls impossible dates forward.
+ * Single source for every task/obligation date input and dashboard hint.
+ */
+export function isValidIsoDate(value: string): boolean {
+  return parseIsoDate(value) !== null;
+}
+
 const pad2 = (n: number): string => String(n).padStart(2, '0');
 const pad4 = (n: number): string => String(n).padStart(4, '0');
 

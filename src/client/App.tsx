@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
-import { nextDueDate } from '../shared/scheduling.js';
+import { isValidIsoDate, nextDueDate } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
@@ -1137,7 +1137,7 @@ function NewObligationForm({ orgId, templates, users, onSubmit }: {
           <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
         ))}
       </select>
-      <button className="primary" type="submit" disabled={!templateId || !/^\d{4}-\d{2}-\d{2}$/.test(nextDueDate)}>
+      <button className="primary" type="submit" disabled={!templateId || !isValidIsoDate(nextDueDate)} title={isValidIsoDate(nextDueDate) ? '' : 'Enter a real calendar date (YYYY-MM-DD).'}>
         Create obligation
       </button>
     </form>

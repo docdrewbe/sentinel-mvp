@@ -37,7 +37,7 @@ import { CAPA_CRITERIA_LOCKED_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } fro
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
-import { nextDueDate, nextOccurrence } from '../shared/scheduling.js';
+import { isValidIsoDate, nextDueDate, nextOccurrence } from '../shared/scheduling.js';
 
 export interface DbShape {
   version: 1;
@@ -325,8 +325,8 @@ const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
 };
 
 function assertDueDate(dueDate: string): void {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || Number.isNaN(Date.parse(dueDate))) {
-    throw new ValidationError('dueDate must be a valid ISO calendar date (YYYY-MM-DD).');
+  if (!isValidIsoDate(dueDate)) {
+    throw new ValidationError('dueDate must be a real calendar date (YYYY-MM-DD).');
   }
 }
 
@@ -991,6 +991,11 @@ export function generateObligationInstance(
   if (!template) throw new ValidationError('Template not found.');
   if (!template.active) throw new ValidationError('Template is inactive.');
   const periodKey = obligation.nextDueDate;
+  // CAL1: a legacy unparsable target fails loudly — never a bad-dated task,
+  // and never a silent deactivation.
+  if (!isValidIsoDate(periodKey)) {
+    throw new ValidationError('Obligation target date is not a real calendar date.');
+  }
   const duplicate =
     obligation.generatedPeriods.includes(periodKey) ||
     db.tasks.some((t) => t.obligationId === obligation.id && t.periodKey === periodKey);

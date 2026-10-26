@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDaysISO, daysInMonth, nextDueDate, nextOccurrence } from '../scheduling.js';
+import { addDaysISO, daysInMonth, isValidIsoDate, nextDueDate, nextOccurrence } from '../scheduling.js';
 
 describe('calendar math (calendar slice 1)', () => {
   it('counts month days with leap years', () => {
@@ -71,5 +71,28 @@ describe('calendar math (calendar slice 1)', () => {
   it('keeps the legacy template helper for instantiate defaults', () => {
     assert.equal(nextDueDate('2026-10-26', 'once'), null);
     assert.equal(nextDueDate('2026-10-26', 'weekly'), '2026-11-02');
+  });
+});
+
+describe('strict date validation (CAL1)', () => {
+  it('accepts only real calendar dates in strict shape', () => {
+    for (const good of ['2028-02-29', '2000-02-29', '2027-12-31', '2027-01-31', '2026-10-26']) {
+      assert.equal(isValidIsoDate(good), true, good);
+    }
+    for (const bad of [
+      '2027-02-29',
+      '2027-02-30',
+      '2027-04-31',
+      '2027-06-31',
+      '2100-02-29',
+      '2027-00-10',
+      '2027-13-01',
+      '2027-1-5',
+      '2027/10/26',
+      '',
+      'not-a-date'
+    ]) {
+      assert.equal(isValidIsoDate(bad), false, bad);
+    }
   });
 });
