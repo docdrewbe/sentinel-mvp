@@ -428,4 +428,39 @@ describe('audit org backfill', () => {
     );
     assert.equal(db.audit.find((e) => e.action === 'db.seeded')?.orgId, 'system');
   });
+
+  it('repairs legacy system-tagged non-database events from their records', () => {
+    const db = seedDatabase();
+    for (const e of db.audit) {
+      const rec = e as unknown as Record<string, unknown>;
+      delete rec.hashVersion;
+      if (e.recordType !== 'database') rec.orgId = 'system';
+    }
+    db.tasks = db.tasks.filter((t) => t.id !== 'task-sharps-log');
+    backfillAuditOrgIds(db);
+    for (const e of db.audit) {
+      if (e.recordType === 'database') {
+        assert.equal(e.orgId, 'system');
+      } else if (e.recordId === 'task-sharps-log') {
+        assert.equal(e.orgId, UNKNOWN_AUDIT_ORG);
+      } else if (e.recordType === 'task') {
+        assert.equal(e.orgId, db.tasks.find((t) => t.id === e.recordId)?.orgId);
+      } else if (e.recordType === 'template') {
+        assert.equal(e.orgId, db.templates.find((t) => t.id === e.recordId)?.orgId);
+      }
+    }
+    assert.ok(db.audit.some((e) => e.orgId === UNKNOWN_AUDIT_ORG));
+  });
+
+  it('never rewrites hash-protected v2 fields', () => {
+    const pristine = seedDatabase();
+    const before = JSON.stringify(pristine.audit);
+    backfillAuditOrgIds(pristine);
+    assert.equal(JSON.stringify(pristine.audit), before);
+    const forged = seedDatabase();
+    const target = forged.audit.find((e) => e.recordType === 'task') as AuditEvent;
+    target.orgId = 'system';
+    backfillAuditOrgIds(forged);
+    assert.equal(target.orgId, 'system');
+  });
 });

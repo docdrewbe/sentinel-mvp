@@ -622,4 +622,58 @@ describe('D6 organization isolation (HTTP)', () => {
       await close();
     }
   });
+
+  it('contains forged system tags on task events to privileged roles only', async () => {
+    // Attacker re-tags a v2 task event as 'system' and re-hashes correctly,
+    // so the chain itself stays valid and only the read-time rule protects it.
+    const { base, close } = await startServer((db) => {
+      const idx = db.audit.findIndex((e) => e.recordType === 'task');
+      db.audit[idx].orgId = 'system';
+      let prev = idx === 0 ? 'GENESIS' : db.audit[idx - 1].hash;
+      for (let i = idx; i < db.audit.length; i++) {
+        const e = db.audit[i];
+        e.prevHash = prev;
+        e.hash = createHash('sha256')
+          .update(
+            JSON.stringify([
+              e.seq,
+              e.id,
+              e.actorId,
+              e.action,
+              e.recordType,
+              e.recordId,
+              e.timestamp,
+              e.detail,
+              e.prevHash,
+              e.hashVersion,
+              e.orgId
+            ])
+          )
+          .digest('hex');
+        prev = e.hash;
+      }
+    });
+    try {
+      const health = await call(base, 'GET', '/api/health', 'u-admin');
+      assert.equal(health.json.auditChainOk, true);
+      const forged = (e: Record<string, unknown>): boolean =>
+        e.orgId === 'system' && e.recordType === 'task';
+      for (const user of ['u-nurse-mgr', 'u-staff', 'u-clinic-mgr', 'u-clinic-staff', 'u-canna-mgr']) {
+        const res = await call(base, 'GET', '/api/audit?limit=500', user);
+        assert.equal(res.status, 200, user);
+        assert.ok(!rows(res.json).some(forged), `${user} must not see forged event`);
+        assert.ok(
+          rows(res.json).some((e) => e.action === 'db.seeded' && e.orgId === 'system'),
+          `${user} sees db.seeded`
+        );
+      }
+      for (const user of ['u-admin', 'u-officer']) {
+        const res = await call(base, 'GET', '/api/audit?limit=500', user);
+        assert.equal(res.status, 200, user);
+        assert.ok(rows(res.json).some(forged), `${user} sees forged event for forensics`);
+      }
+    } finally {
+      await close();
+    }
+  });
 });

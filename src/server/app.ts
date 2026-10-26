@@ -400,14 +400,19 @@ export function createApp(db: DbShape): express.Express {
     const recordId = String(req.query.recordId ?? '');
     const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
     const events = db.audit
-      .filter(
-        (e) =>
-          (allowed.includes(e.orgId) ||
-            e.orgId === SYSTEM_AUDIT_ORG ||
-            (seesAllOrgs && e.orgId === UNKNOWN_AUDIT_ORG)) &&
+      .filter((e) => {
+        // Only genuine database-level events are globally visible. A 'system'
+        // tag on any other record type is forged or stale: contain it like
+        // 'unknown' (privileged eyes only) instead of leaking it to tenants.
+        const genuineSystem = e.orgId === SYSTEM_AUDIT_ORG && e.recordType === 'database';
+        const privilegedOnly =
+          e.orgId === UNKNOWN_AUDIT_ORG || (e.orgId === SYSTEM_AUDIT_ORG && !genuineSystem);
+        return (
+          (allowed.includes(e.orgId) || genuineSystem || (seesAllOrgs && privilegedOnly)) &&
           (!recordType || e.recordType === recordType) &&
           (!recordId || e.recordId === recordId)
-      )
+        );
+      })
       .slice(-limit);
     res.json(events);
   });
