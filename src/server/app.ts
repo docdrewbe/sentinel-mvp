@@ -30,6 +30,7 @@ import {
   capaGateMissing,
   capaNoEligibleReviewer,
   capaReviewIneligible,
+  nonStringField,
   qualifyingEffectivenessEvidence
 } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
@@ -52,6 +53,14 @@ function sendError(req: Request, res: Response, e: unknown): void {
 
 function forbidden(res: Response, user: DemoUser, action: string): void {
   res.status(403).json({ error: `Role '${user.role}' may not perform '${action}' here.` });
+}
+
+/** P2: non-string text input is a 400 naming the field, never a 500. */
+function rejectBadText(res: Response, body: unknown, fields: string[]): boolean {
+  const bad = nonStringField(body as Record<string, unknown>, fields);
+  if (!bad) return false;
+  res.status(400).json({ error: `${bad} must be text.` });
+  return true;
 }
 
 export function createApp(db: DbShape): express.Express {
@@ -423,6 +432,24 @@ export function createApp(db: DbShape): express.Express {
       forbidden(res, user, 'capa.create');
       return;
     }
+    if (
+      rejectBadText(res, req.body, [
+        'orgId',
+        'domainId',
+        'taskId',
+        'finding',
+        'severity',
+        'ownerId',
+        'dueDate',
+        'containment',
+        'rootCause',
+        'correctivePlan',
+        'preventivePlan',
+        'effectivenessCriteria'
+      ])
+    ) {
+      return;
+    }
     try {
       const capa = mutateDb(db, () => {
         const created = createCapa(db, {
@@ -545,6 +572,25 @@ export function createApp(db: DbShape): express.Express {
         forbidden(res, user, 'capa.update');
         return;
       }
+      // P2: type validation sits after authorization but before no-op
+      // detection, so unauthorized callers still get 403 first.
+      if (
+        rejectBadText(res, req.body, [
+          'finding',
+          'severity',
+          'containment',
+          'rootCause',
+          'ownerId',
+          'dueDate',
+          'domainId',
+          'correctivePlan',
+          'preventivePlan',
+          'effectivenessCriteria',
+          'status'
+        ])
+      ) {
+        return;
+      }
       const oldStatus = capa.status;
       const ownerBefore = capa.ownerId;
       const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
@@ -661,6 +707,7 @@ export function createApp(db: DbShape): express.Express {
       forbidden(res, user, 'capa.evidence.add');
       return;
     }
+    if (rejectBadText(res, req.body, ['label', 'holder', 'kind'])) return;
     const kind = req.body.kind;
     if (kind !== undefined && kind !== 'implementation' && kind !== 'effectiveness') {
       res.status(400).json({ error: 'Unknown evidence kind.' });
@@ -720,6 +767,7 @@ export function createApp(db: DbShape): express.Express {
       forbidden(res, user, 'capa.evidence.add');
       return;
     }
+    if (rejectBadText(res, req.body, ['toHolder', 'reason'])) return;
     try {
       const ref = mutateDb(db, () => {
         const reason = String(req.body.reason ?? '').trim() || undefined;
@@ -775,6 +823,9 @@ export function createApp(db: DbShape): express.Express {
       res.status(403).json({ error: capaReviewerMessage(capa) });
       return;
     }
+    // P2: evidenceIds is validated structurally below (array of known ids);
+    // only the plain-text inputs are type-checked here.
+    if (rejectBadText(res, req.body, ['outcome', 'rationale'])) return;
     const outcome = req.body.outcome;
     if (outcome !== 'effective' && outcome !== 'ineffective') {
       res.status(400).json({ error: 'Review outcome must be effective or ineffective.' });

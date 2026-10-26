@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, renameSync as realRenameSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, renameSync as realRenameSync, statSync } from 'node:fs';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -4825,6 +4825,310 @@ describe('P1 effectiveness criteria integrity (HTTP)', () => {
       assert.deepEqual(await getCapa(base, 'u-officer', id), before);
       assert.equal(await auditTotal(base), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('P2 CAPA input validation (HTTP)', () => {
+  const BAD: unknown[] = [123, true, { x: 1 }, ['a'], null];
+
+  async function capaCount(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/capas?orgId=org-cah', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function auditTotal(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  function validCreateBody(): Record<string, unknown> {
+    return {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'P2 probe finding (simulated).',
+      severity: 'medium',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2026-12-01',
+      containment: 'Held (simulated).'
+    };
+  }
+
+  async function makeOpenCapa(base: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', validCreateBody());
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  it('rejects non-string create fields with the field named', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const fields = [
+        'orgId',
+        'domainId',
+        'taskId',
+        'finding',
+        'severity',
+        'ownerId',
+        'dueDate',
+        'containment',
+        'rootCause',
+        'correctivePlan',
+        'preventivePlan',
+        'effectivenessCriteria'
+      ];
+      const count = await capaCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base);
+      // The admin has no org pre-check, so every malformed field surfaces
+      // as a 400 rather than a 403.
+      for (const field of fields) {
+        for (const value of BAD) {
+          const res = await call(base, 'POST', '/api/capas', 'u-admin', {
+            ...validCreateBody(),
+            [field]: value
+          });
+          assert.equal(res.status, 400);
+          assert.equal(res.json.error, `${field} must be text.`);
+        }
+      }
+      assert.equal(await capaCount(base), count);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects non-string PATCH fields without touching record, audit, or disk', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOpenCapa(base);
+      const fields = [
+        'finding',
+        'severity',
+        'containment',
+        'rootCause',
+        'ownerId',
+        'dueDate',
+        'domainId',
+        'correctivePlan',
+        'preventivePlan',
+        'effectivenessCriteria',
+        'status'
+      ];
+      const fetch = async (): Promise<unknown> => {
+        const res = await call(base, 'GET', '/api/capas?orgId=org-cah', 'u-nurse-mgr');
+        assert.equal(res.status, 200);
+        return (res.json as unknown as unknown[]).find((c) => (c as { id: string }).id === id);
+      };
+      const before = await fetch();
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const mtimeBefore = statSync(dataFile).mtimeMs;
+      const audits = await auditTotal(base);
+      for (const field of fields) {
+        for (const value of BAD) {
+          const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { [field]: value });
+          assert.equal(res.status, 400);
+          assert.equal(res.json.error, `${field} must be text.`);
+        }
+      }
+      assert.deepEqual(await fetch(), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.equal(statSync(dataFile).mtimeMs, mtimeBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects non-string evidence, transfer, and review inputs', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', {
+        ...validCreateBody(),
+        rootCause: 'Found (simulated).',
+        correctivePlan: 'Fix (simulated).',
+        preventivePlan: 'Prevent (simulated).',
+        effectivenessCriteria: 'No recurrence in 30 days (simulated).'
+      });
+      const id = String(created.json.id);
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { status: 'investigation' })).status, 200);
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { status: 'action_in_progress' })).status, 200);
+      const proof = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'implementation proof (simulated)',
+        holder: 'Case File'
+      });
+      assert.equal(proof.status, 201);
+      const evidenceId = String(proof.json.id);
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { status: 'effectiveness_review' })).status, 200);
+      const check = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'effectiveness check (simulated)',
+        holder: 'Case File',
+        kind: 'effectiveness'
+      });
+      const checkId = String(check.json.id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base);
+      for (const field of ['label', 'holder', 'kind']) {
+        for (const value of BAD) {
+          const res = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+            label: 'x (simulated)',
+            holder: 'H',
+            [field]: value
+          });
+          assert.equal(res.status, 400);
+          assert.equal(res.json.error, `${field} must be text.`);
+        }
+      }
+      for (const field of ['toHolder', 'reason']) {
+        for (const value of BAD) {
+          const res = await call(base, 'POST', `/api/capas/${id}/transfer`, 'u-nurse-mgr', {
+            evidenceId,
+            toHolder: 'B',
+            [field]: value
+          });
+          assert.equal(res.status, 400);
+          assert.equal(res.json.error, `${field} must be text.`);
+        }
+      }
+      for (const field of ['outcome', 'rationale']) {
+        for (const value of BAD) {
+          const res = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+            outcome: 'effective',
+            rationale: 'Effective (simulated).',
+            evidenceIds: [checkId],
+            [field]: value
+          });
+          assert.equal(res.status, 400);
+          assert.equal(res.json.error, `${field} must be text.`);
+        }
+      }
+      // evidenceIds is structural (array of known ids), already a safe 400.
+      for (const evidenceIds of ['nope', 123, [123], null]) {
+        const res = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+          outcome: 'effective',
+          rationale: 'Effective (simulated).',
+          evidenceIds
+        });
+        assert.equal(res.status, 400);
+        assert.equal(res.json.error, 'Each referenced evidence item must be current-cycle effectiveness evidence.');
+      }
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps authorization ahead of validation for cross-org callers', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOpenCapa(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-clinic-staff', { finding: 123 })).status,
+        403
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/capas', 'u-clinic-staff', { ...validCreateBody(), finding: 123 })).status,
+        403
+      );
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-clinic-mgr', {
+            label: 123,
+            holder: 'H'
+          })
+        ).status,
+        403
+      );
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-clinic-mgr', {
+            outcome: 123,
+            rationale: 'x',
+            evidenceIds: []
+          })
+        ).status,
+        403
+      );
+      // A scoped manager naming another org also gets 403, not field details.
+      assert.equal(
+        (await call(base, 'POST', '/api/capas', 'u-nurse-mgr', { ...validCreateBody(), orgId: 123 })).status,
+        403
+      );
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('still accepts valid string values end to end', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', {
+        ...validCreateBody(),
+        taskId: undefined,
+        rootCause: 'Found (simulated).',
+        correctivePlan: 'Fix (simulated).',
+        preventivePlan: 'Prevent (simulated).',
+        effectivenessCriteria: 'No recurrence in 30 days (simulated).'
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+          finding: 'P2 probe finding, clarified (simulated).',
+          severity: 'high',
+          dueDate: '2026-12-15'
+        })).status,
+        200
+      );
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { status: 'investigation' })).status, 200);
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { status: 'action_in_progress' })).status, 200);
+      const proof = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-nurse-mgr', {
+        label: 'implementation proof (simulated)',
+        holder: 'Case File'
+      });
+      assert.equal(proof.status, 201);
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/transfer`, 'u-nurse-mgr', {
+            evidenceId: String(proof.json.id),
+            toHolder: 'Second Holder',
+            reason: 'Shift handover (simulated).'
+          })
+        ).status,
+        200
+      );
+      assert.equal((await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', { status: 'effectiveness_review' })).status, 200);
+      const check = await call(base, 'POST', `/api/capas/${id}/evidence`, 'u-officer', {
+        label: 'effectiveness check (simulated)',
+        holder: 'Case File',
+        kind: 'effectiveness'
+      });
+      assert.equal(
+        (
+          await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+            outcome: 'effective',
+            rationale: 'Effective (simulated).',
+            evidenceIds: [String(check.json.id)]
+          })
+        ).status,
+        201
+      );
       assertDiskMatchesMemory(db);
     } finally {
       await close();

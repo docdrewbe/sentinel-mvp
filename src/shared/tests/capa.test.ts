@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { capaCriteriaLocked, latestReviewEntryAt, qualifyingEffectivenessEvidence } from '../capa.js';
+import { capaCriteriaLocked, latestReviewEntryAt, nonStringField, qualifyingEffectivenessEvidence } from '../capa.js';
 import type { EvidenceRef } from '../types.js';
 
 const item = (over: Partial<EvidenceRef> & { id: string; at: string }): EvidenceRef => {
@@ -55,5 +55,26 @@ describe('criteria lock (P1)', () => {
     assert.equal(capaCriteriaLocked('action_in_progress'), false);
     assert.equal(capaCriteriaLocked('effectiveness_review'), true);
     assert.equal(capaCriteriaLocked('closed'), true);
+  });
+});
+
+describe('text field validation (P2)', () => {
+  it('names the first non-string present value in field order', () => {
+    assert.equal(nonStringField({ finding: 'x' }, ['finding']), null);
+    assert.equal(nonStringField({}, ['finding', 'severity']), null);
+    assert.equal(nonStringField({ finding: undefined }, ['finding']), null);
+    assert.equal(nonStringField({ finding: 123 }, ['finding']), 'finding');
+    assert.equal(nonStringField({ finding: null }, ['finding']), 'finding');
+    assert.equal(nonStringField({ finding: true }, ['finding']), 'finding');
+    assert.equal(nonStringField({ finding: { x: 1 } }, ['finding']), 'finding');
+    assert.equal(nonStringField({ finding: ['x'] }, ['finding']), 'finding');
+    assert.equal(
+      nonStringField({ severity: 1, finding: 2 }, ['finding', 'severity']),
+      'finding'
+    );
+    assert.equal(
+      nonStringField({ severity: 1, finding: 'ok' }, ['finding', 'severity']),
+      'severity'
+    );
   });
 });

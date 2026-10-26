@@ -45,6 +45,21 @@ export function capaCriteriaLocked(status: CapaStatus): boolean {
   return status === 'effectiveness_review' || status === 'closed';
 }
 
+/**
+ * P2: first body field (checked in order) whose present value is not a
+ * string — numbers, booleans, objects, arrays, and null all qualify — or
+ * null when every present value is a string. CAPA routes call this after
+ * the authorization checks and report `400 "<field> must be text."`
+ * before any no-op detection or mutation.
+ */
+export function nonStringField(body: Record<string, unknown>, fields: string[]): string | null {
+  for (const field of fields) {
+    const value = body[field];
+    if (value !== undefined && typeof value !== 'string') return field;
+  }
+  return null;
+}
+
 export type CapaGateEvidence = Pick<
   CapaRecord,
   'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan' | 'effectivenessCriteria'
