@@ -395,7 +395,11 @@ describe('F1b version allow-list', () => {
 describe('audit org backfill', () => {
   it('associates legacy events with their record org, system events with system', () => {
     const db = seedDatabase();
-    for (const e of db.audit) delete (e as unknown as Record<string, unknown>).orgId;
+    for (const e of db.audit) {
+      const rec = e as unknown as Record<string, unknown>;
+      delete rec.hashVersion;
+      delete rec.orgId;
+    }
     backfillAuditOrgIds(db);
     for (const e of db.audit) {
       if (e.recordType === 'task') {
@@ -406,6 +410,7 @@ describe('audit org backfill', () => {
         assert.equal(e.orgId, 'system');
       }
     }
+    rehashFrom(db.audit, 0);
     assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
   });
 
@@ -413,7 +418,11 @@ describe('audit org backfill', () => {
     const db = seedDatabase();
     db.tasks = db.tasks.filter((t) => t.id !== 'task-sharps-log');
     db.templates = db.templates.filter((t) => t.id !== 'tpl-signage');
-    for (const e of db.audit) delete (e as unknown as Record<string, unknown>).orgId;
+    for (const e of db.audit) {
+      const rec = e as unknown as Record<string, unknown>;
+      delete rec.hashVersion;
+      delete rec.orgId;
+    }
     backfillAuditOrgIds(db);
     const orphans = db.audit.filter(
       (e) => e.recordId === 'task-sharps-log' || e.recordId === 'tpl-signage'
@@ -450,6 +459,33 @@ describe('audit org backfill', () => {
       }
     }
     assert.ok(db.audit.some((e) => e.orgId === UNKNOWN_AUDIT_ORG));
+  });
+
+  it('derives v1 orgIds from records regardless of stored value', () => {
+    const db = seedDatabase();
+    for (const e of db.audit) {
+      delete (e as unknown as Record<string, unknown>).hashVersion;
+      if (e.recordType === 'task') e.orgId = 'org-clinic';
+      else if (e.recordType === 'template') e.orgId = 'org-canna';
+      else e.orgId = 'org-cah';
+    }
+    const nope = db.audit.find((e) => e.recordId === 'task-eyewash') as AuditEvent;
+    nope.orgId = 'org-nope';
+    db.tasks = db.tasks.filter((t) => t.id !== 'task-sharps-log');
+    backfillAuditOrgIds(db);
+    for (const e of db.audit) {
+      if (e.recordType === 'database') {
+        assert.equal(e.orgId, 'system');
+      } else if (e.recordId === 'task-sharps-log') {
+        assert.equal(e.orgId, UNKNOWN_AUDIT_ORG);
+      } else if (e.recordType === 'task') {
+        assert.equal(e.orgId, db.tasks.find((t) => t.id === e.recordId)?.orgId);
+      } else if (e.recordType === 'template') {
+        assert.equal(e.orgId, db.templates.find((t) => t.id === e.recordId)?.orgId);
+      }
+    }
+    rehashFrom(db.audit, 0);
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
   });
 
   it('never rewrites hash-protected v2 fields', () => {

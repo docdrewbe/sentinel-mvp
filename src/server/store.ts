@@ -247,17 +247,15 @@ export function appendAudit(db: DbShape, input: AuditInput): AuditEvent {
 }
 
 /**
- * Associate legacy audit events (saved before org tracking) with their org.
- * Also repairs legacy non-database events wrongly tagged 'system' — but only
- * when the tag is unhashed (non-v2). Hash-protected v2 fields are never
- * rewritten here; mis-tagged v2 events are contained by the read-time filter.
- * Fail-closed: anything unmatched becomes 'unknown', never 'system'.
+ * Classify legacy audit events by re-deriving the org from the referenced
+ * record — the stored v1 orgId is unhashed, so it is never trusted, whether
+ * missing, wrong-but-valid, or forged. v2 orgIds are hash-protected and are
+ * never rewritten here; mis-tagged v2 events are contained by the read-time
+ * filter instead. Fail-closed: unresolvable records become 'unknown'.
  */
 export function backfillAuditOrgIds(db: DbShape): void {
   for (const e of db.audit) {
-    const misTaggedSystem =
-      e.hashVersion !== 2 && e.orgId === SYSTEM_AUDIT_ORG && e.recordType !== 'database';
-    if (e.orgId && !misTaggedSystem) continue;
+    if (e.hashVersion === 2) continue;
     if (e.recordType === 'task') {
       e.orgId = db.tasks.find((t) => t.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
     } else if (e.recordType === 'template') {

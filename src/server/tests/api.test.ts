@@ -676,4 +676,75 @@ describe('D6 organization isolation (HTTP)', () => {
       await close();
     }
   });
+
+  it('serves derived legacy orgIds correctly to every role', async () => {
+    // Legacy v1 chain whose stored tags are all wrong; backfill re-derives.
+    const { base, close } = await startServer((db) => {
+      db.tasks = db.tasks.filter((t) => t.id !== 'task-sharps-log');
+      for (const e of db.audit) {
+        const rec = e as unknown as Record<string, unknown>;
+        delete rec.hashVersion;
+        rec.orgId = 'org-clinic';
+      }
+      store.backfillAuditOrgIds(db);
+      let prev = 'GENESIS';
+      for (const e of db.audit) {
+        e.prevHash = prev;
+        e.hash = createHash('sha256')
+          .update(
+            [
+              e.seq,
+              e.id,
+              e.actorId,
+              e.action,
+              e.recordType,
+              e.recordId,
+              e.timestamp,
+              e.detail,
+              e.prevHash
+            ].join('|')
+          )
+          .digest('hex');
+        prev = e.hash;
+      }
+    });
+    try {
+      const health = await call(base, 'GET', '/api/health', 'u-admin');
+      assert.equal(health.json.auditChainOk, true);
+      const scoped: Array<{ user: string; org: string }> = [
+        { user: 'u-nurse-mgr', org: 'org-cah' },
+        { user: 'u-staff', org: 'org-cah' },
+        { user: 'u-clinic-mgr', org: 'org-clinic' },
+        { user: 'u-clinic-staff', org: 'org-clinic' },
+        { user: 'u-canna-mgr', org: 'org-canna' }
+      ];
+      for (const s of scoped) {
+        const res = await call(base, 'GET', '/api/audit?limit=500', s.user);
+        assert.equal(res.status, 200, s.user);
+        const events = rows(res.json);
+        assert.ok(
+          events.every((e) => e.orgId === s.org || e.orgId === 'system'),
+          `${s.user} sees only own org + system`
+        );
+        assert.ok(
+          events.every((e) => e.orgId !== 'unknown'),
+          `${s.user} sees no unknown`
+        );
+      }
+      // A hospital event mis-tagged org-clinic is derived back: visible to
+      // hospital staff, invisible to clinic staff.
+      const mgr = rows((await call(base, 'GET', '/api/audit?limit=500', 'u-nurse-mgr')).json);
+      const mine = mgr.find((e) => e.recordId === 'task-med-storage' && e.action === 'task.created');
+      assert.ok(mine && mine.orgId === 'org-cah');
+      const clinic = rows((await call(base, 'GET', '/api/audit?limit=500', 'u-clinic-staff')).json);
+      assert.ok(!clinic.some((e) => e.recordId === 'task-med-storage'));
+      for (const user of ['u-admin', 'u-officer']) {
+        const res = await call(base, 'GET', '/api/audit?limit=500', user);
+        assert.ok(rows(res.json).some((e) => e.orgId === 'unknown'), `${user} sees unknown`);
+        assert.ok(rows(res.json).some((e) => e.recordId === 'task-med-storage'), user);
+      }
+    } finally {
+      await close();
+    }
+  });
 });

@@ -46,6 +46,7 @@ Reset demo data: stop the server and delete `./data/sentinel.json`.
 - Every audit event carries its organization's id; pre-existing events are backfilled on load.
 - Legacy events whose record is gone are marked `unknown` (fail-closed: admins/officers only); genuine system events stay `system`.
 - Only database-level events may use the `system` marker visibly to all: legacy mis-tagged events are reclassified from their records on load (v1 only — v2 hashes are never rewritten), and forged `system` tags on tenant records are contained to privileged roles.
+- Known prototype limit: the audit chain detects edits to stored events, but a fully recomputed chain (every hash redone after tampering) still verifies. Until the head hash is anchored outside the data file, fully recomputed chains are outside the tamper-detection guarantees.
 - Audit hash versions: pre-F1 (v1) events carry a backfilled, **unhashed** `orgId`; new (v2) events bind `orgId` into the hash. Accepted for the demo — the data will be reset before judging, making every event v2.
 
 ## API sketch
