@@ -1,0 +1,20 @@
+node_modules/
+dist/
+data/
+.npm-cache/
+.tmp/
+*.local
+
+# Environment secrets, credentials, and API keys (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*apikey*
+*api-key*
+secrets/
+.secrets/
