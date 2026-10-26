@@ -344,3 +344,183 @@ describe('D2 verified-record locking (HTTP)', () => {
     }
   });
 });
+
+describe('D6 organization isolation (HTTP)', () => {
+  function rows(json: Record<string, unknown>): Array<Record<string, unknown>> {
+    return json as unknown as Array<Record<string, unknown>>;
+  }
+
+  function assertErrorOnly(json: Record<string, unknown>): void {
+    assert.deepEqual(Object.keys(json), ['error']);
+  }
+
+  it('restricts scoped reads to their own org; foreign orgId → 403 without records', async () => {
+    const { base, close } = await startServer();
+    try {
+      const scoped: Array<{ user: string; org: string; foreign: string }> = [
+        { user: 'u-nurse-mgr', org: 'org-cah', foreign: 'org-clinic' },
+        { user: 'u-clinic-staff', org: 'org-clinic', foreign: 'org-cah' },
+        { user: 'u-canna-mgr', org: 'org-canna', foreign: 'org-cah' }
+      ];
+      for (const s of scoped) {
+        for (const path of ['/api/tasks', '/api/domains', '/api/templates']) {
+          const own = await call(base, 'GET', `${path}?orgId=${s.org}`, s.user);
+          assert.equal(own.status, 200, `${s.user} ${path} own`);
+          assert.ok(rows(own.json).every((r) => r.orgId === s.org));
+          const missing = await call(base, 'GET', path, s.user);
+          assert.equal(missing.status, 200, `${s.user} ${path} missing orgId`);
+          assert.ok(rows(missing.json).every((r) => r.orgId === s.org));
+          const denied = await call(base, 'GET', `${path}?orgId=${s.foreign}`, s.user);
+          assert.equal(denied.status, 403, `${s.user} ${path} foreign`);
+          assertErrorOnly(denied.json);
+        }
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it('shows scoped users only own-org audit events', async () => {
+    const { base, close } = await startServer();
+    try {
+      const mk = async (orgId: string, domainId: string, ownerId: string, title: string) =>
+        call(base, 'POST', '/api/tasks', 'u-officer', {
+          orgId,
+          domainId,
+          title,
+          ownerId,
+          dueDate: '2026-12-01'
+        });
+      assert.equal((await mk('org-cah', 'dom-osha-h', 'u-staff', 'D6 hospital probe')).status, 201);
+      assert.equal(
+        (await mk('org-clinic', 'dom-osha-c', 'u-clinic-staff', 'D6 clinic probe')).status,
+        201
+      );
+      const staff = await call(base, 'GET', '/api/audit?limit=500', 'u-clinic-staff');
+      assert.equal(staff.status, 200);
+      const staffEvents = rows(staff.json);
+      assert.ok(staffEvents.length > 0);
+      assert.ok(staffEvents.every((e) => e.orgId === 'org-clinic' || e.orgId === 'system'));
+      assert.ok(staffEvents.some((e) => e.orgId === 'org-clinic'));
+      const mgr = await call(base, 'GET', '/api/audit?limit=500', 'u-nurse-mgr');
+      assert.equal(mgr.status, 200);
+      assert.ok(rows(mgr.json).every((e) => e.orgId === 'org-cah' || e.orgId === 'system'));
+    } finally {
+      await close();
+    }
+  });
+
+  it('retains documented cross-org read access for admin and officer', async () => {
+    const { base, close } = await startServer();
+    try {
+      for (const user of ['u-admin', 'u-officer']) {
+        const all = await call(base, 'GET', '/api/tasks', user);
+        assert.equal(all.status, 200, user);
+        const orgs = new Set(rows(all.json).map((t) => t.orgId));
+        assert.ok(orgs.has('org-cah') && orgs.has('org-clinic') && orgs.has('org-canna'), user);
+        const one = await call(base, 'GET', '/api/tasks?orgId=org-clinic', user);
+        assert.equal(one.status, 200, user);
+        assert.ok(rows(one.json).every((t) => t.orgId === 'org-clinic'));
+      }
+      const audit = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+      const auditOrgs = new Set(rows(audit.json).map((e) => e.orgId));
+      assert.ok(auditOrgs.has('org-cah') && auditOrgs.has('org-clinic'));
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects cross-org writes without side effects or record leaks', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const tasksBefore = db.tasks.length;
+      const auditsBefore = db.audit.length;
+      const attempts = [
+        call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+          orgId: 'org-clinic',
+          domainId: 'dom-osha-c',
+          title: 'foreign create',
+          ownerId: 'u-clinic-staff',
+          dueDate: '2026-12-01'
+        }),
+        call(base, 'PATCH', '/api/tasks/task-privacy-screen', 'u-nurse-mgr', {
+          title: 'foreign edit'
+        }),
+        call(base, 'PATCH', '/api/tasks/task-privacy-screen', 'u-nurse-mgr', {}),
+        call(base, 'POST', '/api/tasks/task-privacy-screen/evidence', 'u-nurse-mgr', {
+          label: 'x',
+          holder: 'y'
+        }),
+        call(base, 'POST', '/api/tasks/task-eyewash/transfer', 'u-nurse-mgr', {
+          evidenceId: 'task-eyewash-ev1',
+          toHolder: 'Archive'
+        }),
+        call(base, 'POST', '/api/templates/tpl-access-review/instantiate', 'u-clinic-mgr', {
+          ownerId: 'u-clinic-staff'
+        }),
+        call(base, 'PATCH', '/api/tasks/task-sharps-log', 'u-clinic-staff', { title: 'x' })
+      ];
+      for (const attempt of attempts) {
+        const res = await attempt;
+        assert.equal(res.status, 403);
+        assertErrorOnly(res.json);
+      }
+      assert.equal(db.tasks.length, tasksBefore);
+      assert.equal(db.audit.length, auditsBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('allows authorized writes with correct audit org attribution', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const scoped = await call(base, 'POST', '/api/tasks', 'u-clinic-mgr', {
+        orgId: 'org-clinic',
+        domainId: 'dom-osha-c',
+        title: 'D6 authorized clinic task',
+        ownerId: 'u-clinic-staff',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(scoped.status, 201);
+      const cross = await call(base, 'POST', '/api/tasks', 'u-officer', {
+        orgId: 'org-clinic',
+        domainId: 'dom-osha-c',
+        title: 'D6 privileged cross-org task',
+        ownerId: 'u-clinic-staff',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(cross.status, 201);
+      const mine = await call(base, 'PATCH', '/api/tasks/task-eyewash', 'u-clinic-mgr', {
+        title: 'Eyewash station weekly check log (retitled)'
+      });
+      assert.equal(mine.status, 200);
+      for (const id of [String(scoped.json.id), String(cross.json.id)]) {
+        const trail = await call(base, 'GET', `/api/audit?recordId=${id}`, 'u-officer');
+        assert.equal(trail.status, 200);
+        const events = rows(trail.json);
+        assert.ok(events.length > 0);
+        assert.ok(events.every((e) => e.orgId === 'org-clinic'));
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('seeds every audit event with an org id', async () => {
+    const { base, close } = await startServer();
+    try {
+      const res = await call(base, 'GET', '/api/audit?limit=500', 'u-admin');
+      assert.equal(res.status, 200);
+      const events = rows(res.json);
+      assert.ok(events.length > 0);
+      const known = new Set(['org-cah', 'org-clinic', 'org-canna', 'system']);
+      assert.ok(events.every((e) => typeof e.orgId === 'string' && known.has(e.orgId as string)));
+      assert.ok(events.some((e) => e.action === 'db.seeded' && e.orgId === 'system'));
+    } finally {
+      await close();
+    }
+  });
+});

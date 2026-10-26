@@ -8,6 +8,7 @@ process.env.SENTINEL_DATA_FILE = join(mkdtempSync(join(tmpdir(), 'sentinel-test-
 
 const {
   appendAudit,
+  backfillAuditOrgIds,
   emptyDb,
   findOrphanedTempFiles,
   verifyAuditChain,
@@ -20,8 +21,8 @@ const { seedDatabase } = await import('../seed.js');
 describe('append-only audit log', () => {
   it('chains events with increasing sequence numbers and a verifiable hash', () => {
     const db = emptyDb();
-    appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', detail: 'first' });
-    appendAudit(db, { actorId: 'u2', action: 'b', recordType: 't', recordId: 'r2', detail: 'second' });
+    appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', orgId: 'org-cah', detail: 'first' });
+    appendAudit(db, { actorId: 'u2', action: 'b', recordType: 't', recordId: 'r2', orgId: 'org-cah', detail: 'second' });
     assert.equal(db.audit[0].seq, 1);
     assert.equal(db.audit[1].seq, 2);
     assert.equal(db.audit[1].prevHash, db.audit[0].hash);
@@ -30,8 +31,8 @@ describe('append-only audit log', () => {
 
   it('detects tampering with any recorded event', () => {
     const db = emptyDb();
-    appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', detail: 'first' });
-    appendAudit(db, { actorId: 'u2', action: 'b', recordType: 't', recordId: 'r2', detail: 'second' });
+    appendAudit(db, { actorId: 'u1', action: 'a', recordType: 't', recordId: 'r1', orgId: 'org-cah', detail: 'first' });
+    appendAudit(db, { actorId: 'u2', action: 'b', recordType: 't', recordId: 'r2', orgId: 'org-cah', detail: 'second' });
     db.audit[0].detail = 'forged';
     assert.equal(verifyAuditChain(db.audit).ok, false);
   });
@@ -90,5 +91,23 @@ describe('interrupted-save detection', () => {
     } finally {
       unlinkSync(orphan);
     }
+  });
+});
+
+describe('audit org backfill', () => {
+  it('associates legacy events with their record org, system events with system', () => {
+    const db = seedDatabase();
+    for (const e of db.audit) delete (e as unknown as Record<string, unknown>).orgId;
+    backfillAuditOrgIds(db);
+    for (const e of db.audit) {
+      if (e.recordType === 'task') {
+        assert.equal(e.orgId, db.tasks.find((t) => t.id === e.recordId)?.orgId);
+      } else if (e.recordType === 'template') {
+        assert.equal(e.orgId, db.templates.find((t) => t.id === e.recordId)?.orgId);
+      } else {
+        assert.equal(e.orgId, 'system');
+      }
+    }
+    assert.deepEqual(verifyAuditChain(db.audit), { ok: true });
   });
 });

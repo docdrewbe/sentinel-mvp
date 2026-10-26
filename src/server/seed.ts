@@ -14,6 +14,7 @@ import type {
   TaskStatus,
   TaskTemplate
 } from '../shared/types.js';
+import { SYSTEM_AUDIT_ORG } from '../shared/types.js';
 
 const dueInDays = (n: number): string => {
   const d = new Date();
@@ -349,7 +350,14 @@ export function seedDatabase(): DbShape {
   );
 
   db.audit = [];
-  const push = (input: { actorId: string; action: string; recordType: string; recordId: string; detail: string }) => {
+  const push = (input: {
+    actorId: string;
+    action: string;
+    recordType: string;
+    recordId: string;
+    orgId: string;
+    detail: string;
+  }) => {
     db.audit.push(buildAuditEvent(db.audit, input));
   };
   push({
@@ -357,6 +365,7 @@ export function seedDatabase(): DbShape {
     action: 'db.seeded',
     recordType: 'database',
     recordId: 'sentinel',
+    orgId: SYSTEM_AUDIT_ORG,
     detail: 'Synthetic demo data loaded (simulated; no real patient data).'
   });
   for (const task of db.tasks) {
@@ -365,6 +374,7 @@ export function seedDatabase(): DbShape {
       action: 'task.created',
       recordType: 'task',
       recordId: task.id,
+      orgId: task.orgId,
       detail: `Seeded: ${task.title}`
     });
   }
@@ -374,6 +384,7 @@ export function seedDatabase(): DbShape {
       action: 'template.created',
       recordType: 'template',
       recordId: template.id,
+      orgId: template.orgId,
       detail: `Seeded: ${template.title} [${template.controlType}]`
     });
   }

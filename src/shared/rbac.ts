@@ -11,6 +11,17 @@ export type Action =
   | 'custody.transfer'
   | 'template.manage';
 
+/**
+ * DEMO PRIVILEGE (explicit): administrators and compliance officers have
+ * cross-organization access in this MVP so one demo login can oversee every
+ * tenant. Department managers and staff are strictly limited to their own
+ * organization. Revisit before any production use.
+ */
+export function visibleOrgIds(user: DemoUser, allOrgIds: string[]): string[] {
+  if (user.role === 'administrator' || user.role === 'compliance_officer') return [...allOrgIds];
+  return [user.orgId];
+}
+
 export function can(user: DemoUser, action: Action, task?: ComplianceTask): boolean {
   if (user.role === 'administrator') return true;
   // Compliance officers hold cross-organization verification authority in this demo.

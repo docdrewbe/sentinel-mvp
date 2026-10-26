@@ -39,6 +39,12 @@ Reset demo data: stop the server and delete `./data/sentinel.json`.
 3. Open a task to add evidence, transfer custody, and see its append-only
    record history. Every change lands in the hash-chained audit log below.
 
+## Tenant isolation (simulated demo rules)
+
+- Managers and staff see and change only their own organization (enforced by the API, not just the dashboard).
+- Administrators and compliance officers have documented cross-organization demo access.
+- Every audit event carries its organization's id; pre-existing events are backfilled on load.
+
 ## API sketch
 
 - `GET /api/health|orgs|users` (public, for demo bootstrap)

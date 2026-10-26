@@ -18,11 +18,13 @@ import {
   verifyAuditChain,
   type DbShape
 } from './store.js';
-import { can, type Action } from '../shared/rbac.js';
-import type { DemoUser } from '../shared/types.js';
+import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
+import type { ComplianceTask, DemoUser } from '../shared/types.js';
+import { SYSTEM_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
+  task?: ComplianceTask;
 }
 
 function sendError(req: Request, res: Response, e: unknown): void {
@@ -84,22 +86,42 @@ export function createApp(db: DbShape): express.Express {
         forbidden(res, user, action);
         return;
       }
+      req.task = task;
       next();
     };
 
+  /** Resolve which orgs a read may return; 403 with no records when forbidden. */
+  const readScope = (req: AuthRequest, res: Response): string[] | null => {
+    const user = req.user as DemoUser;
+    const allowed = visibleOrgIds(user, db.orgs.map((o) => o.id));
+    const requested = String(req.query.orgId ?? '');
+    if (requested && !allowed.includes(requested)) {
+      res.status(403).json({ error: `Organization not visible to role '${user.role}'.` });
+      return null;
+    }
+    return requested ? [requested] : allowed;
+  };
+
+  const orgForbidden = (req: AuthRequest, res: Response): void => {
+    const user = req.user as DemoUser;
+    res.status(403).json({ error: `Organization not visible to role '${user.role}'.` });
+  };
+
   app.get('/api/domains', (req: AuthRequest, res) => {
-    const orgId = String(req.query.orgId ?? '');
-    res.json(db.domains.filter((d) => !orgId || d.orgId === orgId));
+    const scope = readScope(req, res);
+    if (!scope) return;
+    res.json(db.domains.filter((d) => scope.includes(d.orgId)));
   });
 
   app.get('/api/tasks', (req: AuthRequest, res) => {
-    const orgId = String(req.query.orgId ?? '');
+    const scope = readScope(req, res);
+    if (!scope) return;
     const status = String(req.query.status ?? '');
     const ownerId = String(req.query.ownerId ?? '');
     res.json(
       db.tasks.filter(
         (t) =>
-          (!orgId || t.orgId === orgId) &&
+          scope.includes(t.orgId) &&
           (!status || t.status === status) &&
           (!ownerId || t.ownerId === ownerId)
       )
@@ -131,6 +153,7 @@ export function createApp(db: DbShape): express.Express {
           action: 'task.created',
           recordType: 'task',
           recordId: created.id,
+          orgId: created.orgId,
           detail: created.title
         });
         return created;
@@ -146,6 +169,10 @@ export function createApp(db: DbShape): express.Express {
     const task = db.tasks.find((t) => t.id === req.params.id);
     if (!task) {
       res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
+    if (!visibleOrgIds(user, db.orgs.map((o) => o.id)).includes(task.orgId)) {
+      orgForbidden(req, res);
       return;
     }
     const patch = req.body as {
@@ -186,6 +213,7 @@ export function createApp(db: DbShape): express.Express {
           action: statusChanged ? `task.${next.status}` : 'task.updated',
           recordType: 'task',
           recordId: task.id,
+          orgId: task.orgId,
           detail: `${next.title} [${oldStatus} -> ${next.status}]`
         });
         return next;
@@ -198,6 +226,11 @@ export function createApp(db: DbShape): express.Express {
 
   app.post('/api/tasks/:id/evidence', need('evidence.add'), (req: AuthRequest, res) => {
     const user = req.user as DemoUser;
+    const target = req.task;
+    if (!target) {
+      res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
     try {
       const ref = mutateDb(db, () => {
         const added = addEvidence(db, req.params.id, {
@@ -209,6 +242,7 @@ export function createApp(db: DbShape): express.Express {
           action: 'evidence.added',
           recordType: 'task',
           recordId: req.params.id,
+          orgId: target.orgId,
           detail: `${added.label} (holder: ${added.holder})`
         });
         return added;
@@ -221,6 +255,11 @@ export function createApp(db: DbShape): express.Express {
 
   app.post('/api/tasks/:id/transfer', need('custody.transfer'), (req: AuthRequest, res) => {
     const user = req.user as DemoUser;
+    const target = req.task;
+    if (!target) {
+      res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
     try {
       const ref = mutateDb(db, () => {
         const before = db.tasks
@@ -235,6 +274,7 @@ export function createApp(db: DbShape): express.Express {
           action: 'custody.transferred',
           recordType: 'task',
           recordId: req.params.id,
+          orgId: target.orgId,
           detail: `${moved.label}: ${before?.holder ?? '?'} -> ${moved.holder}`
         });
         return moved;
@@ -246,13 +286,14 @@ export function createApp(db: DbShape): express.Express {
   });
 
   app.get('/api/templates', (req: AuthRequest, res) => {
-    const orgId = String(req.query.orgId ?? '');
+    const scope = readScope(req, res);
+    if (!scope) return;
     const domainId = String(req.query.domainId ?? '');
     const controlType = String(req.query.controlType ?? '');
     res.json(
       db.templates.filter(
         (t) =>
-          (!orgId || t.orgId === orgId) &&
+          scope.includes(t.orgId) &&
           (!domainId || t.domainId === domainId) &&
           (!controlType || t.controlType === controlType)
       )
@@ -273,6 +314,7 @@ export function createApp(db: DbShape): express.Express {
           action: 'template.created',
           recordType: 'template',
           recordId: created.id,
+          orgId: created.orgId,
           detail: `${created.title} [${created.controlType}]`
         });
         return created;
@@ -297,6 +339,7 @@ export function createApp(db: DbShape): express.Express {
           action: 'template.updated',
           recordType: 'template',
           recordId: next.id,
+          orgId: next.orgId,
           detail: next.title
         });
         return next;
@@ -336,6 +379,7 @@ export function createApp(db: DbShape): express.Express {
           action: 'task.created',
           recordType: 'task',
           recordId: created.id,
+          orgId: template.orgId,
           detail: `From template: ${template.title}`
         });
         return created;
@@ -348,13 +392,17 @@ export function createApp(db: DbShape): express.Express {
 
   // Append-only: read-only audit endpoint by design. No write routes exist.
   app.get('/api/audit', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const allowed = visibleOrgIds(user, db.orgs.map((o) => o.id));
     const recordType = String(req.query.recordType ?? '');
     const recordId = String(req.query.recordId ?? '');
     const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
     const events = db.audit
       .filter(
         (e) =>
-          (!recordType || e.recordType === recordType) && (!recordId || e.recordId === recordId)
+          (allowed.includes(e.orgId) || e.orgId === SYSTEM_AUDIT_ORG) &&
+          (!recordType || e.recordType === recordType) &&
+          (!recordId || e.recordId === recordId)
       )
       .slice(-limit);
     res.json(events);

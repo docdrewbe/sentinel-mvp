@@ -72,11 +72,16 @@ export interface AuditEvent {
   action: string;
   recordType: string;
   recordId: string;
+  /** Owning organization; 'system' for non-tenant operational events. */
+  orgId: string;
   timestamp: string;
   detail: string;
   prevHash: string;
   hash: string;
 }
+
+/** orgId marker for audit events that belong to no tenant (e.g. db.seeded). */
+export const SYSTEM_AUDIT_ORG = 'system';
 
 export const ROLE_LABELS: Record<Role, string> = {
   administrator: 'Administrator',

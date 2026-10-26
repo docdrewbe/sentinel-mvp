@@ -29,6 +29,7 @@ import type {
   TaskStatus,
   TaskTemplate
 } from '../shared/types.js';
+import { SYSTEM_AUDIT_ORG } from '../shared/types.js';
 import { nextDueDate } from '../shared/scheduling.js';
 
 export interface DbShape {
@@ -56,7 +57,9 @@ export function loadDb(): DbShape {
   if (!existsSync(file)) return emptyDb();
   // Tolerant read: databases written before templates existed gain defaults.
   const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<DbShape>;
-  return { ...emptyDb(), ...raw };
+  const db: DbShape = { ...emptyDb(), ...raw };
+  backfillAuditOrgIds(db);
+  return db;
 }
 
 // Rename step behind a seam so tests can deterministically simulate the
@@ -149,6 +152,7 @@ export function mutateDb<T>(db: DbShape, fn: () => T): T {
 type HashableEvent = Omit<AuditEvent, 'hash'>;
 
 function eventHash(e: HashableEvent): string {
+  // NOTE: orgId is deliberately not hashed so pre-D6 chains keep verifying.
   const parts = [
     e.seq,
     e.id,
@@ -163,11 +167,17 @@ function eventHash(e: HashableEvent): string {
   return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
+export interface AuditInput {
+  actorId: string;
+  action: string;
+  recordType: string;
+  recordId: string;
+  orgId: string;
+  detail: string;
+}
+
 /** Build the next chained event for an existing audit trail (pure; no I/O). */
-export function buildAuditEvent(
-  audit: AuditEvent[],
-  input: { actorId: string; action: string; recordType: string; recordId: string; detail: string }
-): AuditEvent {
+export function buildAuditEvent(audit: AuditEvent[], input: AuditInput): AuditEvent {
   const prevHash = audit.length > 0 ? audit[audit.length - 1].hash : 'GENESIS';
   const base: HashableEvent = {
     seq: audit.length + 1,
@@ -199,13 +209,24 @@ export function verifyAuditChain(audit: AuditEvent[]): { ok: boolean; badSeq?: n
 // Appends in memory only; the caller must persist via mutateDb/saveDb so each
 // state change and its audit event are written together, atomically.
 // ---------------------------------------------------------------------------
-export function appendAudit(
-  db: DbShape,
-  input: { actorId: string; action: string; recordType: string; recordId: string; detail: string }
-): AuditEvent {
+export function appendAudit(db: DbShape, input: AuditInput): AuditEvent {
   const event = buildAuditEvent(db.audit, input);
   db.audit.push(event);
   return event;
+}
+
+/** Associate legacy audit events (saved before org tracking) with their org. */
+export function backfillAuditOrgIds(db: DbShape): void {
+  for (const e of db.audit) {
+    if (e.orgId) continue;
+    if (e.recordType === 'task') {
+      e.orgId = db.tasks.find((t) => t.id === e.recordId)?.orgId ?? SYSTEM_AUDIT_ORG;
+    } else if (e.recordType === 'template') {
+      e.orgId = db.templates.find((t) => t.id === e.recordId)?.orgId ?? SYSTEM_AUDIT_ORG;
+    } else {
+      e.orgId = SYSTEM_AUDIT_ORG;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
