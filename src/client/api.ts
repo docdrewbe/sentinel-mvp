@@ -50,5 +50,7 @@ export const api = {
   addCapaEvidence: (id: string, e: { label: string; holder: string; kind?: string }) =>
     req(`/api/capas/${id}/evidence`, { method: 'POST', body: JSON.stringify(e) }),
   reviewCapa: (id: string, review: { outcome: string; rationale: string; evidenceIds: string[] }) =>
-    req<CapaRecord>(`/api/capas/${id}/effectiveness-review`, { method: 'POST', body: JSON.stringify(review) })
+    req<CapaRecord>(`/api/capas/${id}/effectiveness-review`, { method: 'POST', body: JSON.stringify(review) }),
+  transferCapaEvidence: (id: string, t: { evidenceId: string; toHolder: string; reason?: string }) =>
+    req(`/api/capas/${id}/transfer`, { method: 'POST', body: JSON.stringify(t) })
 };

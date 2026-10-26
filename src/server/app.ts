@@ -9,6 +9,7 @@ import {
   addEvidence,
   appendAudit,
   capaAddEvidence,
+  capaTransferCustody,
   createCapa,
   createTask,
   createTemplate,
@@ -634,6 +635,52 @@ export function createApp(db: DbShape): express.Express {
         return added;
       });
       res.status(201).json(ref);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // C4: authorized CAPA evidence custody transfers, mirroring the task
+  // route (same validation, atomicity, and audit shape).
+  app.post('/api/capas/:id/transfer', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const capa = db.capas.find((c) => c.id === req.params.id);
+    if (!capa) {
+      res.status(404).json({ error: 'CAPA not found.' });
+      return;
+    }
+    if (!visibleOrgIds(user, db.orgs.map((o) => o.id)).includes(capa.orgId)) {
+      orgForbidden(req, res);
+      return;
+    }
+    if (!can(user, 'capa.evidence.add', capa)) {
+      forbidden(res, user, 'capa.evidence.add');
+      return;
+    }
+    try {
+      const ref = mutateDb(db, () => {
+        const reason = String(req.body.reason ?? '').trim() || undefined;
+        const { ref: moved, fromHolder } = capaTransferCustody(
+          db,
+          req.params.id,
+          {
+            evidenceId: String(req.body.evidenceId ?? ''),
+            toHolder: String(req.body.toHolder ?? ''),
+            ...(reason ? { reason } : {})
+          },
+          user.id
+        );
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'custody.transferred',
+          recordType: 'capa',
+          recordId: req.params.id,
+          orgId: capa.orgId,
+          detail: `${moved.label}: ${fromHolder} -> ${moved.holder}${reason ? ` — ${reason}` : ''}`
+        });
+        return moved;
+      });
+      res.json(ref);
     } catch (e) {
       sendError(req, res, e);
     }

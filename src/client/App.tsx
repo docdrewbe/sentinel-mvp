@@ -446,6 +446,9 @@ export default function App(): JSX.Element {
                 onReview={(outcome, rationale, evidenceIds) =>
                   run(async () => api.reviewCapa(capa.id, { outcome, rationale, evidenceIds }))
                 }
+                onTransfer={(evidenceId, toHolder, reason) =>
+                  run(async () => api.transferCapaEvidence(capa.id, { evidenceId, toHolder, ...(reason ? { reason } : {}) }))
+                }
               />
             )}
           </div>
@@ -659,7 +662,7 @@ function CapaFieldEditor({ label, value, canEdit, onSave }: { label: string; val
   );
 }
 
-function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, privilegedIds, onAdvance, onAddEvidence, onSaveField, onReview }: {
+function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, privilegedIds, onAdvance, onAddEvidence, onSaveField, onReview, onTransfer }: {
   me: DemoUser;
   capa: CapaRecord;
   ready: boolean;
@@ -672,6 +675,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   onAddEvidence: (label: string, holder: string, kind?: string) => void;
   onSaveField: (field: 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan' | 'effectivenessCriteria', text: string) => void;
   onReview: (outcome: string, rationale: string, evidenceIds: string[]) => void;
+  onTransfer: (evidenceId: string, toHolder: string, reason?: string) => void;
 }): JSX.Element {
   const [outcome, setOutcome] = useState('');
   const [rationale, setRationale] = useState('');
@@ -838,6 +842,9 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
             { value: 'effectiveness', label: 'Effectiveness' }
           ]}
         />
+      )}
+      {ready && can(me, 'capa.evidence.add', capa) && capa.status !== 'closed' && capa.evidence.length > 0 && (
+        <TransferForm evidence={capa.evidence} onTransfer={onTransfer} />
       )}
       <h5>Record history (append-only)</h5>
       {trail.length === 0 && <p className="empty">No audit events for this record yet.</p>}

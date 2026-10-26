@@ -695,6 +695,37 @@ export function capaAddEvidence(
   return ref;
 }
 
+export function capaTransferCustody(
+  db: DbShape,
+  capaId: string,
+  input: { evidenceId: string; toHolder: string; reason?: string },
+  byUserId: string
+): { ref: EvidenceRef; fromHolder: string } {
+  const capa = db.capas.find((c) => c.id === capaId);
+  if (!capa) throw new ValidationError('CAPA not found.');
+  assertCapaNotLocked(capa);
+  const ref = capa.evidence.find((e) => e.id === input.evidenceId);
+  if (!ref) throw new ValidationError('Evidence not found.');
+  const toHolder = input.toHolder.trim();
+  if (!toHolder) throw new ValidationError('New holder is required.');
+  if (toHolder === ref.holder) {
+    throw new ValidationError('Evidence is already held by this holder.');
+  }
+  const fromHolder = ref.holder;
+  ref.custody.push({
+    seq: ref.custody.length + 1,
+    fromHolder,
+    toHolder,
+    byUserId,
+    at: monotonicNow(),
+    ...(input.reason?.trim() ? { reason: input.reason.trim() } : {})
+  });
+  ref.holder = toHolder;
+  ref.updatedAt = new Date().toISOString();
+  capa.updatedAt = ref.updatedAt;
+  return { ref, fromHolder };
+}
+
 // ---------------------------------------------------------------------------
 // Task templates
 // ---------------------------------------------------------------------------
