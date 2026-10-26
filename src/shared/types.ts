@@ -111,6 +111,13 @@ export interface SubmissionRecord {
 export const SEPARATION_OF_DUTIES_MESSAGE =
   'Separation of duties: verifier must differ from owner/submitter.';
 
+/**
+ * D5b: returned when every privileged user is in the task's ineligible set,
+ * so no independent verifier remains. There is deliberately no override.
+ */
+export const NO_ELIGIBLE_VERIFIER_MESSAGE =
+  'No eligible independent verifier: all privileged users submitted or owned this task.';
+
 export interface AuditEvent {
   seq: number;
   id: string;

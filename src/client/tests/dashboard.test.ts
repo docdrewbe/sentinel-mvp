@@ -326,4 +326,33 @@ describe('D5 separation-of-duties hint (unit)', () => {
     };
     assert.equal(verifyBlockReason({ id: 'u-officer' }, task), null);
   });
+
+  it('D5b: reports the deadlock when no privileged user remains eligible', () => {
+    const task = {
+      ownerId: 'u-staff',
+      submittedBy: 'u-staff',
+      submissions: [
+        { seq: 1, submittedBy: 'u-admin', ownerAtSubmission: 'u-staff', at: '2026-10-26T00:00:00.000Z' },
+        { seq: 2, submittedBy: 'u-officer', ownerAtSubmission: 'u-staff', at: '2026-10-26T00:00:00.000Z' }
+      ],
+      status: 'submitted' as const
+    };
+    const deadlocked = 'No eligible independent verifier: all privileged users submitted or owned this task.';
+    assert.equal(verifyBlockReason({ id: 'u-admin' }, task, ['u-admin', 'u-officer']), deadlocked);
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, task, ['u-admin', 'u-officer']), deadlocked);
+  });
+
+  it('D5b: falls back to the SoD message when someone else could verify', () => {
+    const task = {
+      ownerId: 'u-staff',
+      submittedBy: 'u-officer',
+      submissions: [
+        { seq: 1, submittedBy: 'u-officer', ownerAtSubmission: 'u-staff', at: '2026-10-26T00:00:00.000Z' }
+      ],
+      status: 'submitted' as const
+    };
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, task, ['u-admin', 'u-officer']), MSG);
+    assert.equal(verifyBlockReason({ id: 'u-officer' }, task), MSG);
+    assert.equal(verifyBlockReason({ id: 'u-admin' }, task, ['u-admin', 'u-officer']), null);
+  });
 });

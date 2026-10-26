@@ -44,6 +44,13 @@ export default function App(): JSX.Element {
   const task = tasks.find((t) => t.id === taskId) ?? null;
 
   const userName = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
+  const privilegedIds = useMemo(
+    () =>
+      users
+        .filter((u) => u.role === 'administrator' || u.role === 'compliance_officer')
+        .map((u) => u.id),
+    [users]
+  );
   const domainById = useMemo(() => new Map(domains.map((d) => [d.id, d])), [domains]);
   const templateById = useMemo(() => new Map(templates.map((x) => [x.id, x])), [templates]);
   const orgIds = useMemo(() => orgs.map((o) => o.id), [orgs]);
@@ -299,7 +306,7 @@ export default function App(): JSX.Element {
                       me={me}
                       task={task}
                       submitBlockReason={submitBlockReason(task)}
-                      verifyBlockReason={verifyBlockReason(me, task)}
+                      verifyBlockReason={verifyBlockReason(me, task, privilegedIds)}
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
                     <h5>Evidence & chain of custody ({task.evidence.length})</h5>

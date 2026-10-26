@@ -1945,3 +1945,197 @@ describe('D5a reassignment bypass (HTTP)', () => {
     }
   });
 });
+
+describe('D5b resubmission laundering (HTTP)', () => {
+  const SOD = 'Separation of duties: verifier must differ from owner/submitter.';
+  const DEADLOCK = 'No eligible independent verifier: all privileged users submitted or owned this task.';
+
+  interface SubmissionJson {
+    seq: number;
+    submittedBy: string;
+    ownerAtSubmission: string;
+    at: string;
+  }
+
+  interface TaskJson {
+    id: string;
+    status: string;
+    ownerId: string;
+    evidence: Array<Record<string, unknown>>;
+    submittedBy?: string;
+    submissions?: SubmissionJson[];
+    ownersWhileSubmitted?: string[];
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function status(base: string, actorId: string, id: string, next: string): Promise<number> {
+    return (await call(base, 'PATCH', `/api/tasks/${id}`, actorId, { status: next })).status;
+  }
+
+  async function makeOwned(base: string, ownerId: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      title: 'D5b probe',
+      ownerId,
+      dueDate: '2026-12-01'
+    });
+    assert.equal(created.status, 201);
+    const id = String(created.json.id);
+    assert.equal(
+      (
+        await call(base, 'POST', `/api/tasks/${id}/evidence`, ownerId, {
+          label: 'attachment (simulated)',
+          holder: 'Case File'
+        })
+      ).status,
+      201
+    );
+    return id;
+  }
+
+  it('keeps an earlier submitter ineligible after send-back and resubmit', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOwned(base, 'u-staff');
+      assert.equal(await status(base, 'u-officer', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      const resubmitted = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(resubmitted.submittedBy, 'u-staff');
+      assert.deepEqual(
+        (resubmitted.submissions ?? []).map((s) => [s.seq, s.submittedBy]),
+        [
+          [1, 'u-officer'],
+          [2, 'u-staff']
+        ]
+      );
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assert.deepEqual(await getTask(base, 'u-officer', 'org-cah', id), resubmitted);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('reports no eligible verifier once every privileged user submitted', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOwned(base, 'u-staff');
+      assert.equal(await status(base, 'u-admin', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-admin', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      assert.equal((await getTask(base, 'u-admin', 'org-cah', id)).submissions?.length, 4);
+      for (const verifier of ['u-admin', 'u-officer']) {
+        const denied = await call(base, 'PATCH', `/api/tasks/${id}`, verifier, {
+          status: 'verified'
+        });
+        assert.equal(denied.status, 403);
+        assert.equal(denied.json.error, DEADLOCK);
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('allows send-back, fix, resubmit, then an uninvolved verify', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOwned(base, 'u-staff');
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'verified'), 200);
+      assert.equal((await getTask(base, 'u-officer', 'org-cah', id)).status, 'verified');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('ignores client-supplied submission history', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOwned(base, 'u-staff');
+      assert.equal(await status(base, 'u-officer', id, 'submitted'), 200);
+      const before = await getTask(base, 'u-officer', 'org-cah', id);
+      const forged = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        submissions: [],
+        ownersWhileSubmitted: [],
+        submittedBy: 'u-admin'
+      });
+      assert.equal(forged.status, 200);
+      const after = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.deepEqual(after.submissions, before.submissions);
+      assert.equal(after.submittedBy, 'u-officer');
+      assert.equal(after.ownersWhileSubmitted, undefined);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back a resubmit without leaving a ghost history entry', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeOwned(base, 'u-staff');
+      assert.equal(await status(base, 'u-officer', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer', id, 'in_progress'), 200);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        assert.equal(await status(base, 'u-staff', id, 'submitted'), 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      const rolled = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(rolled.status, 'in_progress');
+      assert.equal(rolled.submittedBy, 'u-officer');
+      assert.deepEqual(
+        (rolled.submissions ?? []).map((s) => s.seq),
+        [1]
+      );
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      assert.deepEqual(
+        ((await getTask(base, 'u-officer', 'org-cah', id)).submissions ?? []).map((s) => s.seq),
+        [1, 2]
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

@@ -20,9 +20,9 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
-import { ineligibleVerifiers } from '../shared/verification.js';
+import { ineligibleVerifiers, noEligibleVerifier } from '../shared/verification.js';
 import type { ComplianceTask, DemoUser } from '../shared/types.js';
-import { SEPARATION_OF_DUTIES_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
@@ -213,7 +213,16 @@ export function createApp(db: DbShape): express.Express {
           task.status === 'submitted' &&
           ineligibleVerifiers(task).includes(user.id)
         ) {
-          res.status(403).json({ error: SEPARATION_OF_DUTIES_MESSAGE });
+          // D5b: say so explicitly when the history excludes every
+          // privileged user, so the deadlock is diagnosable. No override.
+          const privileged = db.users
+            .filter((u) => u.role === 'administrator' || u.role === 'compliance_officer')
+            .map((u) => u.id);
+          res.status(403).json({
+            error: noEligibleVerifier(task, privileged)
+              ? NO_ELIGIBLE_VERIFIER_MESSAGE
+              : SEPARATION_OF_DUTIES_MESSAGE
+          });
           return;
         }
       }

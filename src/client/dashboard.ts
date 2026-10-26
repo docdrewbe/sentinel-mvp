@@ -1,8 +1,8 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
 import { visibleOrgIds } from '../shared/rbac.js';
-import { SEPARATION_OF_DUTIES_MESSAGE } from '../shared/types.js';
-import { ineligibleVerifiers } from '../shared/verification.js';
+import { NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE } from '../shared/types.js';
+import { ineligibleVerifiers, noEligibleVerifier } from '../shared/verification.js';
 import type {
   AuditEvent,
   ComplianceTask,
@@ -127,18 +127,22 @@ export function submitBlockReason(
 }
 
 /**
- * D5/D5a: separation-of-duties reason when `me` must not verify `task`.
+ * D5/D5a/D5b: separation-of-duties reason when `me` must not verify `task`.
  * Eligibility comes from the full submission/ownership history. Only
- * submitted tasks are verifiable, so anything else returns null. Mirrors
- * the server message; the server still decides.
+ * submitted tasks are verifiable, so anything else returns null. When the
+ * privileged roster is supplied and nobody on it is eligible, reports the
+ * deadlock instead. Mirrors the server message; the server still decides.
  */
 export function verifyBlockReason(
   me: Pick<DemoUser, 'id'>,
-  task: Pick<ComplianceTask, 'ownerId' | 'submittedBy' | 'submissions' | 'ownersWhileSubmitted' | 'status'>
+  task: Pick<ComplianceTask, 'ownerId' | 'submittedBy' | 'submissions' | 'ownersWhileSubmitted' | 'status'>,
+  privilegedUserIds: string[] = []
 ): string | null {
   if (task.status !== 'submitted') return null;
   if (ineligibleVerifiers(task).includes(me.id)) {
-    return SEPARATION_OF_DUTIES_MESSAGE;
+    return noEligibleVerifier(task, privilegedUserIds)
+      ? NO_ELIGIBLE_VERIFIER_MESSAGE
+      : SEPARATION_OF_DUTIES_MESSAGE;
   }
   return null;
 }
