@@ -115,6 +115,77 @@ export function requiredEvidenceFor(task: Pick<ComplianceTask, 'requiredEvidence
  * requirement is met or unknown (server decides); never carries a
  * "Requires: " prefix — callers must not add one.
  */
+/**
+ * Action-button state reasons. Each returns null when the task status allows
+ * the action; role, evidence and separation-of-duties checks layer on top.
+ * The server remains authoritative — these only keep the dashboard honest.
+ */
+
+/** Start moves a task to in_progress: legal from open, or as a send-back from submitted. */
+export function startBlockReason(task: Pick<ComplianceTask, 'status'>): string | null {
+  switch (task.status) {
+    case 'open':
+    case 'submitted':
+      return null;
+    case 'in_progress':
+      return 'Already in progress.';
+    case 'verified':
+      return 'Verified records are locked.';
+  }
+}
+
+/** Status half of the Submit gate; the evidence half stays in submitBlockReason. */
+export function submitStatusReason(task: Pick<ComplianceTask, 'status'>): string | null {
+  switch (task.status) {
+    case 'open':
+    case 'in_progress':
+      return null;
+    case 'submitted':
+      return 'Already submitted.';
+    case 'verified':
+      return 'Verified records are locked.';
+  }
+}
+
+/** Status half of the Verify gate; SoD and evidence reasons layer on top. */
+export function verifyStatusReason(task: Pick<ComplianceTask, 'status'>): string | null {
+  switch (task.status) {
+    case 'submitted':
+      return null;
+    case 'verified':
+      return 'Already verified.';
+    case 'open':
+    case 'in_progress':
+      return 'Only submitted tasks can be verified.';
+  }
+}
+
+/** Reopen moves a task to open: legal from in_progress and submitted. */
+export function reopenBlockReason(task: Pick<ComplianceTask, 'status'>): string | null {
+  switch (task.status) {
+    case 'in_progress':
+    case 'submitted':
+      return null;
+    case 'open':
+      return 'Already open.';
+    case 'verified':
+      return 'Verified records are locked.';
+  }
+}
+
+/** Evidence shortfall for verification, mirroring the D4b server gate. Only submitted tasks are verifiable; unknown requirements defer to the server. */
+export function verifyEvidenceReason(
+  task: Pick<ComplianceTask, 'requiredEvidence' | 'status'> & { evidence: readonly unknown[] }
+): string | null {
+  if (task.status !== 'submitted') return null;
+  const required = requiredEvidenceFor(task);
+  if (required === null) return null;
+  const short = required - task.evidence.length;
+  if (short <= 0) return null;
+  const item = short === 1 ? 'item' : 'items';
+  return `Needs ${short} more evidence ${item} before verification (${required} required, ${task.evidence.length} attached)`;
+}
+
 export function submitBlockReason(
   task: Pick<ComplianceTask, 'requiredEvidence'> & { evidence: readonly unknown[] }
 ): string | null {

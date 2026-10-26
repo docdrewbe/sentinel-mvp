@@ -4,6 +4,7 @@ import { seedDatabase } from '../seed.js';
 import { verifyAuditChain } from '../store.js';
 import { requiredEvidenceCount } from '../../shared/evidence.js';
 import { ineligibleVerifiers } from '../../shared/verification.js';
+import { can } from '../../shared/rbac.js';
 
 describe('synthetic demo data', () => {
   it('seeds a 25-bed critical access hospital plus clinic and cannabis orgs', () => {
@@ -110,6 +111,19 @@ describe('synthetic demo data', () => {
       );
     }
     assert.ok(count > 0, 'expected seeded submitted tasks');
+  });
+
+  it('seeds two distinct hospital compliance officers with verify authority', () => {
+    const db = seedDatabase();
+    const officers = db.users.filter(
+      (u) => u.orgId === 'org-cah' && u.role === 'compliance_officer'
+    );
+    assert.equal(officers.length, 2);
+    assert.equal(new Set(officers.map((u) => u.id)).size, 2);
+    assert.equal(new Set(officers.map((u) => u.name)).size, 2);
+    for (const officer of officers) {
+      assert.equal(can(officer, 'task.verify'), true);
+    }
   });
 
   it('D5d: every seeded verified task shows an independent, authorized verifier', () => {

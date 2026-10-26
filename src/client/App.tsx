@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
-import { can, visibleOrgIds } from '../shared/rbac.js';
+import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { applySettled, beginContext, canAct, initialPanels, panelData, requiredEvidenceFor, resolveOrgId, submitBlockReason, verifyBlockReason, type Panels } from './dashboard.js';
+import { applySettled, beginContext, canAct, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, startBlockReason, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -311,8 +311,10 @@ export default function App(): JSX.Element {
                     <StatusButtons
                       me={me}
                       task={task}
-                      submitBlockReason={submitBlockReason(task)}
-                      verifyBlockReason={verifyBlockReason(me, task, privilegedIds)}
+                      startBlockReason={startBlockReason(task)}
+                      submitBlockReason={submitStatusReason(task) ?? submitBlockReason(task)}
+                      verifyBlockReason={verifyStatusReason(task) ?? verifyBlockReason(me, task, privilegedIds) ?? verifyEvidenceReason(task)}
+                      reopenBlockReason={reopenBlockReason(task)}
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
                     <h5>Evidence & chain of custody ({task.evidence.length})</h5>
@@ -557,21 +559,25 @@ function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | 
   );
 }
 
-function StatusButtons({ me, task, submitBlockReason, verifyBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; submitBlockReason: string | null; verifyBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
-  // D4d: an explicit title wins over the generic "Requires: ..." prefix, so
-  // the evidence block reason is never doubled up.
-  const btn = (label: string, status: TaskStatus, allowed: boolean, need: string, title?: string): JSX.Element => (
-    <button key={status} disabled={!allowed} title={allowed ? '' : (title ?? `Requires: ${need}`)} onClick={() => onChange(status)}>
-      {label}
-    </button>
-  );
+function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBlockReason, reopenBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; startBlockReason: string | null; submitBlockReason: string | null; verifyBlockReason: string | null; reopenBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
+  // A button is enabled only when the role allows it AND no state reason
+  // blocks it. The tooltip names the role gap first, else the state reason.
+  const btn = (label: string, status: TaskStatus, action: Action, reason: string | null, need: string): JSX.Element => {
+    const roleOk = can(me, action, task);
+    const allowed = roleOk && reason === null;
+    return (
+      <button key={status} disabled={!allowed} title={allowed ? '' : (roleOk ? (reason ?? '') : `Requires: ${need}`)} onClick={() => onChange(status)}>
+        {label}
+      </button>
+    );
+  };
   return (
     <div className="status-btns">
-      {btn('Start', 'in_progress', can(me, 'task.update', task), 'owner / manager / officer / admin')}
-      {btn('Submit', 'submitted', can(me, 'task.submit', task) && submitBlockReason === null, 'owner / manager / officer / admin', submitBlockReason ?? undefined)}
-      {btn('Verify', 'verified', can(me, 'task.verify', task) && verifyBlockReason === null, 'compliance officer / admin', verifyBlockReason ?? undefined)}
-      {verifyBlockReason && can(me, 'task.verify', task) && <p className="sod-note">{verifyBlockReason}</p>}
-      {btn('Reopen', 'open', can(me, 'task.update', task), 'owner / manager / officer / admin')}
+      {btn('Start', 'in_progress', 'task.update', startBlockReason, 'owner / manager / officer / admin')}
+      {btn('Submit', 'submitted', 'task.submit', submitBlockReason, 'owner / manager / officer / admin')}
+      {btn('Verify', 'verified', 'task.verify', verifyBlockReason, 'compliance officer / admin')}
+      {task.status === 'submitted' && verifyBlockReason && can(me, 'task.verify', task) && <p className="sod-note">{verifyBlockReason}</p>}
+      {btn('Reopen', 'open', 'task.update', reopenBlockReason, 'owner / manager / officer / admin')}
     </div>
   );
 }

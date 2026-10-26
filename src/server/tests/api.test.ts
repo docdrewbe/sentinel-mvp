@@ -2115,8 +2115,18 @@ describe('D5b resubmission laundering (HTTP)', () => {
       assert.equal(await status(base, 'u-officer', id, 'submitted'), 200);
       assert.equal(await status(base, 'u-officer', id, 'in_progress'), 200);
       assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
-      assert.equal((await getTask(base, 'u-admin', 'org-cah', id)).submissions?.length, 4);
-      for (const verifier of ['u-admin', 'u-officer']) {
+      // A second officer remains eligible, so this is an ordinary SoD block.
+      const partial = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-admin', {
+        status: 'verified'
+      });
+      assert.equal(partial.status, 403);
+      assert.equal(partial.json.error, SOD);
+      assert.equal(await status(base, 'u-officer2', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-officer2', id, 'submitted'), 200);
+      assert.equal(await status(base, 'u-officer2', id, 'in_progress'), 200);
+      assert.equal(await status(base, 'u-staff', id, 'submitted'), 200);
+      assert.equal((await getTask(base, 'u-admin', 'org-cah', id)).submissions?.length, 6);
+      for (const verifier of ['u-admin', 'u-officer', 'u-officer2']) {
         const denied = await call(base, 'PATCH', `/api/tasks/${id}`, verifier, {
           status: 'verified'
         });
@@ -2457,6 +2467,65 @@ describe('D5d verifier recording (HTTP)', () => {
       assert.equal(task.verifiedAt, undefined);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('second compliance officer (HTTP)', () => {
+  const SOD = 'Separation of duties: verifier must differ from owner/submitter.';
+
+  async function makeSubmitted(base: string, submitterId: string, ownerId: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/tasks', submitterId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      title: 'Second-officer probe',
+      ownerId,
+      dueDate: '2026-12-01'
+    });
+    assert.equal(created.status, 201);
+    const id = String(created.json.id);
+    assert.equal(
+      (
+        await call(base, 'POST', `/api/tasks/${id}/evidence`, submitterId, {
+          label: 'attachment (simulated)',
+          holder: 'Case File'
+        })
+      ).status,
+      201
+    );
+    assert.equal(
+      (await call(base, 'PATCH', `/api/tasks/${id}`, submitterId, { status: 'submitted' })).status,
+      200
+    );
+    return id;
+  }
+
+  it('both officers verify independently but never their own work', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const a = await makeSubmitted(base, 'u-officer', 'u-staff');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${a}`, 'u-officer2', { status: 'verified' })).status,
+        200
+      );
+      const b = await makeSubmitted(base, 'u-officer2', 'u-staff');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${b}`, 'u-officer', { status: 'verified' })).status,
+        200
+      );
+      const c = await makeSubmitted(base, 'u-officer2', 'u-officer2');
+      const denied = await call(base, 'PATCH', `/api/tasks/${c}`, 'u-officer2', {
+        status: 'verified'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${c}`, 'u-officer', { status: 'verified' })).status,
+        200
+      );
       assertDiskMatchesMemory(db);
     } finally {
       await close();

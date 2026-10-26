@@ -217,6 +217,7 @@ export function seedDatabase(): DbShape {
   db.users = [
     { id: 'u-admin', orgId: 'org-cah', name: 'A. Rahman', role: 'administrator', department: 'Administration' },
     { id: 'u-officer', orgId: 'org-cah', name: 'J. Ortiz', role: 'compliance_officer', department: 'Compliance' },
+    { id: 'u-officer2', orgId: 'org-cah', name: 'D. Kim', role: 'compliance_officer', department: 'Compliance' },
     { id: 'u-nurse-mgr', orgId: 'org-cah', name: 'M. Lee', role: 'department_manager', department: 'Nursing' },
     { id: 'u-staff', orgId: 'org-cah', name: 'T. Nguyen', role: 'staff', department: 'Nursing' },
     { id: 'u-clinic-mgr', orgId: 'org-clinic', name: 'S. Patel', role: 'department_manager', department: 'Clinic Operations' },

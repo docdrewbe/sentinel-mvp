@@ -7,11 +7,16 @@ import {
   initialPanels,
   panelData,
   pickerOrgIds,
+  reopenBlockReason,
   requiredEvidenceFor,
   resolveOrgId,
   settlePanels,
+  startBlockReason,
   submitBlockReason,
-  verifyBlockReason
+  submitStatusReason,
+  verifyBlockReason,
+  verifyEvidenceReason,
+  verifyStatusReason
 } from '../dashboard.js';
 import type { ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
@@ -379,5 +384,59 @@ describe('D5 separation-of-duties hint (unit)', () => {
     assert.equal(verifyBlockReason({ id: 'u-officer' }, task, ['u-admin', 'u-officer']), MSG);
     assert.equal(verifyBlockReason({ id: 'u-officer' }, task), MSG);
     assert.equal(verifyBlockReason({ id: 'u-admin' }, task, ['u-admin', 'u-officer']), null);
+  });
+});
+
+describe('action-button states (unit)', () => {
+  it('Start is allowed from open and as a send-back from submitted', () => {
+    assert.equal(startBlockReason({ status: 'open' }), null);
+    assert.equal(startBlockReason({ status: 'submitted' }), null);
+    assert.equal(startBlockReason({ status: 'in_progress' }), 'Already in progress.');
+    assert.equal(startBlockReason({ status: 'verified' }), 'Verified records are locked.');
+  });
+
+  it('Submit status gate matches the legal transitions', () => {
+    assert.equal(submitStatusReason({ status: 'open' }), null);
+    assert.equal(submitStatusReason({ status: 'in_progress' }), null);
+    assert.equal(submitStatusReason({ status: 'submitted' }), 'Already submitted.');
+    assert.equal(submitStatusReason({ status: 'verified' }), 'Verified records are locked.');
+  });
+
+  it('Verify status gate allows submitted tasks only', () => {
+    assert.equal(verifyStatusReason({ status: 'submitted' }), null);
+    assert.equal(verifyStatusReason({ status: 'open' }), 'Only submitted tasks can be verified.');
+    assert.equal(verifyStatusReason({ status: 'in_progress' }), 'Only submitted tasks can be verified.');
+    assert.equal(verifyStatusReason({ status: 'verified' }), 'Already verified.');
+  });
+
+  it('Reopen is allowed from in-progress and submitted only', () => {
+    assert.equal(reopenBlockReason({ status: 'in_progress' }), null);
+    assert.equal(reopenBlockReason({ status: 'submitted' }), null);
+    assert.equal(reopenBlockReason({ status: 'open' }), 'Already open.');
+    assert.equal(reopenBlockReason({ status: 'verified' }), 'Verified records are locked.');
+  });
+
+  it('Verify evidence reason mirrors the server gate with singular/plural', () => {
+    assert.equal(
+      verifyEvidenceReason({ status: 'submitted', evidence: [], requiredEvidence: 1 }),
+      'Needs 1 more evidence item before verification (1 required, 0 attached)'
+    );
+    assert.equal(
+      verifyEvidenceReason({ status: 'submitted', evidence: [{}], requiredEvidence: 2 }),
+      'Needs 1 more evidence item before verification (2 required, 1 attached)'
+    );
+    assert.equal(
+      verifyEvidenceReason({ status: 'submitted', evidence: [], requiredEvidence: 2 }),
+      'Needs 2 more evidence items before verification (2 required, 0 attached)'
+    );
+  });
+
+  it('Verify evidence reason clears when satisfied, unknown, or not submitted', () => {
+    assert.equal(
+      verifyEvidenceReason({ status: 'submitted', evidence: [{}, {}], requiredEvidence: 2 }),
+      null
+    );
+    assert.equal(verifyEvidenceReason({ status: 'submitted', evidence: [] }), null);
+    assert.equal(verifyEvidenceReason({ status: 'open', evidence: [], requiredEvidence: 1 }), null);
   });
 });
