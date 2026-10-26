@@ -126,3 +126,33 @@ export function qualifyingEffectivenessEvidence(
     (item) => item.kind === 'effectiveness' && (item.custody[0]?.at ?? '') > entry
   );
 }
+
+export type CapaInvolvement = Pick<
+  CapaRecord,
+  'ownerId' | 'createdBy' | 'ownerHistory' | 'actionsBy'
+>;
+
+/**
+ * C3: everyone who must never review this CAPA — the creator, every past
+ * and present owner, and everyone who did the work — so reassignment can
+ * never launder eligibility.
+ */
+export function capaReviewIneligible(capa: CapaInvolvement): string[] {
+  const out = new Set<string>();
+  out.add(capa.ownerId);
+  if (capa.createdBy) out.add(capa.createdBy);
+  for (const entry of capa.ownerHistory ?? []) out.add(entry.ownerId);
+  for (const userId of capa.actionsBy ?? []) out.add(userId);
+  return [...out];
+}
+
+/**
+ * C3: true when every candidate reviewer (all administrator/compliance
+ * officer ids passed in) is ineligible. An empty roster means the caller
+ * doesn't know it, so it never reports a deadlock.
+ */
+export function capaNoEligibleReviewer(capa: CapaInvolvement, privilegedUserIds: string[]): boolean {
+  if (privilegedUserIds.length === 0) return false;
+  const blocked = new Set(capaReviewIneligible(capa));
+  return privilegedUserIds.every((id) => blocked.has(id));
+}

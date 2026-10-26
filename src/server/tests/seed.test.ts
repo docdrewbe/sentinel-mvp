@@ -4,6 +4,7 @@ import { seedDatabase } from '../seed.js';
 import { verifyAuditChain } from '../store.js';
 import { requiredEvidenceCount } from '../../shared/evidence.js';
 import { ineligibleVerifiers } from '../../shared/verification.js';
+import { capaReviewIneligible } from '../../shared/capa.js';
 import { can } from '../../shared/rbac.js';
 
 describe('synthetic demo data', () => {
@@ -149,6 +150,23 @@ describe('synthetic demo data', () => {
       ['open', 'investigation']
     );
     assert.equal(capa.effectivenessReviews, undefined);
+  });
+
+  it('seeds CAPA involvement history with an eligible reviewer left', () => {
+    const db = seedDatabase();
+    const capa = db.capas[0];
+    assert.equal(capa.createdBy, 'u-officer');
+    assert.deepEqual(
+      (capa.ownerHistory ?? []).map((e) => [e.ownerId, e.from]),
+      [['u-nurse-mgr', 'initial']]
+    );
+    assert.deepEqual(capa.actionsBy, ['u-nurse-mgr']);
+    const ineligible = new Set(capaReviewIneligible(capa));
+    const eligible = db.users.filter(
+      (u) =>
+        (u.role === 'administrator' || u.role === 'compliance_officer') && !ineligible.has(u.id)
+    );
+    assert.ok(eligible.length > 0, 'expected at least one eligible seed reviewer');
   });
 
   it('D5d: every seeded verified task shows an independent, authorized verifier', () => {

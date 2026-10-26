@@ -24,10 +24,15 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
-import { capaGateMissing, qualifyingEffectivenessEvidence } from '../shared/capa.js';
+import {
+  capaGateMissing,
+  capaNoEligibleReviewer,
+  capaReviewIneligible,
+  qualifyingEffectivenessEvidence
+} from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser } from '../shared/types.js';
-import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
   user?: DemoUser;
@@ -120,6 +125,16 @@ export function createApp(db: DbShape): express.Express {
     ...task,
     requiredEvidence: requiredEvidenceCount(task, db.templates)
   });
+
+  // C3: SoD message, or the deadlock variant when nobody privileged remains.
+  const capaReviewerMessage = (capa: CapaRecord): string => {
+    const privileged = db.users
+      .filter((u) => u.role === 'administrator' || u.role === 'compliance_officer')
+      .map((u) => u.id);
+    return capaNoEligibleReviewer(capa, privileged)
+      ? CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE
+      : CAPA_CLOSE_SOD_MESSAGE;
+  };
 
   app.get('/api/domains', (req: AuthRequest, res) => {
     const scope = readScope(req, res);
@@ -422,6 +437,11 @@ export function createApp(db: DbShape): express.Express {
           preventivePlan: input.preventivePlan,
           effectivenessCriteria: input.effectivenessCriteria
         });
+        // C3: the creator and initial owner join the involvement record.
+        created.createdBy = user.id;
+        created.ownerHistory = [
+          { ownerId: created.ownerId, from: 'initial', byUserId: user.id, at: monotonicNow() }
+        ];
         created.statusHistory = [{ status: 'open', at: monotonicNow(), byUserId: user.id }];
         appendAudit(db, {
           actorId: user.id,
@@ -471,10 +491,11 @@ export function createApp(db: DbShape): express.Express {
           return;
         }
         if (action === 'capa.close') {
-          // C2: closure happens only through an effectiveness review, but an
-          // ineligible reviewer is still told so (and C3 keeps this order).
-          if (user.id === capa.ownerId) {
-            res.status(403).json({ error: CAPA_CLOSE_SOD_MESSAGE });
+          // C2/C3: closure happens only through an effectiveness review, but
+          // an ineligible reviewer is still told so (checked before any
+          // mutation, so combined owner+close requests change nothing).
+          if (capaReviewIneligible(capa).includes(user.id)) {
+            res.status(403).json({ error: capaReviewerMessage(capa) });
             return;
           }
           res.status(400).json({ error: 'Close via an effectiveness review.' });
@@ -500,6 +521,7 @@ export function createApp(db: DbShape): express.Express {
         return;
       }
       const oldStatus = capa.status;
+      const ownerBefore = capa.ownerId;
       const statusChanged = patch.status !== undefined && patch.status !== oldStatus;
       const updated = mutateDb(db, () => {
         const next = updateCapa(db, capa.id, {
@@ -522,6 +544,25 @@ export function createApp(db: DbShape): express.Express {
             ...(next.statusHistory ?? []),
             { status: next.status, at: monotonicNow(), byUserId: user.id }
           ];
+        }
+        // C3: reassignment appends (never rewrites) ownership; advancing a
+        // phase or editing work content marks the actor as involved.
+        if (patch.ownerId !== undefined && next.ownerId !== ownerBefore) {
+          next.ownerHistory = [
+            ...(next.ownerHistory ?? []),
+            { ownerId: next.ownerId, from: 'reassignment', byUserId: user.id, at: monotonicNow() }
+          ];
+        }
+        if (
+          statusChanged ||
+          patch.containment !== undefined ||
+          patch.rootCause !== undefined ||
+          patch.correctivePlan !== undefined ||
+          patch.preventivePlan !== undefined
+        ) {
+          const actors = new Set(next.actionsBy ?? []);
+          actors.add(user.id);
+          next.actionsBy = [...actors];
         }
         appendAudit(db, {
           actorId: user.id,
@@ -573,6 +614,15 @@ export function createApp(db: DbShape): express.Express {
           },
           user.id
         );
+        // C3: adding implementation evidence marks the actor as involved.
+        if ((added.kind ?? 'implementation') === 'implementation') {
+          const target = db.capas.find((c) => c.id === req.params.id);
+          if (target) {
+            const actors = new Set(target.actionsBy ?? []);
+            actors.add(user.id);
+            target.actionsBy = [...actors];
+          }
+        }
         appendAudit(db, {
           actorId: user.id,
           action: 'evidence.added',
@@ -610,9 +660,9 @@ export function createApp(db: DbShape): express.Express {
       res.status(400).json({ error: 'Only CAPAs in effectiveness review can be reviewed.' });
       return;
     }
-    // C2 interim independence (owner only); C3 derives it from involvement history.
-    if (user.id === capa.ownerId) {
-      res.status(403).json({ error: CAPA_CLOSE_SOD_MESSAGE });
+    // C3: nobody involved in the work may approve it.
+    if (capaReviewIneligible(capa).includes(user.id)) {
+      res.status(403).json({ error: capaReviewerMessage(capa) });
       return;
     }
     const outcome = req.body.outcome;

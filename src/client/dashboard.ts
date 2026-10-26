@@ -1,8 +1,8 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
 import { visibleOrgIds } from '../shared/rbac.js';
-import { CAPA_CLOSE_SOD_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
-import { qualifyingEffectivenessEvidence } from '../shared/capa.js';
+import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
+import { capaNoEligibleReviewer, capaReviewIneligible, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type {
   AuditEvent,
@@ -226,20 +226,29 @@ export function verifyBlockReason(
 }
 
 /**
- * C2: CAPA review gate for the dashboard. Effectiveness review only, an
- * independent reviewer (owner-only until C3 derives involvement history),
- * and at least one current-cycle effectiveness evidence item. Outcome,
+ * C2/C3: CAPA review gate for the dashboard. Effectiveness review only, a
+ * reviewer outside the involvement record, and at least one current-cycle
+ * effectiveness evidence item. When the privileged roster is supplied and
+ * nobody on it is eligible, reports the deadlock instead. Outcome,
  * rationale, and the evidence selection are form state, checked by the
  * component. Mirrors the server; the server still decides.
  */
 export function capaReviewBlockReason(
   me: Pick<DemoUser, 'id'>,
-  capa: Pick<CapaRecord, 'ownerId' | 'status' | 'evidence' | 'statusHistory'>
+  capa: Pick<
+    CapaRecord,
+    'ownerId' | 'createdBy' | 'ownerHistory' | 'actionsBy' | 'status' | 'evidence' | 'statusHistory'
+  >,
+  privilegedUserIds: string[] = []
 ): string | null {
   if (capa.status !== 'effectiveness_review') {
     return 'Only CAPAs in effectiveness review can be reviewed.';
   }
-  if (me.id === capa.ownerId) return CAPA_CLOSE_SOD_MESSAGE;
+  if (capaReviewIneligible(capa).includes(me.id)) {
+    return capaNoEligibleReviewer(capa, privilegedUserIds)
+      ? CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE
+      : CAPA_CLOSE_SOD_MESSAGE;
+  }
   if (qualifyingEffectivenessEvidence(capa).length < 1) {
     return 'At least 1 current-cycle effectiveness evidence item is required to review.';
   }

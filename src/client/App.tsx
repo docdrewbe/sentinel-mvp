@@ -433,6 +433,7 @@ export default function App(): JSX.Element {
                 me={me}
                 capa={capa}
                 ready={capasReady}
+                privilegedIds={privilegedIds}
                 userName={userName}
                 domainName={domainById.get(capa.domainId)?.name ?? '—'}
                 linkedTaskTitle={capa.taskId ? (taskById.get(capa.taskId)?.title ?? capa.taskId) : null}
@@ -658,7 +659,7 @@ function CapaFieldEditor({ label, value, canEdit, onSave }: { label: string; val
   );
 }
 
-function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, onAdvance, onAddEvidence, onSaveField, onReview }: {
+function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, trail, privilegedIds, onAdvance, onAddEvidence, onSaveField, onReview }: {
   me: DemoUser;
   capa: CapaRecord;
   ready: boolean;
@@ -666,6 +667,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   domainName: string;
   linkedTaskTitle: string | null;
   trail: AuditEvent[];
+  privilegedIds: string[];
   onAdvance: (status: CapaStatus) => void;
   onAddEvidence: (label: string, holder: string, kind?: string) => void;
   onSaveField: (field: 'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan' | 'effectivenessCriteria', text: string) => void;
@@ -677,7 +679,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   const next = capa.status === 'closed' ? null : CAPA_NEXT[capa.status];
   const reviewing = capa.status === 'effectiveness_review';
   const gateReason = next && !reviewing ? (capaGateMissing(capa, next)[0] ?? null) : null;
-  const reviewReason = reviewing ? capaReviewBlockReason(me, capa) : null;
+  const reviewReason = reviewing ? capaReviewBlockReason(me, capa, privilegedIds) : null;
   const qualifying = reviewing ? qualifyingEffectivenessEvidence(capa) : [];
   const advanceRoleOk = can(me, 'capa.update', capa);
   const advanceAllowed = ready && advanceRoleOk && gateReason === null && next !== null && !reviewing;

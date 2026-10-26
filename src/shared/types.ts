@@ -223,6 +223,12 @@ export interface CapaRecord {
   effectivenessReviews?: EffectivenessReview[];
   /** Append-only status-entry history (server-maintained). */
   statusHistory?: StatusHistoryEntry[];
+  /** Who created the record (server-set; counts toward reviewer eligibility). */
+  createdBy?: string;
+  /** Append-only ownership history (server-maintained). */
+  ownerHistory?: OwnerHistoryEntry[];
+  /** Users who advanced phases, edited work content, or added work evidence. */
+  actionsBy?: string[];
   closedBy?: string;
   closedAt?: string;
   createdAt: string;
@@ -246,6 +252,14 @@ export interface StatusHistoryEntry {
   byUserId: string;
 }
 
+/** One recorded CAPA owner: the initial owner plus every reassignment. */
+export interface OwnerHistoryEntry {
+  ownerId: string;
+  from: 'initial' | 'reassignment';
+  byUserId: string;
+  at: string;
+}
+
 export const CAPA_STATUS_LABELS: Record<CapaStatus, string> = {
   open: 'Open',
   investigation: 'Investigation',
@@ -264,6 +278,13 @@ export const CAPA_SEVERITY_LABELS: Record<CapaSeverity, string> = {
 /** CAPA closure independence rule (server-enforced; the dashboard mirrors it). */
 export const CAPA_CLOSE_SOD_MESSAGE =
   'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+
+/**
+ * C3: every privileged user contributed to or owned the CAPA, so no
+ * independent reviewer remains. There is deliberately no override.
+ */
+export const CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE =
+  'No eligible independent reviewer: all privileged users contributed to or owned this CAPA.';
 
 export const KIND_LABELS: Record<OrgKind, string> = {
   hospital: 'Hospital',

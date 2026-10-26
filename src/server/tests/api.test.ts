@@ -2858,7 +2858,7 @@ describe('CAPA lifecycle (HTTP)', () => {
     });
     try {
       const id = 'capa-temp-log';
-      const noRefs = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+      const noRefs = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-admin', {
         outcome: 'effective',
         rationale: 'Rationale without evidence (simulated).',
         evidenceIds: []
@@ -2874,7 +2874,7 @@ describe('CAPA lifecycle (HTTP)', () => {
         kind: 'effectiveness'
       });
       assert.equal(added.status, 201);
-      const noRationale = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+      const noRationale = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-admin', {
         outcome: 'effective',
         rationale: '   ',
         evidenceIds: [String(added.json.id)]
@@ -3183,7 +3183,7 @@ describe('C1 CAPA phase gates (HTTP)', () => {
       ];
     });
     try {
-      const denied = await call(base, 'POST', '/api/capas/capa-temp-log/effectiveness-review', 'u-officer', {
+      const denied = await call(base, 'POST', '/api/capas/capa-temp-log/effectiveness-review', 'u-admin', {
         outcome: 'effective',
         rationale: 'Effective (simulated).',
         evidenceIds: ['capa-temp-log-ev2']
@@ -3558,6 +3558,253 @@ describe('C2 effectiveness reviews (HTTP)', () => {
         denied.json.error,
         'Each referenced evidence item must be current-cycle effectiveness evidence.'
       );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('C3 CAPA reviewer independence (HTTP)', () => {
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must differ from its owner.';
+  const DEADLOCK =
+    'No eligible independent reviewer: all privileged users contributed to or owned this CAPA.';
+
+  interface CapaJson {
+    id: string;
+    status: string;
+    ownerId: string;
+    createdBy?: string;
+    ownerHistory?: Array<{ ownerId: string; from: string; byUserId: string; at: string }>;
+    actionsBy?: string[];
+    effectivenessReviews?: Array<Record<string, unknown>>;
+  }
+
+  async function getCapa(base: string, userId: string, orgId: string, id: string): Promise<CapaJson> {
+    const res = await call(base, 'GET', `/api/capas?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const capas = res.json as unknown as CapaJson[];
+    const found = capas.find((c) => c.id === id);
+    assert.ok(found, `capa ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string, userId: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', userId);
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeFullCapa(base: string, actorId: string, ownerId: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', actorId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'C3 probe finding (simulated).',
+      severity: 'medium',
+      ownerId,
+      dueDate: '2026-12-01',
+      containment: 'Held (simulated).',
+      rootCause: 'Found (simulated).',
+      correctivePlan: 'Fix (simulated).',
+      preventivePlan: 'Prevent (simulated).',
+      effectivenessCriteria: 'No recurrence in 30 days (simulated).'
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function advance(base: string, actorId: string, id: string, status: string): Promise<number> {
+    return (await call(base, 'PATCH', `/api/capas/${id}`, actorId, { status })).status;
+  }
+
+  async function addEvidence(
+    base: string,
+    actorId: string,
+    id: string,
+    kind: string
+  ): Promise<string> {
+    const added = await call(base, 'POST', `/api/capas/${id}/evidence`, actorId, {
+      label: `${kind} proof (simulated)`,
+      holder: 'Case File',
+      kind
+    });
+    assert.equal(added.status, 201);
+    return String(added.json.id);
+  }
+
+  async function review(
+    base: string,
+    actorId: string,
+    id: string,
+    body: Record<string, unknown>
+  ): Promise<{ status: number; json: Record<string, unknown> }> {
+    return call(base, 'POST', `/api/capas/${id}/effectiveness-review`, actorId, body);
+  }
+
+  it('keeps a prior owner ineligible after reassignment', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base, 'u-officer2', 'u-officer2');
+      assert.equal(await advance(base, 'u-officer2', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-officer2', id, 'action_in_progress'), 200);
+      await addEvidence(base, 'u-officer2', id, 'implementation');
+      assert.equal(await advance(base, 'u-officer2', id, 'effectiveness_review'), 200);
+      const check = await addEvidence(base, 'u-officer2', id, 'effectiveness');
+      const body = { outcome: 'effective', rationale: 'Effective (simulated).', evidenceIds: [check] };
+      const self = await review(base, 'u-officer2', id, body);
+      assert.equal(self.status, 403);
+      assert.equal(self.json.error, SOD);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer2', { ownerId: 'u-nurse-mgr' })).status,
+        200
+      );
+      const moved = await getCapa(base, 'u-officer2', 'org-cah', id);
+      assert.equal(moved.ownerId, 'u-nurse-mgr');
+      assert.deepEqual(
+        (moved.ownerHistory ?? []).map((e) => [e.ownerId, e.from]),
+        [
+          ['u-officer2', 'initial'],
+          ['u-nurse-mgr', 'reassignment']
+        ]
+      );
+      assert.ok((moved.actionsBy ?? []).includes('u-officer2'));
+      const again = await review(base, 'u-officer2', id, body);
+      assert.equal(again.status, 403);
+      assert.equal(again.json.error, SOD);
+      const owner = await review(base, 'u-nurse-mgr', id, body);
+      assert.equal(owner.status, 403);
+      const independent = await review(base, 'u-admin', id, body);
+      assert.equal(independent.status, 201);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('reports no eligible reviewer once all privileged users contributed', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base, 'u-admin', 'u-nurse-mgr');
+      assert.equal(await advance(base, 'u-officer', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-officer', id, 'action_in_progress'), 200);
+      await addEvidence(base, 'u-officer2', id, 'implementation');
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      const check = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const body = { outcome: 'effective', rationale: 'Effective (simulated).', evidenceIds: [check] };
+      for (const reviewer of ['u-admin', 'u-officer', 'u-officer2']) {
+        const denied = await review(base, reviewer, id, body);
+        assert.equal(denied.status, 403);
+        assert.equal(denied.json.error, DEADLOCK);
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects combined reassign-and-close requests with nothing applied', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base, 'u-officer', 'u-officer');
+      assert.equal(await advance(base, 'u-officer', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-officer', id, 'action_in_progress'), 200);
+      await addEvidence(base, 'u-officer', id, 'implementation');
+      assert.equal(await advance(base, 'u-officer', id, 'effectiveness_review'), 200);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-officer', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      const denied = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        ownerId: 'u-nurse-mgr',
+        status: 'closed'
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      const after = await getCapa(base, 'u-officer', 'org-cah', id);
+      assert.deepEqual(after, before);
+      assert.equal(after.ownerId, 'u-officer');
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('ignores client-supplied involvement history', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      const before = await getCapa(base, 'u-nurse-mgr', 'org-cah', id);
+      const forged = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+        ownerHistory: [],
+        actionsBy: [],
+        createdBy: 'u-admin',
+        statusHistory: [],
+        effectivenessReviews: []
+      });
+      assert.equal(forged.status, 200);
+      const after = await getCapa(base, 'u-nurse-mgr', 'org-cah', id);
+      assert.deepEqual(after.ownerHistory, before.ownerHistory);
+      assert.equal(after.createdBy, 'u-nurse-mgr');
+      assert.equal(after.actionsBy, undefined);
+      assert.equal(after.effectivenessReviews, undefined);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back a reassignment without touching ownership history', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', 'org-cah', id);
+      const audits = await auditTotal(base, 'u-officer');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+          ownerId: 'u-staff'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', 'org-cah', id), before);
+      assert.equal(await auditTotal(base, 'u-officer'), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('lets an uninvolved officer review work another officer touched', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeFullCapa(base, 'u-nurse-mgr', 'u-nurse-mgr');
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+            rootCause: 'Improved by Ortiz (simulated).'
+          })
+        ).status,
+        200
+      );
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'investigation'), 200);
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'action_in_progress'), 200);
+      await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+      assert.equal(await advance(base, 'u-nurse-mgr', id, 'effectiveness_review'), 200);
+      const check = await addEvidence(base, 'u-nurse-mgr', id, 'effectiveness');
+      const body = { outcome: 'effective', rationale: 'Effective (simulated).', evidenceIds: [check] };
+      const tainted = await review(base, 'u-officer', id, body);
+      assert.equal(tainted.status, 403);
+      assert.equal(tainted.json.error, SOD);
+      assert.equal((await review(base, 'u-officer2', id, body)).status, 201);
       assertDiskMatchesMemory(db);
     } finally {
       await close();

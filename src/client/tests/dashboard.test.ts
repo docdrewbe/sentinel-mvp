@@ -491,6 +491,42 @@ describe('CAPA review gate and send-back label (unit)', () => {
     );
   });
 
+  it('C3: past owners, creators, and contributors cannot review', () => {
+    const capa = {
+      ownerId: 'u-nurse-mgr',
+      createdBy: 'u-admin',
+      ownerHistory: [
+        { ownerId: 'u-officer2', from: 'initial' as const, byUserId: 'u-admin', at: '2026-10-19T00:00:00.000Z' },
+        { ownerId: 'u-nurse-mgr', from: 'reassignment' as const, byUserId: 'u-officer2', at: '2026-10-20T00:00:00.000Z' }
+      ],
+      actionsBy: ['u-officer'],
+      status: 'effectiveness_review' as const,
+      evidence: [check('2026-10-21T00:00:00.000Z')],
+      statusHistory: history
+    };
+    for (const id of ['u-officer2', 'u-nurse-mgr', 'u-admin', 'u-officer']) {
+      assert.equal(capaReviewBlockReason({ id }, capa), SOD);
+    }
+    assert.equal(capaReviewBlockReason({ id: 'u-staff' }, capa, ['u-admin', 'u-officer', 'u-officer2']), null);
+  });
+
+  it('C3: reports the deadlock when no privileged user remains eligible', () => {
+    const capa = {
+      ownerId: 'u-nurse-mgr',
+      createdBy: 'u-admin',
+      ownerHistory: [],
+      actionsBy: ['u-officer', 'u-officer2'],
+      status: 'effectiveness_review' as const,
+      evidence: [check('2026-10-21T00:00:00.000Z')],
+      statusHistory: history
+    };
+    assert.equal(
+      capaReviewBlockReason({ id: 'u-admin' }, capa, ['u-admin', 'u-officer', 'u-officer2']),
+      'No eligible independent reviewer: all privileged users contributed to or owned this CAPA.'
+    );
+    assert.equal(capaReviewBlockReason({ id: 'u-admin' }, capa), SOD);
+  });
+
   it('Start reads as Send back on submitted tasks', () => {
     assert.equal(startButtonLabel({ status: 'submitted' }), 'Send back');
     assert.equal(startButtonLabel({ status: 'open' }), 'Start');

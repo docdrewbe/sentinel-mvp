@@ -398,6 +398,9 @@ export function seedDatabase(): DbShape {
         { status: 'open', at: t, byUserId: 'u-officer' },
         { status: 'investigation', at: t, byUserId: 'u-nurse-mgr' }
       ],
+      createdBy: 'u-officer',
+      ownerHistory: [{ ownerId: 'u-nurse-mgr', from: 'initial', byUserId: 'u-officer', at: t }],
+      actionsBy: ['u-nurse-mgr'],
       createdAt: t,
       updatedAt: t
     }
