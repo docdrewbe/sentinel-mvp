@@ -3362,7 +3362,8 @@ describe('C2 effectiveness reviews (HTTP)', () => {
         rationale: 'Effective: no recurrence in 30 days (simulated).',
         reviewerId: 'u-officer',
         at: reviews[0].at,
-        evidenceIds: [check]
+        evidenceIds: [check],
+        criteriaSnapshot: 'No recurrence in 30 days (simulated).'
       });
       assert.match(String(reviews[0].at), /^\d{4}-\d{2}-\d{2}T/);
       const fetched = await getCapa(base, 'u-officer', 'org-cah', id);
@@ -4371,6 +4372,457 @@ describe('CAPA polish: no-op PATCH writes nothing (HTTP)', () => {
         403
       );
       assert.deepEqual(await getCapa(base, 'u-nurse-mgr', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('P1 effectiveness criteria integrity (HTTP)', () => {
+  const LOCKED = 'Effectiveness criteria are locked during effectiveness review.';
+  const SOD = 'Separation of duties: the reviewer closing a CAPA must not have owned it or contributed to its work.';
+  const CRITERIA_A = '30 consecutive days, zero gaps (simulated).';
+  const CRITERIA_B = '60 consecutive days, zero gaps (simulated).';
+  const WEAKENED = '7 days, up to 3 gaps acceptable (simulated).';
+
+  interface HistoryJson {
+    seq: number;
+    text: string;
+    byUserId: string;
+    cycle: number;
+  }
+
+  interface ReviewJson {
+    seq: number;
+    outcome: string;
+    reviewerId: string;
+    evidenceIds: string[];
+    criteriaSnapshot: string;
+  }
+
+  interface CapaJson {
+    id: string;
+    status: string;
+    ownerId: string;
+    effectivenessCriteria?: string;
+    criteriaHistory?: HistoryJson[];
+    effectivenessReviews?: ReviewJson[];
+    actionsBy?: string[];
+    updatedAt: string;
+  }
+
+  async function getCapa(base: string, userId: string, id: string): Promise<CapaJson> {
+    const res = await call(base, 'GET', '/api/capas?orgId=org-cah', userId);
+    assert.equal(res.status, 200);
+    const capas = res.json as unknown as CapaJson[];
+    const found = capas.find((c) => c.id === id);
+    assert.ok(found, `capa ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function makeCapa(base: string, actorId: string, ownerId: string, criteria: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/capas', actorId, {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      finding: 'P1 probe finding (simulated).',
+      severity: 'medium',
+      ownerId,
+      dueDate: '2026-12-01',
+      containment: 'Held (simulated).',
+      rootCause: 'Found (simulated).',
+      correctivePlan: 'Fix (simulated).',
+      preventivePlan: 'Prevent (simulated).',
+      effectivenessCriteria: criteria
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function advance(base: string, userId: string, id: string, status: string) {
+    return call(base, 'PATCH', `/api/capas/${id}`, userId, { status });
+  }
+
+  async function addEvidence(base: string, userId: string, id: string, kind: string): Promise<string> {
+    const res = await call(base, 'POST', `/api/capas/${id}/evidence`, userId, {
+      label: `${kind} proof (simulated)`,
+      holder: 'Case File',
+      kind
+    });
+    assert.equal(res.status, 201);
+    return String(res.json.id);
+  }
+
+  async function review(base: string, userId: string, id: string, outcome: string, evidenceIds: string[]) {
+    return call(base, 'POST', `/api/capas/${id}/effectiveness-review`, userId, {
+      outcome,
+      rationale: `${outcome} (simulated).`,
+      evidenceIds
+    });
+  }
+
+  async function toReview(base: string, userId: string, id: string): Promise<void> {
+    assert.equal((await advance(base, userId, id, 'investigation')).status, 200);
+    assert.equal((await advance(base, userId, id, 'action_in_progress')).status, 200);
+    await addEvidence(base, userId, id, 'implementation');
+    assert.equal((await advance(base, userId, id, 'effectiveness_review')).status, 200);
+  }
+
+  it('blocks the exact criteria-weakening exploit and snapshots the original', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      await toReview(base, 'u-nurse-mgr', id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const audits = await auditTotal(base);
+      const weakened = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer2', {
+        effectivenessCriteria: WEAKENED
+      });
+      assert.equal(weakened.status, 400);
+      assert.equal(weakened.json.error, LOCKED);
+      const after = await getCapa(base, 'u-nurse-mgr', id);
+      assert.equal(after.effectivenessCriteria, CRITERIA_A);
+      assert.deepEqual(after.actionsBy ?? [], before.actionsBy ?? []);
+      assert.ok(!(after.actionsBy ?? []).includes('u-officer2'));
+      assert.equal(after.updatedAt, before.updatedAt);
+      assert.deepEqual(after.criteriaHistory, before.criteriaHistory);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      // The reviewer still closes against the original criteria.
+      const check = await addEvidence(base, 'u-officer2', id, 'effectiveness');
+      const closed = await review(base, 'u-officer2', id, 'effective', [check]);
+      assert.equal(closed.status, 201);
+      const done = await getCapa(base, 'u-officer', id);
+      assert.equal(done.status, 'closed');
+      assert.equal(done.effectivenessReviews?.length, 1);
+      assert.equal(done.effectivenessReviews?.[0].criteriaSnapshot, CRITERIA_A);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('locks criteria for owner, manager, and admin during review', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-staff', CRITERIA_A);
+      assert.equal((await advance(base, 'u-staff', id, 'investigation')).status, 200);
+      assert.equal((await advance(base, 'u-staff', id, 'action_in_progress')).status, 200);
+      await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'effectiveness_review')).status, 200);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const audits = await auditTotal(base);
+      for (const userId of ['u-staff', 'u-nurse-mgr', 'u-admin']) {
+        const res = await call(base, 'PATCH', `/api/capas/${id}`, userId, {
+          effectivenessCriteria: WEAKENED
+        });
+        assert.equal(res.status, 400);
+        assert.equal(res.json.error, LOCKED);
+      }
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects combined criteria requests with nothing applied', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      await toReview(base, 'u-nurse-mgr', id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const audits = await auditTotal(base);
+      const combo = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        effectivenessCriteria: WEAKENED,
+        ownerId: 'u-officer'
+      });
+      assert.equal(combo.status, 400);
+      assert.equal(combo.json.error, LOCKED);
+      const closeCombo = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        effectivenessCriteria: WEAKENED,
+        status: 'closed'
+      });
+      assert.equal(closeCombo.status, 400);
+      const after = await getCapa(base, 'u-nurse-mgr', id);
+      assert.equal(after.ownerId, before.ownerId);
+      assert.equal(after.effectivenessCriteria, CRITERIA_A);
+      assert.equal(after.status, 'effectiveness_review');
+      assert.deepEqual(after, before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('treats unchanged criteria in review as a no-op', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      await toReview(base, 'u-nurse-mgr', id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const audits = await auditTotal(base);
+      for (const criteria of [CRITERIA_A, `  ${CRITERIA_A}  `]) {
+        const res = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer2', {
+          effectivenessCriteria: criteria
+        });
+        assert.equal(res.status, 200);
+        assert.deepEqual(res.json, before);
+      }
+      assert.deepEqual(await getCapa(base, 'u-nurse-mgr', id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('records pre-review criteria edits as contributions', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'investigation')).status, 200);
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'action_in_progress')).status, 200);
+      const edited = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        effectivenessCriteria: CRITERIA_B
+      });
+      assert.equal(edited.status, 200);
+      const mid = await getCapa(base, 'u-nurse-mgr', id);
+      assert.equal(mid.effectivenessCriteria, CRITERIA_B);
+      assert.ok((mid.actionsBy ?? []).includes('u-officer'));
+      assert.deepEqual(
+        (mid.criteriaHistory ?? []).map((h) => [h.seq, h.text, h.byUserId, h.cycle]),
+        [
+          [1, CRITERIA_A, 'u-nurse-mgr', 1],
+          [2, CRITERIA_B, 'u-officer', 1]
+        ]
+      );
+      await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'effectiveness_review')).status, 200);
+      const check = await addEvidence(base, 'u-officer2', id, 'effectiveness');
+      const denied = await review(base, 'u-officer', id, 'effective', [check]);
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps per-cycle snapshots across an ineffective round trip', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      await toReview(base, 'u-nurse-mgr', id);
+      const first = await addEvidence(base, 'u-officer', id, 'effectiveness');
+      assert.equal((await review(base, 'u-officer', id, 'ineffective', [first])).status, 201);
+      assert.equal((await getCapa(base, 'u-nurse-mgr', id)).status, 'action_in_progress');
+      const revised = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+        effectivenessCriteria: CRITERIA_B
+      });
+      assert.equal(revised.status, 200);
+      const mid = await getCapa(base, 'u-nurse-mgr', id);
+      assert.deepEqual(
+        (mid.criteriaHistory ?? []).map((h) => [h.seq, h.text, h.cycle]),
+        [
+          [1, CRITERIA_A, 1],
+          [2, CRITERIA_B, 2]
+        ]
+      );
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'effectiveness_review')).status, 200);
+      const second = await addEvidence(base, 'u-officer2', id, 'effectiveness');
+      assert.equal((await review(base, 'u-officer2', id, 'effective', [second])).status, 201);
+      const done = await getCapa(base, 'u-officer', id);
+      assert.equal(done.status, 'closed');
+      assert.deepEqual(
+        (done.effectivenessReviews ?? []).map((r) => [r.seq, r.outcome, r.criteriaSnapshot]),
+        [
+          [1, 'ineffective', CRITERIA_A],
+          [2, 'effective', CRITERIA_B]
+        ]
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('bars a former owner who edited criteria from reviewing', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-officer', 'u-officer', CRITERIA_A);
+      const edited = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        effectivenessCriteria: CRITERIA_B
+      });
+      assert.equal(edited.status, 200);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', { ownerId: 'u-nurse-mgr' })).status,
+        200
+      );
+      await toReview(base, 'u-nurse-mgr', id);
+      const check = await addEvidence(base, 'u-officer2', id, 'effectiveness');
+      const denied = await review(base, 'u-officer', id, 'effective', [check]);
+      assert.equal(denied.status, 403);
+      assert.equal(denied.json.error, SOD);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('ignores forged snapshots and histories', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/capas', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        finding: 'P1 probe finding (simulated).',
+        severity: 'medium',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01',
+        containment: 'Held (simulated).',
+        rootCause: 'Found (simulated).',
+        correctivePlan: 'Fix (simulated).',
+        preventivePlan: 'Prevent (simulated).',
+        effectivenessCriteria: CRITERIA_A,
+        criteriaSnapshot: 'forged (simulated)',
+        criteriaHistory: [{ seq: 99, text: 'forged', byUserId: 'u-officer', at: 't', cycle: 99 }],
+        effectivenessReviews: [
+          { seq: 1, outcome: 'effective', rationale: 'forged', reviewerId: 'u-officer', at: 't', evidenceIds: [] }
+        ]
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      const fresh = await getCapa(base, 'u-nurse-mgr', id);
+      assert.equal(fresh.effectivenessReviews, undefined);
+      assert.deepEqual(
+        (fresh.criteriaHistory ?? []).map((h) => [h.seq, h.text, h.byUserId, h.cycle]),
+        [[1, CRITERIA_A, 'u-nurse-mgr', 1]]
+      );
+      const forgedPatch = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+        criteriaSnapshot: 'forged (simulated)',
+        criteriaHistory: [],
+        effectivenessReviews: []
+      });
+      assert.equal(forgedPatch.status, 200);
+      assert.deepEqual((await getCapa(base, 'u-nurse-mgr', id)).criteriaHistory, fresh.criteriaHistory);
+      await toReview(base, 'u-nurse-mgr', id);
+      const check = await addEvidence(base, 'u-officer', id, 'effectiveness');
+      const forgedReview = await call(base, 'POST', `/api/capas/${id}/effectiveness-review`, 'u-officer', {
+        outcome: 'effective',
+        rationale: 'Effective (simulated).',
+        evidenceIds: [check],
+        criteriaSnapshot: 'forged (simulated)'
+      });
+      assert.equal(forgedReview.status, 201);
+      const done = await getCapa(base, 'u-officer', id);
+      assert.equal(done.effectivenessReviews?.[0].criteriaSnapshot, CRITERIA_A);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back criteria edits and reviews when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'investigation')).status, 200);
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'action_in_progress')).status, 200);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-nurse-mgr', id);
+      const audits = await auditTotal(base);
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const failed = await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+          effectivenessCriteria: CRITERIA_B
+        });
+        assert.equal(failed.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      const rolled = await getCapa(base, 'u-nurse-mgr', id);
+      assert.deepEqual(rolled, before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      // The edit succeeds on retry, then a failed review rolls back too.
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/capas/${id}`, 'u-nurse-mgr', {
+            effectivenessCriteria: CRITERIA_B
+          })
+        ).status,
+        200
+      );
+      await addEvidence(base, 'u-nurse-mgr', id, 'implementation');
+      assert.equal((await advance(base, 'u-nurse-mgr', id, 'effectiveness_review')).status, 200);
+      const check = await addEvidence(base, 'u-officer', id, 'effectiveness');
+      const diskMid = readFileSync(dataFile, 'utf8');
+      const mid = await getCapa(base, 'u-nurse-mgr', id);
+      const auditsMid = await auditTotal(base);
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const failedReview = await review(base, 'u-officer', id, 'effective', [check]);
+        assert.equal(failedReview.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      const afterReview = await getCapa(base, 'u-nurse-mgr', id);
+      assert.deepEqual(afterReview, mid);
+      assert.equal(afterReview.effectivenessReviews, undefined);
+      assert.equal(await auditTotal(base), auditsMid);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskMid);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps closed criteria locked and cross-org edits forbidden', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeCapa(base, 'u-nurse-mgr', 'u-nurse-mgr', CRITERIA_A);
+      await toReview(base, 'u-nurse-mgr', id);
+      const check = await addEvidence(base, 'u-officer', id, 'effectiveness');
+      assert.equal((await review(base, 'u-officer', id, 'effective', [check])).status, 201);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await getCapa(base, 'u-officer', id);
+      const audits = await auditTotal(base);
+      const locked = await call(base, 'PATCH', `/api/capas/${id}`, 'u-officer', {
+        effectivenessCriteria: WEAKENED
+      });
+      assert.equal(locked.status, 400);
+      assert.equal(locked.json.error, 'Closed CAPA records are locked.');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/capas/${id}`, 'u-clinic-mgr', {
+          effectivenessCriteria: WEAKENED
+        })).status,
+        403
+      );
+      assert.deepEqual(await getCapa(base, 'u-officer', id), before);
       assert.equal(await auditTotal(base), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assertDiskMatchesMemory(db);

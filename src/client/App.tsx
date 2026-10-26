@@ -3,7 +3,7 @@ import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { qualifyingEffectivenessEvidence } from '../shared/capa.js';
+import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CAPA_NEXT, applySettled, beginContext, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
@@ -637,8 +637,22 @@ function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | 
   );
 }
 
-function CapaFieldEditor({ label, value, canEdit, onSave }: { label: string; value: string | undefined; canEdit: boolean; onSave: (text: string) => void }): JSX.Element | null {
+function CapaFieldEditor({ label, value, canEdit, lockedTitle, onSave }: { label: string; value: string | undefined; canEdit: boolean; lockedTitle?: string; onSave: (text: string) => void }): JSX.Element | null {
   const [text, setText] = useState(value ?? '');
+  // P1: a locked field renders disabled with its explanation for every role.
+  if (lockedTitle) {
+    return (
+      <div className="form">
+        <label>{label}</label>
+        <input value={text} disabled title={lockedTitle} onChange={(e) => setText(e.target.value)} placeholder={`${label} (simulated)…`} />
+        <div>
+          <button disabled title={lockedTitle}>
+            Save {label.toLowerCase()}
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!canEdit) {
     return value ? (<p><strong>{label}:</strong> {value}</p>) : null;
   }
@@ -731,6 +745,11 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
           label={label}
           value={value}
           canEdit={ready && can(me, 'capa.update', capa) && capa.status !== 'closed'}
+          lockedTitle={
+            field === 'effectivenessCriteria' && reviewing && capaCriteriaLocked(capa.status)
+              ? 'Locked during effectiveness review'
+              : undefined
+          }
           onSave={(text) => onSaveField(field, text)}
         />
       ))}
@@ -797,6 +816,21 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
                 <code>#{r.seq}</code> {r.outcome} · {userName.get(r.reviewerId) ?? r.reviewerId} ·{' '}
                 {new Date(r.at).toLocaleString()}
                 <div className="trail-detail">{r.rationale} (evidence: {reviewEvidenceLabels(capa.evidence, r.evidenceIds).join('; ') || 'none'})</div>
+                <div className="trail-detail">Judged against: {r.criteriaSnapshot}</div>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      {(capa.criteriaHistory ?? []).length > 0 && (
+        <>
+          <h5>Criteria history ({(capa.criteriaHistory ?? []).length})</h5>
+          <ol className="trail">
+            {(capa.criteriaHistory ?? []).map((h) => (
+              <li key={h.seq}>
+                <code>#{h.seq}</code> cycle {h.cycle} · {userName.get(h.byUserId) ?? h.byUserId} ·{' '}
+                {new Date(h.at).toLocaleString()}
+                <div className="trail-detail">{h.text}</div>
               </li>
             ))}
           </ol>

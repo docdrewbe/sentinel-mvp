@@ -32,9 +32,9 @@ import type {
   TaskStatus,
   TaskTemplate
 } from '../shared/types.js';
-import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { CAPA_CRITERIA_LOCKED_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
-import { CAPA_GATE_FIELD_LABELS, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
+import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
 import { nextDueDate } from '../shared/scheduling.js';
 
@@ -623,6 +623,17 @@ export function updateCapa(
   const capa = db.capas.find((c) => c.id === id);
   if (!capa) throw new ValidationError('CAPA not found.');
   assertCapaNotLocked(capa);
+  // P1: a criteria change during review is rejected before any other field
+  // in the same request is applied, so combined requests change nothing.
+  // (Non-string input falls through to the field handlers below, which P2
+  // turns into field-specific 400s.)
+  if (
+    typeof patch.effectivenessCriteria === 'string' &&
+    capaCriteriaLocked(capa.status) &&
+    patch.effectivenessCriteria.trim() !== (capa.effectivenessCriteria ?? '')
+  ) {
+    throw new ValidationError(CAPA_CRITERIA_LOCKED_MESSAGE);
+  }
   if (patch.finding !== undefined) {
     if (!patch.finding.trim()) throw new ValidationError('Finding description is required.');
     capa.finding = patch.finding.trim();

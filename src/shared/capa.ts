@@ -36,6 +36,15 @@ export function capaRequiredFields(status: CapaStatus): CapaGateField[] {
   }
 }
 
+/**
+ * P1: effectiveness criteria are locked during review (a review must judge
+ * the criteria set before it) and after closure. Used by the server
+ * (enforced) and the dashboard (field disabled with an explanation).
+ */
+export function capaCriteriaLocked(status: CapaStatus): boolean {
+  return status === 'effectiveness_review' || status === 'closed';
+}
+
 export type CapaGateEvidence = Pick<
   CapaRecord,
   'containment' | 'rootCause' | 'correctivePlan' | 'preventivePlan' | 'effectivenessCriteria'

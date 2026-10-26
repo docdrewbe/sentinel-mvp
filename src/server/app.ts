@@ -445,6 +445,18 @@ export function createApp(db: DbShape): express.Express {
           { ownerId: created.ownerId, from: 'initial', byUserId: user.id, at: monotonicNow() }
         ];
         created.statusHistory = [{ status: 'open', at: monotonicNow(), byUserId: user.id }];
+        // P1: criteria supplied at creation open the criteria history.
+        if (created.effectivenessCriteria) {
+          created.criteriaHistory = [
+            {
+              seq: 1,
+              text: created.effectivenessCriteria,
+              byUserId: user.id,
+              at: monotonicNow(),
+              cycle: 1
+            }
+          ];
+        }
         appendAudit(db, {
           actorId: user.id,
           action: 'capa.created',
@@ -556,6 +568,11 @@ export function createApp(db: DbShape): express.Express {
         res.json(capa);
         return;
       }
+      // P1: a real criteria change is a contribution (C3 ineligibility) and
+      // extends the append-only criteria history.
+      const criteriaChanged =
+        typeof patch.effectivenessCriteria === 'string' &&
+        patch.effectivenessCriteria.trim() !== (capa.effectivenessCriteria ?? '');
       const updated = mutateDb(db, () => {
         const next = updateCapa(db, capa.id, {
           ...(patch.finding !== undefined ? { finding: patch.finding } : {}),
@@ -591,11 +608,25 @@ export function createApp(db: DbShape): express.Express {
           patch.containment !== undefined ||
           patch.rootCause !== undefined ||
           patch.correctivePlan !== undefined ||
-          patch.preventivePlan !== undefined
+          patch.preventivePlan !== undefined ||
+          criteriaChanged
         ) {
           const actors = new Set(next.actionsBy ?? []);
           actors.add(user.id);
           next.actionsBy = [...actors];
+        }
+        if (criteriaChanged) {
+          const history = next.criteriaHistory ?? [];
+          next.criteriaHistory = [
+            ...history,
+            {
+              seq: history.length + 1,
+              text: next.effectivenessCriteria ?? '',
+              byUserId: user.id,
+              at: monotonicNow(),
+              cycle: (next.effectivenessReviews ?? []).length + 1
+            }
+          ];
         }
         appendAudit(db, {
           actorId: user.id,
@@ -784,7 +815,10 @@ export function createApp(db: DbShape): express.Express {
             rationale,
             reviewerId: user.id,
             at: now,
-            evidenceIds: [...new Set(evidenceIds as string[])]
+            evidenceIds: [...new Set(evidenceIds as string[])],
+            // P1: judged-against criteria, copied server-side. Anything the
+            // client sends as criteriaSnapshot is ignored.
+            criteriaSnapshot: capa.effectivenessCriteria ?? ''
           }
         ];
         appendAudit(db, {

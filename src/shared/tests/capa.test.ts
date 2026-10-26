@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { latestReviewEntryAt, qualifyingEffectivenessEvidence } from '../capa.js';
+import { capaCriteriaLocked, latestReviewEntryAt, qualifyingEffectivenessEvidence } from '../capa.js';
 import type { EvidenceRef } from '../types.js';
 
 const item = (over: Partial<EvidenceRef> & { id: string; at: string }): EvidenceRef => {
@@ -45,5 +45,15 @@ describe('review cycle scoping (C2/P5)', () => {
       qualifyingEffectivenessEvidence({ evidence, statusHistory }).map((e) => e.id),
       ['during']
     );
+  });
+});
+
+describe('criteria lock (P1)', () => {
+  it('locks criteria during review and after closure only', () => {
+    assert.equal(capaCriteriaLocked('open'), false);
+    assert.equal(capaCriteriaLocked('investigation'), false);
+    assert.equal(capaCriteriaLocked('action_in_progress'), false);
+    assert.equal(capaCriteriaLocked('effectiveness_review'), true);
+    assert.equal(capaCriteriaLocked('closed'), true);
   });
 });

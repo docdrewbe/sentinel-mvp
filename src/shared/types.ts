@@ -219,6 +219,8 @@ export interface CapaRecord {
   effectivenessDecision?: string;
   /** What effectiveness will be judged against; required before review. */
   effectivenessCriteria?: string;
+  /** Append-only criteria history (server-maintained; one entry per change). */
+  criteriaHistory?: CriteriaHistoryEntry[];
   /** Append-only effectiveness review history (server-maintained). */
   effectivenessReviews?: EffectivenessReview[];
   /** Append-only status-entry history (server-maintained). */
@@ -235,7 +237,7 @@ export interface CapaRecord {
   updatedAt: string;
 }
 
-/** One recorded effectiveness review: outcome, rationale, reviewer, time, evidence. */
+/** One recorded effectiveness review: outcome, rationale, reviewer, time, evidence, criteria. */
 export interface EffectivenessReview {
   seq: number;
   outcome: 'effective' | 'ineffective';
@@ -243,6 +245,20 @@ export interface EffectivenessReview {
   reviewerId: string;
   at: string;
   evidenceIds: string[];
+  /** Server-copied criteria text the review was judged against. */
+  criteriaSnapshot: string;
+}
+
+/**
+ * One recorded effectiveness-criteria value. Cycle N covers the period
+ * after N-1 reviews: cycle 1 is everything before the first review.
+ */
+export interface CriteriaHistoryEntry {
+  seq: number;
+  text: string;
+  byUserId: string;
+  at: string;
+  cycle: number;
 }
 
 /** One recorded entry into a CAPA status (server-maintained). */
@@ -285,6 +301,10 @@ export const CAPA_CLOSE_SOD_MESSAGE =
  */
 export const CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE =
   'No eligible independent reviewer: all privileged users contributed to or owned this CAPA.';
+
+/** P1: criteria may not change while a review could judge against them. */
+export const CAPA_CRITERIA_LOCKED_MESSAGE =
+  'Effectiveness criteria are locked during effectiveness review.';
 
 export const KIND_LABELS: Record<OrgKind, string> = {
   hospital: 'Hospital',
