@@ -3,8 +3,7 @@ import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { requiredEvidenceCount } from '../shared/evidence.js';
-import { applySettled, beginContext, canAct, initialPanels, panelData, resolveOrgId, type Panels } from './dashboard.js';
+import { applySettled, beginContext, canAct, initialPanels, panelData, requiredEvidenceFor, resolveOrgId, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -290,17 +289,13 @@ export default function App(): JSX.Element {
                   <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
                 </dl>
-                <EvidenceRequirement task={task} templates={templates} />
+                <EvidenceRequirement task={task} />
                 {tasksReady ? (
                   <>
                     <StatusButtons
                       me={me}
                       task={task}
-                      submitBlockReason={
-                        requiredEvidenceCount(task, templates) - task.evidence.length > 0
-                          ? `Requires ${requiredEvidenceCount(task, templates)} evidence items (has ${task.evidence.length})`
-                          : null
-                      }
+                      submitBlockReason={submitBlockReason(task)}
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
                     <h5>Evidence & chain of custody ({task.evidence.length})</h5>
@@ -523,9 +518,25 @@ function Stat({ label, value, tone }: { label: string; value: number | string; t
   );
 }
 
-function EvidenceRequirement({ task, templates }: { task: ComplianceTask; templates: TaskTemplate[] }): JSX.Element | null {
+/** D4c: Submit stays enabled when the requirement is unknown; the server decides. */
+function submitBlockReason(task: ComplianceTask): string | null {
+  const required = requiredEvidenceFor(task);
+  if (required === null) return null;
+  return required - task.evidence.length > 0
+    ? `Requires ${required} evidence items (has ${task.evidence.length})`
+    : null;
+}
+
+function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | null {
   if (task.status !== 'open' && task.status !== 'in_progress') return null;
-  const required = requiredEvidenceCount(task, templates);
+  const required = requiredEvidenceFor(task);
+  if (required === null) {
+    return (
+      <p className="panel-error" role="alert">
+        Evidence requirement unavailable — submission will be checked by the server.
+      </p>
+    );
+  }
   const short = required - task.evidence.length;
   return short > 0 ? (
     <p className="panel-error" role="alert">

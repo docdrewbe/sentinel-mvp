@@ -75,6 +75,12 @@ export interface ComplianceTask {
   evidence: EvidenceRef[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * D4c: authoritative evidence count required before submission, computed
+   * server-side per response. Never persisted; absent from stored records and
+   * from older servers.
+   */
+  requiredEvidence?: number;
 }
 
 export interface AuditEvent {

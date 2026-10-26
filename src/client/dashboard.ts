@@ -97,6 +97,16 @@ export function canAct<T>(panel: PanelState<T>, currentKey: string): boolean {
   return panel.key === currentKey && panel.status === 'loaded' && !panel.error;
 }
 
+/**
+ * D4c: authoritative evidence requirement for a task. Uses only the
+ * server-computed `task.requiredEvidence`; returns null when absent (older
+ * server) so the UI reports "unavailable" instead of guessing from a
+ * possibly unloaded templates panel.
+ */
+export function requiredEvidenceFor(task: Pick<ComplianceTask, 'requiredEvidence'>): number | null {
+  return typeof task.requiredEvidence === 'number' ? task.requiredEvidence : null;
+}
+
 /** Org ids the picker may offer for this user (all of them while loading). */
 export function pickerOrgIds(orgs: Organization[], me: DemoUser | null): string[] {
   const ids = orgs.map((o) => o.id);

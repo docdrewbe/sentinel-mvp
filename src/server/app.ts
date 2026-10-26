@@ -19,6 +19,7 @@ import {
   type DbShape
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
+import { requiredEvidenceCount } from '../shared/evidence.js';
 import type { ComplianceTask, DemoUser } from '../shared/types.js';
 import { SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
@@ -107,6 +108,13 @@ export function createApp(db: DbShape): express.Express {
     res.status(403).json({ error: `Organization not visible to role '${user.role}'.` });
   };
 
+  // D4c: attach the authoritative evidence requirement to task responses.
+  // Computed per response from live templates, never written to the store.
+  const presentTask = (task: ComplianceTask): ComplianceTask => ({
+    ...task,
+    requiredEvidence: requiredEvidenceCount(task, db.templates)
+  });
+
   app.get('/api/domains', (req: AuthRequest, res) => {
     const scope = readScope(req, res);
     if (!scope) return;
@@ -119,12 +127,14 @@ export function createApp(db: DbShape): express.Express {
     const status = String(req.query.status ?? '');
     const ownerId = String(req.query.ownerId ?? '');
     res.json(
-      db.tasks.filter(
-        (t) =>
-          scope.includes(t.orgId) &&
-          (!status || t.status === status) &&
-          (!ownerId || t.ownerId === ownerId)
-      )
+      db.tasks
+        .filter(
+          (t) =>
+            scope.includes(t.orgId) &&
+            (!status || t.status === status) &&
+            (!ownerId || t.ownerId === ownerId)
+        )
+        .map(presentTask)
     );
   });
 
@@ -158,7 +168,7 @@ export function createApp(db: DbShape): express.Express {
         });
         return created;
       });
-      res.status(201).json(task);
+      res.status(201).json(presentTask(task));
     } catch (e) {
       sendError(req, res, e);
     }
@@ -218,7 +228,7 @@ export function createApp(db: DbShape): express.Express {
         });
         return next;
       });
-      res.json(updated);
+      res.json(presentTask(updated));
     } catch (e) {
       sendError(req, res, e);
     }
@@ -393,7 +403,7 @@ export function createApp(db: DbShape): express.Express {
         });
         return created;
       });
-      res.status(201).json(task);
+      res.status(201).json(presentTask(task));
     } catch (e) {
       sendError(req, res, e);
     }

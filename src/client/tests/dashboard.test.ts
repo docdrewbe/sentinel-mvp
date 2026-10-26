@@ -7,6 +7,7 @@ import {
   initialPanels,
   panelData,
   pickerOrgIds,
+  requiredEvidenceFor,
   resolveOrgId,
   settlePanels
 } from '../dashboard.js';
@@ -231,5 +232,17 @@ describe('context-keyed panels (F3a)', () => {
       { status: 'fulfilled', value: [] });
     assert.deepEqual(panelData(staleOk.tasks, KEY_A), [{ id: 't1' }]);
     assert.equal(canAct(staleOk.tasks, KEY_A), false);
+  });
+});
+
+describe('D4c authoritative evidence requirement (unit)', () => {
+  it('uses the server count when present', () => {
+    assert.equal(requiredEvidenceFor({ requiredEvidence: 1 }), 1);
+    assert.equal(requiredEvidenceFor({ requiredEvidence: 2 }), 2);
+  });
+
+  it('returns unavailable (never a guessed 1) when absent', () => {
+    assert.equal(requiredEvidenceFor({}), null);
+    assert.equal(requiredEvidenceFor({ requiredEvidence: undefined }), null);
   });
 });

@@ -1366,3 +1366,83 @@ describe('D4b verification evidence gate (HTTP)', () => {
     assert.notEqual(dataFile, join(process.cwd(), 'data', 'sentinel.json'));
   });
 });
+
+describe('D4c authoritative requiredEvidence (HTTP)', () => {
+  interface TaskJson {
+    id: string;
+    requiredEvidence?: number;
+  }
+
+  async function requiredOf(base: string, userId: string, id: string): Promise<number | undefined> {
+    const res = await call(base, 'GET', '/api/tasks?orgId=org-cah', userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    return tasks.find((t) => t.id === id)?.requiredEvidence;
+  }
+
+  it('serves 1 for ad-hoc, template count for template tasks, 1 for empty templates', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      assert.equal(await requiredOf(base, 'u-officer', 'task-sharps-log'), 1);
+      const inst = await call(base, 'POST', '/api/templates/tpl-emergency-drill/instantiate', 'u-officer', {
+        ownerId: 'u-officer'
+      });
+      assert.equal(inst.status, 201);
+      assert.equal(inst.json.requiredEvidence, 2);
+      assert.equal(await requiredOf(base, 'u-officer', String(inst.json.id)), 2);
+      const zero = await call(base, 'POST', '/api/templates', 'u-officer', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D4c zero probe (simulated)',
+        description: '',
+        controlType: 'best_practice',
+        regulatoryRefs: [],
+        responsibleRoles: ['department_manager'],
+        recurrence: { frequency: 'once' },
+        evidenceRequired: [],
+        escalation: []
+      });
+      assert.equal(zero.status, 201);
+      const zeroInst = await call(
+        base,
+        'POST',
+        `/api/templates/${String(zero.json.id)}/instantiate`,
+        'u-nurse-mgr',
+        { ownerId: 'u-nurse-mgr' }
+      );
+      assert.equal(zeroInst.status, 201);
+      assert.equal(zeroInst.json.requiredEvidence, 1);
+      assert.equal(await requiredOf(base, 'u-nurse-mgr', String(zeroInst.json.id)), 1);
+      // Computed per response, never persisted.
+      for (const t of db.tasks) {
+        assert.equal('requiredEvidence' in t, false);
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('includes the count in POST and PATCH task responses', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D4c probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(created.status, 201);
+      assert.equal(created.json.requiredEvidence, 1);
+      const patched = await call(base, 'PATCH', `/api/tasks/${String(created.json.id)}`, 'u-nurse-mgr', {
+        title: 'D4c probe (renamed)'
+      });
+      assert.equal(patched.status, 200);
+      assert.equal(patched.json.requiredEvidence, 1);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
