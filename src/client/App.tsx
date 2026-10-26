@@ -3,7 +3,7 @@ import { api, type NewTask } from './api.js';
 import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds } from '../shared/rbac.js';
 import { nextDueDate } from '../shared/scheduling.js';
-import { applySettled, beginContext, canAct, initialPanels, panelData, requiredEvidenceFor, resolveOrgId, type Panels } from './dashboard.js';
+import { applySettled, beginContext, canAct, initialPanels, panelData, requiredEvidenceFor, resolveOrgId, submitBlockReason, type Panels } from './dashboard.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -518,15 +518,6 @@ function Stat({ label, value, tone }: { label: string; value: number | string; t
   );
 }
 
-/** D4c: Submit stays enabled when the requirement is unknown; the server decides. */
-function submitBlockReason(task: ComplianceTask): string | null {
-  const required = requiredEvidenceFor(task);
-  if (required === null) return null;
-  return required - task.evidence.length > 0
-    ? `Requires ${required} evidence items (has ${task.evidence.length})`
-    : null;
-}
-
 function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | null {
   if (task.status !== 'open' && task.status !== 'in_progress') return null;
   const required = requiredEvidenceFor(task);
@@ -550,15 +541,17 @@ function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | 
 }
 
 function StatusButtons({ me, task, submitBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; submitBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
-  const btn = (label: string, status: TaskStatus, allowed: boolean, need: string): JSX.Element => (
-    <button key={status} disabled={!allowed} title={allowed ? '' : `Requires: ${need}`} onClick={() => onChange(status)}>
+  // D4d: an explicit title wins over the generic "Requires: ..." prefix, so
+  // the evidence block reason is never doubled up.
+  const btn = (label: string, status: TaskStatus, allowed: boolean, need: string, title?: string): JSX.Element => (
+    <button key={status} disabled={!allowed} title={allowed ? '' : (title ?? `Requires: ${need}`)} onClick={() => onChange(status)}>
       {label}
     </button>
   );
   return (
     <div className="status-btns">
       {btn('Start', 'in_progress', can(me, 'task.update', task), 'owner / manager / officer / admin')}
-      {btn('Submit', 'submitted', can(me, 'task.submit', task) && submitBlockReason === null, submitBlockReason ?? 'owner / manager / officer / admin')}
+      {btn('Submit', 'submitted', can(me, 'task.submit', task) && submitBlockReason === null, 'owner / manager / officer / admin', submitBlockReason ?? undefined)}
       {btn('Verify', 'verified', can(me, 'task.verify', task), 'compliance officer / admin')}
       {btn('Reopen', 'open', can(me, 'task.update', task), 'owner / manager / officer / admin')}
     </div>

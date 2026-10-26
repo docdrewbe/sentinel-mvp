@@ -107,6 +107,23 @@ export function requiredEvidenceFor(task: Pick<ComplianceTask, 'requiredEvidence
   return typeof task.requiredEvidence === 'number' ? task.requiredEvidence : null;
 }
 
+/**
+ * D4d: Submit block reason with correct singular/plural, e.g.
+ * "Add 1 more evidence item (1 required, 0 attached)". Null when the
+ * requirement is met or unknown (server decides); never carries a
+ * "Requires: " prefix — callers must not add one.
+ */
+export function submitBlockReason(
+  task: Pick<ComplianceTask, 'requiredEvidence'> & { evidence: readonly unknown[] }
+): string | null {
+  const required = requiredEvidenceFor(task);
+  if (required === null) return null;
+  const short = required - task.evidence.length;
+  if (short <= 0) return null;
+  const item = short === 1 ? 'item' : 'items';
+  return `Add ${short} more evidence ${item} (${required} required, ${task.evidence.length} attached)`;
+}
+
 /** Org ids the picker may offer for this user (all of them while loading). */
 export function pickerOrgIds(orgs: Organization[], me: DemoUser | null): string[] {
   const ids = orgs.map((o) => o.id);

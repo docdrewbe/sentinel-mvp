@@ -9,7 +9,8 @@ import {
   pickerOrgIds,
   requiredEvidenceFor,
   resolveOrgId,
-  settlePanels
+  settlePanels,
+  submitBlockReason
 } from '../dashboard.js';
 import type { ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
@@ -244,5 +245,28 @@ describe('D4c authoritative evidence requirement (unit)', () => {
   it('returns unavailable (never a guessed 1) when absent', () => {
     assert.equal(requiredEvidenceFor({}), null);
     assert.equal(requiredEvidenceFor({ requiredEvidence: undefined }), null);
+  });
+});
+
+describe('D4d submit tooltip (unit)', () => {
+  it('uses singular wording for a shortfall of one', () => {
+    assert.equal(
+      submitBlockReason({ evidence: [], requiredEvidence: 1 }),
+      'Add 1 more evidence item (1 required, 0 attached)'
+    );
+  });
+
+  it('uses plural wording for larger shortfalls', () => {
+    assert.equal(
+      submitBlockReason({ evidence: [], requiredEvidence: 2 }),
+      'Add 2 more evidence items (2 required, 0 attached)'
+    );
+  });
+
+  it('never doubles the Requires prefix and clears when satisfied', () => {
+    const reason = submitBlockReason({ evidence: [], requiredEvidence: 2 });
+    assert.ok(reason && !reason.includes('Requires'));
+    assert.equal(submitBlockReason({ evidence: [{}, {}], requiredEvidence: 2 }), null);
+    assert.equal(submitBlockReason({ evidence: [] }), null);
   });
 });
