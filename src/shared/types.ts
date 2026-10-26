@@ -53,6 +53,8 @@ export interface ComplianceTask {
   id: string;
   orgId: string;
   domainId: string;
+  /** Source template, when this task was instantiated from one. */
+  templateId?: string;
   title: string;
   ownerId: string;
   /** ISO calendar date (YYYY-MM-DD). */
@@ -94,4 +96,63 @@ export const KIND_LABELS: Record<OrgKind, string> = {
   hospital: 'Hospital',
   clinic: 'Clinic',
   cannabis_microbusiness: 'Cannabis Microbusiness'
+};
+
+/** Legally required controls vs voluntary organizational best practices. */
+export type ControlType = 'legally_required' | 'best_practice';
+
+export interface RegulatorySourceRef {
+  /** Regulatory source, e.g. '45 CFR Part 164'. */
+  source: string;
+  /** Citation or description (illustrative references in this demo). */
+  citation: string;
+  url?: string;
+}
+
+export type RecurrenceFrequency = 'once' | 'weekly' | 'monthly' | 'quarterly' | 'annually';
+
+export interface Recurrence {
+  frequency: RecurrenceFrequency;
+}
+
+export interface EvidenceRequirement {
+  label: string;
+  required: boolean;
+}
+
+export interface EscalationRule {
+  /** Days past the due date before this rule fires. */
+  afterDaysOverdue: number;
+  escalateTo: Role;
+  note?: string;
+}
+
+export interface TaskTemplate {
+  id: string;
+  orgId: string;
+  domainId: string;
+  title: string;
+  description: string;
+  controlType: ControlType;
+  regulatoryRefs: RegulatorySourceRef[];
+  responsibleRoles: Role[];
+  recurrence: Recurrence;
+  evidenceRequired: EvidenceRequirement[];
+  escalation: EscalationRule[];
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const CONTROL_LABELS: Record<ControlType, string> = {
+  legally_required: 'Legally required',
+  best_practice: 'Best practice (voluntary)'
+};
+
+export const RECURRENCE_LABELS: Record<RecurrenceFrequency, string> = {
+  once: 'Once',
+  weekly: 'Weekly',
+  monthly: 'Monthly',
+  quarterly: 'Quarterly',
+  annually: 'Annually'
 };

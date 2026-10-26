@@ -2,7 +2,18 @@
 // Due dates are generated relative to "today" so the demo always shows a
 // mix of upcoming, due-soon, and overdue tasks.
 import { buildAuditEvent, emptyDb, type DbShape } from './store.js';
-import type { ComplianceTask, EvidenceRef, TaskStatus } from '../shared/types.js';
+import type {
+  ComplianceTask,
+  ControlType,
+  EscalationRule,
+  EvidenceRef,
+  EvidenceRequirement,
+  RecurrenceFrequency,
+  RegulatorySourceRef,
+  Role,
+  TaskStatus,
+  TaskTemplate
+} from '../shared/types.js';
 
 const dueInDays = (n: number): string => {
   const d = new Date();
@@ -21,6 +32,19 @@ interface SeedTask {
   dueIn: number;
   status: TaskStatus;
   evidence?: Array<{ label: string; holder: string }>;
+}
+
+interface SeedTemplate {
+  key: string;
+  domainId: string;
+  title: string;
+  description: string;
+  controlType: ControlType;
+  regulatoryRefs: RegulatorySourceRef[];
+  responsibleRoles: Role[];
+  frequency: RecurrenceFrequency;
+  evidenceRequired: EvidenceRequirement[];
+  escalation: EscalationRule[];
 }
 
 const SEED_TASKS: SeedTask[] = [
@@ -205,6 +229,125 @@ export function seedDatabase(): DbShape {
     };
   });
 
+  // Compliance task templates for the 25-bed critical access hospital.
+  // Regulatory citations below are illustrative demo references, not legal advice.
+  const SEED_TEMPLATES: SeedTemplate[] = [
+    {
+      key: 'tpl-hipaa-training',
+      domainId: 'dom-hipaa-h',
+      title: 'HIPAA workforce training review',
+      description: 'Confirm annual privacy and security training completion (simulated).',
+      controlType: 'legally_required',
+      regulatoryRefs: [
+        { source: '45 CFR Part 164', citation: 'Workforce training (illustrative reference)' }
+      ],
+      responsibleRoles: ['compliance_officer', 'department_manager'],
+      frequency: 'annually',
+      evidenceRequired: [{ label: 'Training completion roster (simulated)', required: true }],
+      escalation: [
+        { afterDaysOverdue: 7, escalateTo: 'compliance_officer' },
+        { afterDaysOverdue: 14, escalateTo: 'administrator' }
+      ]
+    },
+    {
+      key: 'tpl-emergency-drill',
+      domainId: 'dom-cms',
+      title: 'Emergency preparedness drill and review',
+      description: 'Run the annual preparedness exercise and record the review (simulated).',
+      controlType: 'legally_required',
+      regulatoryRefs: [
+        { source: '42 CFR Part 485', citation: 'Emergency preparedness CoP (illustrative reference)' }
+      ],
+      responsibleRoles: ['department_manager', 'compliance_officer'],
+      frequency: 'annually',
+      evidenceRequired: [
+        { label: 'Drill log (simulated)', required: true },
+        { label: 'After-action note (simulated)', required: false }
+      ],
+      escalation: [
+        { afterDaysOverdue: 7, escalateTo: 'compliance_officer' },
+        { afterDaysOverdue: 21, escalateTo: 'administrator' }
+      ]
+    },
+    {
+      key: 'tpl-sharps-review',
+      domainId: 'dom-osha-h',
+      title: 'Sharps injury log quarterly review',
+      description: 'Review the sharps injury log and confirm follow-ups (simulated).',
+      controlType: 'legally_required',
+      regulatoryRefs: [
+        { source: '29 CFR 1910.1030', citation: 'Bloodborne pathogens recordkeeping (illustrative reference)' }
+      ],
+      responsibleRoles: ['department_manager'],
+      frequency: 'quarterly',
+      evidenceRequired: [{ label: 'Log review sign-off (simulated)', required: true }],
+      escalation: [{ afterDaysOverdue: 7, escalateTo: 'compliance_officer' }]
+    },
+    {
+      key: 'tpl-access-review',
+      domainId: 'dom-hipaa-h',
+      title: 'Separated-workforce access review',
+      description: 'Confirm accounts of separated staff are disabled (simulated).',
+      controlType: 'legally_required',
+      regulatoryRefs: [
+        { source: '45 CFR Part 164', citation: 'Workforce clearance procedures (illustrative reference)' }
+      ],
+      responsibleRoles: ['compliance_officer'],
+      frequency: 'monthly',
+      evidenceRequired: [{ label: 'Deprovisioning checklist (simulated)', required: true }],
+      escalation: [
+        { afterDaysOverdue: 3, escalateTo: 'compliance_officer' },
+        { afterDaysOverdue: 10, escalateTo: 'administrator' }
+      ]
+    },
+    {
+      key: 'tpl-med-storage',
+      domainId: 'dom-tjc',
+      title: 'Medication storage temperature audit',
+      description: 'Voluntary monthly audit supporting accreditation readiness (simulated).',
+      controlType: 'best_practice',
+      regulatoryRefs: [
+        { source: 'Internal quality program', citation: 'Voluntary readiness audit — not a legal mandate' }
+      ],
+      responsibleRoles: ['department_manager'],
+      frequency: 'monthly',
+      evidenceRequired: [{ label: 'Temperature log export (simulated)', required: true }],
+      escalation: [{ afterDaysOverdue: 7, escalateTo: 'compliance_officer' }]
+    },
+    {
+      key: 'tpl-signage',
+      domainId: 'dom-cms',
+      title: 'Patient rights signage check',
+      description: 'Confirm patient rights notices are posted in all units (simulated).',
+      controlType: 'legally_required',
+      regulatoryRefs: [
+        { source: '42 CFR Part 485', citation: 'Patient rights CoP (illustrative reference)' }
+      ],
+      responsibleRoles: ['department_manager', 'staff'],
+      frequency: 'quarterly',
+      evidenceRequired: [{ label: 'Unit checklist (simulated)', required: true }],
+      escalation: [{ afterDaysOverdue: 7, escalateTo: 'compliance_officer' }]
+    }
+  ];
+  db.templates = SEED_TEMPLATES.map(
+    (s): TaskTemplate => ({
+      id: s.key,
+      orgId: 'org-cah',
+      domainId: s.domainId,
+      title: s.title,
+      description: s.description,
+      controlType: s.controlType,
+      regulatoryRefs: s.regulatoryRefs,
+      responsibleRoles: s.responsibleRoles,
+      recurrence: { frequency: s.frequency },
+      evidenceRequired: s.evidenceRequired,
+      escalation: s.escalation,
+      active: true,
+      createdAt: t,
+      updatedAt: t
+    })
+  );
+
   db.audit = [];
   const push = (input: { actorId: string; action: string; recordType: string; recordId: string; detail: string }) => {
     db.audit.push(buildAuditEvent(db.audit, input));
@@ -223,6 +366,15 @@ export function seedDatabase(): DbShape {
       recordType: 'task',
       recordId: task.id,
       detail: `Seeded: ${task.title}`
+    });
+  }
+  for (const template of db.templates) {
+    push({
+      actorId: 'u-officer',
+      action: 'template.created',
+      recordType: 'template',
+      recordId: template.id,
+      detail: `Seeded: ${template.title} [${template.controlType}]`
     });
   }
   return db;

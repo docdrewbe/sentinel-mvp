@@ -1,4 +1,4 @@
-import type { AuditEvent, ComplianceTask, DemoUser, Organization, RegulatoryDomain } from '../shared/types.js';
+import type { AuditEvent, ComplianceTask, DemoUser, Organization, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -40,5 +40,8 @@ export const api = {
     req(`/api/tasks/${id}/evidence`, { method: 'POST', body: JSON.stringify(e) }),
   transfer: (id: string, t: { evidenceId: string; toHolder: string }) =>
     req(`/api/tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify(t) }),
-  audit: (limit = 100) => req<AuditEvent[]>(`/api/audit?limit=${limit}`)
+  audit: (limit = 100) => req<AuditEvent[]>(`/api/audit?limit=${limit}`),
+  templates: (orgId: string) => req<TaskTemplate[]>(`/api/templates?orgId=${orgId}`),
+  instantiate: (id: string, body: { ownerId: string; dueDate?: string }) =>
+    req<ComplianceTask>(`/api/templates/${id}/instantiate`, { method: 'POST', body: JSON.stringify(body) })
 };

@@ -8,7 +8,8 @@ export type Action =
   | 'task.submit'
   | 'task.verify'
   | 'evidence.add'
-  | 'custody.transfer';
+  | 'custody.transfer'
+  | 'template.manage';
 
 export function can(user: DemoUser, action: Action, task?: ComplianceTask): boolean {
   if (user.role === 'administrator') return true;
@@ -17,8 +18,8 @@ export function can(user: DemoUser, action: Action, task?: ComplianceTask): bool
   // Managers and staff are scoped to their own organization.
   if (task && task.orgId !== user.orgId) return false;
   if (user.role === 'department_manager') {
-    // Managers can do everything except final verification.
-    return action !== 'task.verify';
+    // Managers can do everything except final verification and template design.
+    return action !== 'task.verify' && action !== 'template.manage';
   }
   if (user.role === 'staff') {
     // Staff may only work on tasks they own, and may never verify.

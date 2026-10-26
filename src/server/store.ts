@@ -8,12 +8,20 @@ import { dirname, join } from 'node:path';
 import type {
   AuditEvent,
   ComplianceTask,
+  ControlType,
   DemoUser,
+  EscalationRule,
   EvidenceRef,
+  EvidenceRequirement,
   Organization,
+  RecurrenceFrequency,
   RegulatoryDomain,
-  TaskStatus
+  RegulatorySourceRef,
+  Role,
+  TaskStatus,
+  TaskTemplate
 } from '../shared/types.js';
+import { nextDueDate } from '../shared/scheduling.js';
 
 export interface DbShape {
   version: 1;
@@ -21,6 +29,7 @@ export interface DbShape {
   domains: RegulatoryDomain[];
   users: DemoUser[];
   tasks: ComplianceTask[];
+  templates: TaskTemplate[];
   audit: AuditEvent[];
 }
 
@@ -31,13 +40,15 @@ export function dataFilePath(): string {
 }
 
 export function emptyDb(): DbShape {
-  return { version: 1, orgs: [], domains: [], users: [], tasks: [], audit: [] };
+  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], audit: [] };
 }
 
 export function loadDb(): DbShape {
   const file = dataFilePath();
   if (!existsSync(file)) return emptyDb();
-  return JSON.parse(readFileSync(file, 'utf8')) as DbShape;
+  // Tolerant read: databases written before templates existed gain defaults.
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<DbShape>;
+  return { ...emptyDb(), ...raw };
 }
 
 export function saveDb(db: DbShape): void {
@@ -247,4 +258,157 @@ export function transferCustody(
   task.updatedAt = ref.updatedAt;
   saveDb(db);
   return ref;
+}
+
+// ---------------------------------------------------------------------------
+// Task templates
+// ---------------------------------------------------------------------------
+
+export interface TemplateInput {
+  orgId: string;
+  domainId: string;
+  title: string;
+  description: string;
+  controlType: ControlType;
+  regulatoryRefs: RegulatorySourceRef[];
+  responsibleRoles: Role[];
+  recurrence: { frequency: RecurrenceFrequency };
+  evidenceRequired: EvidenceRequirement[];
+  escalation: EscalationRule[];
+}
+
+const ROLES: Role[] = ['administrator', 'compliance_officer', 'department_manager', 'staff'];
+const CONTROL_TYPES: ControlType[] = ['legally_required', 'best_practice'];
+const FREQUENCIES: RecurrenceFrequency[] = ['once', 'weekly', 'monthly', 'quarterly', 'annually'];
+
+function assertTemplateShape(input: TemplateInput): void {
+  if (!input.title || !input.title.trim()) throw new ValidationError('Template title is required.');
+  if (!CONTROL_TYPES.includes(input.controlType)) throw new ValidationError('Unknown control type.');
+  if (!input.responsibleRoles || input.responsibleRoles.length === 0) {
+    throw new ValidationError('At least one responsible role is required.');
+  }
+  for (const role of input.responsibleRoles) {
+    if (!ROLES.includes(role)) throw new ValidationError(`Unknown role '${role}'.`);
+  }
+  if (!input.recurrence || !FREQUENCIES.includes(input.recurrence.frequency)) {
+    throw new ValidationError('Unknown recurrence frequency.');
+  }
+  for (const ref of input.regulatoryRefs ?? []) {
+    if (!ref.source?.trim() || !ref.citation?.trim()) {
+      throw new ValidationError('Regulatory references need a source and a citation.');
+    }
+  }
+  for (const req of input.evidenceRequired ?? []) {
+    if (!req.label?.trim()) throw new ValidationError('Evidence requirements need a label.');
+  }
+  for (const rule of input.escalation ?? []) {
+    if (!Number.isInteger(rule.afterDaysOverdue) || rule.afterDaysOverdue < 0) {
+      throw new ValidationError('Escalation thresholds must be whole days >= 0.');
+    }
+    if (!ROLES.includes(rule.escalateTo)) {
+      throw new ValidationError(`Unknown escalation role '${rule.escalateTo}'.`);
+    }
+  }
+}
+
+export function createTemplate(db: DbShape, input: TemplateInput): TaskTemplate {
+  const org = db.orgs.find((o) => o.id === input.orgId);
+  if (!org) throw new ValidationError('Unknown organization.');
+  const domain = db.domains.find((d) => d.id === input.domainId && d.orgId === input.orgId);
+  if (!domain) throw new ValidationError('Unknown regulatory domain for this organization.');
+  if (!domain.active) throw new ValidationError('Regulatory domain is inactive.');
+  assertTemplateShape(input);
+  const now = new Date().toISOString();
+  const template: TaskTemplate = {
+    id: randomUUID(),
+    orgId: input.orgId,
+    domainId: input.domainId,
+    title: input.title.trim(),
+    description: (input.description ?? '').trim(),
+    controlType: input.controlType,
+    regulatoryRefs: input.regulatoryRefs ?? [],
+    responsibleRoles: [...input.responsibleRoles],
+    recurrence: { frequency: input.recurrence.frequency },
+    evidenceRequired: input.evidenceRequired ?? [],
+    escalation: input.escalation ?? [],
+    active: true,
+    createdAt: now,
+    updatedAt: now
+  };
+  db.templates.push(template);
+  saveDb(db);
+  return template;
+}
+
+export function updateTemplate(
+  db: DbShape,
+  id: string,
+  patch: Partial<
+    Pick<
+      TaskTemplate,
+      | 'title'
+      | 'description'
+      | 'controlType'
+      | 'regulatoryRefs'
+      | 'responsibleRoles'
+      | 'recurrence'
+      | 'evidenceRequired'
+      | 'escalation'
+      | 'active'
+    >
+  >
+): TaskTemplate {
+  const template = db.templates.find((t) => t.id === id);
+  if (!template) throw new ValidationError('Template not found.');
+  const merged: TemplateInput = {
+    orgId: template.orgId,
+    domainId: template.domainId,
+    title: patch.title ?? template.title,
+    description: patch.description ?? template.description,
+    controlType: patch.controlType ?? template.controlType,
+    regulatoryRefs: patch.regulatoryRefs ?? template.regulatoryRefs,
+    responsibleRoles: patch.responsibleRoles ?? template.responsibleRoles,
+    recurrence: patch.recurrence ?? template.recurrence,
+    evidenceRequired: patch.evidenceRequired ?? template.evidenceRequired,
+    escalation: patch.escalation ?? template.escalation
+  };
+  assertTemplateShape(merged);
+  Object.assign(template, {
+    title: merged.title.trim(),
+    description: merged.description.trim(),
+    controlType: merged.controlType,
+    regulatoryRefs: merged.regulatoryRefs,
+    responsibleRoles: merged.responsibleRoles,
+    recurrence: merged.recurrence,
+    evidenceRequired: merged.evidenceRequired,
+    escalation: merged.escalation,
+    active: patch.active ?? template.active,
+    updatedAt: new Date().toISOString()
+  });
+  saveDb(db);
+  return template;
+}
+
+/** Instantiate a task from an active template. Default due date honors recurrence. */
+export function instantiateTemplate(
+  db: DbShape,
+  templateId: string,
+  input: { ownerId: string; dueDate?: string }
+): ComplianceTask {
+  const template = db.templates.find((t) => t.id === templateId);
+  if (!template) throw new ValidationError('Template not found.');
+  if (!template.active) throw new ValidationError('Template is inactive.');
+  const today = new Date().toISOString().slice(0, 10);
+  const plus30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const dueDate = input.dueDate ?? nextDueDate(today, template.recurrence.frequency) ?? plus30;
+  const task = createTask(db, {
+    orgId: template.orgId,
+    domainId: template.domainId,
+    title: template.title,
+    ownerId: input.ownerId,
+    dueDate
+  });
+  task.templateId = template.id;
+  saveDb(db);
+  return task;
 }

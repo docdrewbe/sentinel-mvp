@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, type NewTask } from './api.js';
-import { KIND_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus } from '../shared/types.js';
+import { CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type ComplianceTask, type DemoUser, type Organization, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can } from '../shared/rbac.js';
+import { nextDueDate } from '../shared/scheduling.js';
 
 const todayISO = (): string => new Date().toISOString().slice(0, 10);
 const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
@@ -18,10 +19,13 @@ export default function App(): JSX.Element {
   const [domains, setDomains] = useState<RegulatoryDomain[]>([]);
   const [tasks, setTasks] = useState<ComplianceTask[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [templates, setTemplates] = useState<TaskTemplate[]>([]);
   const [orgId, setOrgId] = useState('');
   const [userId, setUserId] = useState(() => localStorage.getItem('sentinel-user') ?? '');
   const [taskId, setTaskId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [controlFilter, setControlFilter] = useState('all');
+  const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState('');
 
@@ -31,13 +35,20 @@ export default function App(): JSX.Element {
 
   const userName = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
   const domainById = useMemo(() => new Map(domains.map((d) => [d.id, d])), [domains]);
+  const templateById = useMemo(() => new Map(templates.map((x) => [x.id, x])), [templates]);
 
   const refresh = useCallback(async (oid: string) => {
     if (!oid) return;
-    const [t, d, a] = await Promise.all([api.tasks(oid), api.domains(oid), api.audit(200)]);
+    const [t, d, a, tpl] = await Promise.all([
+      api.tasks(oid),
+      api.domains(oid),
+      api.audit(200),
+      api.templates(oid)
+    ]);
     setTasks(t);
     setDomains(d);
     setAudit(a);
+    setTemplates(tpl);
   }, []);
 
   useEffect(() => {
@@ -64,6 +75,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     setTaskId(null);
+    setInstantiateFor(null);
     refresh(orgId).catch((e: Error) => setError(e.message));
   }, [orgId, refresh]);
 
@@ -231,6 +243,9 @@ export default function App(): JSX.Element {
                 <h4>{task.title}</h4>
                 <dl className="meta">
                   <div><dt>Domain</dt><dd>{domainById.get(task.domainId)?.name ?? '—'}</dd></div>
+                  {task.templateId && (
+                    <div><dt>Template</dt><dd>{templateById.get(task.templateId)?.title ?? task.templateId}</dd></div>
+                  )}
                   <div><dt>Owner</dt><dd>{userName.get(task.ownerId) ?? '—'}</dd></div>
                   <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
@@ -277,6 +292,85 @@ export default function App(): JSX.Element {
               </>
             )}
           </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h3>Compliance task templates (synthetic — illustrative references, not legal advice)</h3>
+            <div className="panel-actions">
+              <select value={controlFilter} onChange={(e) => setControlFilter(e.target.value)} aria-label="Filter by control type">
+                <option value="all">All controls</option>
+                <option value="legally_required">Legally required</option>
+                <option value="best_practice">Best practice (voluntary)</option>
+              </select>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Template</th>
+                <th>Domain</th>
+                <th>Control</th>
+                <th>Recurrence</th>
+                <th>Responsible roles</th>
+                <th>Evidence required</th>
+                <th>Escalation</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {templates
+                .filter((x) => controlFilter === 'all' || x.controlType === controlFilter)
+                .map((x) => (
+                  <tr key={x.id}>
+                    <td className="task-title">
+                      {x.title}
+                      {!x.active && <span className="status">Inactive</span>}
+                      <div className="trail-detail">{x.description}</div>
+                      <div className="trail-detail">
+                        {x.regulatoryRefs.map((r) => `${r.source} — ${r.citation}`).join(' · ') || 'No source refs'}
+                      </div>
+                    </td>
+                    <td>{domainById.get(x.domainId)?.code ?? '—'}</td>
+                    <td><span className={`status ${x.controlType === 'legally_required' ? 'status-submitted' : 'status-in_progress'}`}>{CONTROL_LABELS[x.controlType]}</span></td>
+                    <td>{RECURRENCE_LABELS[x.recurrence.frequency]}</td>
+                    <td>{x.responsibleRoles.map((r) => ROLE_LABELS[r]).join(', ')}</td>
+                    <td>{x.evidenceRequired.map((e) => e.label).join('; ') || '—'}</td>
+                    <td>
+                      {x.escalation
+                        .slice()
+                        .sort((a, b) => a.afterDaysOverdue - b.afterDaysOverdue)
+                        .map((e) => `${e.afterDaysOverdue}d → ${ROLE_LABELS[e.escalateTo]}`)
+                        .join('; ') || '—'}
+                    </td>
+                    <td>
+                      {me && can(me, 'task.create') && x.active && (
+                        <button onClick={() => setInstantiateFor(instantiateFor === x.id ? null : x.id)}>
+                          {instantiateFor === x.id ? 'Cancel' : 'New task'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              {templates.filter((x) => controlFilter === 'all' || x.controlType === controlFilter).length === 0 && (
+                <tr>
+                  <td colSpan={8} className="empty">No templates for this organization yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+          {instantiateFor && me && org && (
+            <InstantiateForm
+              template={templates.find((x) => x.id === instantiateFor) as TaskTemplate}
+              users={users.filter((u) => u.orgId === org.id)}
+              onSubmit={(ownerId, dueDate) =>
+                run(async () => {
+                  const created = await api.instantiate(instantiateFor, { ownerId, dueDate });
+                  setTaskId(created.id);
+                }).then(() => setInstantiateFor(null))
+              }
+            />
+          )}
         </section>
 
         <section className="panel">
@@ -426,6 +520,41 @@ function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evid
       </select>
       <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required />
       <button type="submit">Transfer custody</button>
+    </form>
+  );
+}
+
+function InstantiateForm({ template, users, onSubmit }: { template: TaskTemplate; users: DemoUser[]; onSubmit: (ownerId: string, dueDate: string) => void }): JSX.Element {
+  const defaultDue =
+    nextDueDate(todayISO(), template.recurrence.frequency) ??
+    new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
+  const [dueDate, setDueDate] = useState(defaultDue);
+  useEffect(() => {
+    setOwnerId(users[0]?.id ?? '');
+  }, [users]);
+  useEffect(() => {
+    setDueDate(
+      nextDueDate(todayISO(), template.recurrence.frequency) ??
+        new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+    );
+  }, [template]);
+  return (
+    <form
+      className="form inline"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit(ownerId, dueDate);
+      }}
+    >
+      <span className="task-title">New task from “{template.title}”</span>
+      <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} aria-label="Owner">
+        {users.map((u) => (
+          <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
+        ))}
+      </select>
+      <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required />
+      <button className="primary" type="submit">Create task</button>
     </form>
   );
 }

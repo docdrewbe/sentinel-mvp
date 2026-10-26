@@ -9,8 +9,11 @@ import {
   addEvidence,
   appendAudit,
   createTask,
+  createTemplate,
+  instantiateTemplate,
   transferCustody,
   updateTask,
+  updateTemplate,
   verifyAuditChain,
   type DbShape
 } from './store.js';
@@ -223,6 +226,98 @@ export function createApp(db: DbShape): express.Express {
         detail: `${ref.label}: ${before?.holder ?? '?'} -> ${ref.holder}`
       });
       res.json(ref);
+    } catch (e) {
+      sendError(res, e);
+    }
+  });
+
+  app.get('/api/templates', (req: AuthRequest, res) => {
+    const orgId = String(req.query.orgId ?? '');
+    const domainId = String(req.query.domainId ?? '');
+    const controlType = String(req.query.controlType ?? '');
+    res.json(
+      db.templates.filter(
+        (t) =>
+          (!orgId || t.orgId === orgId) &&
+          (!domainId || t.domainId === domainId) &&
+          (!controlType || t.controlType === controlType)
+      )
+    );
+  });
+
+  app.post('/api/templates', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    if (!can(user, 'template.manage')) {
+      forbidden(res, user, 'template.manage');
+      return;
+    }
+    try {
+      const template = createTemplate(db, req.body);
+      appendAudit(db, {
+        actorId: user.id,
+        action: 'template.created',
+        recordType: 'template',
+        recordId: template.id,
+        detail: `${template.title} [${template.controlType}]`
+      });
+      res.status(201).json(template);
+    } catch (e) {
+      sendError(res, e);
+    }
+  });
+
+  app.patch('/api/templates/:id', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    if (!can(user, 'template.manage')) {
+      forbidden(res, user, 'template.manage');
+      return;
+    }
+    try {
+      const template = updateTemplate(db, req.params.id, req.body);
+      appendAudit(db, {
+        actorId: user.id,
+        action: 'template.updated',
+        recordType: 'template',
+        recordId: template.id,
+        detail: template.title
+      });
+      res.json(template);
+    } catch (e) {
+      sendError(res, e);
+    }
+  });
+
+  app.post('/api/templates/:id/instantiate', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const template = db.templates.find((t) => t.id === req.params.id);
+    if (!template) {
+      res.status(404).json({ error: 'Template not found.' });
+      return;
+    }
+    if (
+      (user.role === 'department_manager' || user.role === 'staff') &&
+      template.orgId !== user.orgId
+    ) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    if (!can(user, 'task.create')) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    try {
+      const task = instantiateTemplate(db, template.id, {
+        ownerId: String(req.body.ownerId ?? ''),
+        dueDate: req.body.dueDate ? String(req.body.dueDate) : undefined
+      });
+      appendAudit(db, {
+        actorId: user.id,
+        action: 'task.created',
+        recordType: 'task',
+        recordId: task.id,
+        detail: `From template: ${template.title}`
+      });
+      res.status(201).json(task);
     } catch (e) {
       sendError(res, e);
     }

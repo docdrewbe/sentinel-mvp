@@ -44,6 +44,8 @@ Reset demo data: stop the server and delete `./data/sentinel.json`.
 - `GET /api/health|orgs|users` (public, for demo bootstrap)
 - `GET /api/tasks?orgId=`, `POST /api/tasks`, `PATCH /api/tasks/:id`
 - `POST /api/tasks/:id/evidence`, `POST /api/tasks/:id/transfer`
+- `GET /api/templates?orgId=&controlType=`, `POST /api/templates`, `PATCH /api/templates/:id`
+- `POST /api/templates/:id/instantiate` — create a task from a template
 - `GET /api/audit?recordId=&limit=` — read-only; no write routes exist
 
 Authenticated routes require an `x-demo-user-id` header (simulated).
