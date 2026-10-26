@@ -2340,3 +2340,126 @@ describe('D5c legacy submission history (HTTP)', () => {
     }
   });
 });
+
+describe('D5d verifier recording (HTTP)', () => {
+  interface TaskJson {
+    id: string;
+    status: string;
+    verifiedBy?: string;
+    verifiedAt?: string;
+  }
+
+  async function getTask(base: string, userId: string, orgId: string, id: string): Promise<TaskJson> {
+    const res = await call(base, 'GET', `/api/tasks?orgId=${orgId}`, userId);
+    assert.equal(res.status, 200);
+    const tasks = res.json as unknown as TaskJson[];
+    const found = tasks.find((t) => t.id === id);
+    assert.ok(found, `task ${id} visible`);
+    return found;
+  }
+
+  async function makeSubmitted(base: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      title: 'D5d probe',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2026-12-01'
+    });
+    assert.equal(created.status, 201);
+    const id = String(created.json.id);
+    assert.equal(
+      (
+        await call(base, 'POST', `/api/tasks/${id}/evidence`, 'u-nurse-mgr', {
+          label: 'attachment (simulated)',
+          holder: 'Case File'
+        })
+      ).status,
+      201
+    );
+    assert.equal(
+      (await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', { status: 'submitted' })).status,
+      200
+    );
+    return id;
+  }
+
+  it('records the verifier atomically with verification', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeSubmitted(base);
+      const ok = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+        status: 'verified'
+      });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.json.verifiedBy, 'u-officer');
+      assert.match(String(ok.json.verifiedAt), /^\d{4}-\d{2}-\d{2}T/);
+      const fetched = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(fetched.status, 'verified');
+      assert.equal(fetched.verifiedBy, 'u-officer');
+      assert.equal(fetched.verifiedAt, ok.json.verifiedAt);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('ignores client-supplied verifier fields on PATCH and POST', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'D5d probe',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2026-12-01',
+        verifiedBy: 'u-admin',
+        verifiedAt: '2020-01-01T00:00:00.000Z',
+        submissions: [{ seq: 1, submittedBy: 'u-admin', ownerAtSubmission: 'u-admin', at: '2020-01-01T00:00:00.000Z' }]
+      });
+      assert.equal(created.status, 201);
+      assert.equal(created.json.verifiedBy, undefined);
+      assert.equal(created.json.submissions, undefined);
+      const id = String(created.json.id);
+      const touched = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-nurse-mgr', {
+        title: 'D5d probe (renamed)',
+        verifiedBy: 'u-admin',
+        verifiedAt: '2020-01-01T00:00:00.000Z'
+      });
+      assert.equal(touched.status, 200);
+      assert.equal(touched.json.verifiedBy, undefined);
+      assert.equal((await getTask(base, 'u-nurse-mgr', 'org-cah', id)).verifiedBy, undefined);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('leaves the verifier unset when the verifying save fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeSubmitted(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/tasks/${id}`, 'u-officer', {
+          status: 'verified'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      const task = await getTask(base, 'u-officer', 'org-cah', id);
+      assert.equal(task.status, 'submitted');
+      assert.equal(task.verifiedBy, undefined);
+      assert.equal(task.verifiedAt, undefined);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

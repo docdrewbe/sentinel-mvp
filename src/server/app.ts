@@ -270,6 +270,12 @@ export function createApp(db: DbShape): express.Express {
           seen.add(next.ownerId);
           next.ownersWhileSubmitted = [...seen];
         }
+        // D5d: record the verifier atomically with the transition into
+        // `verified`, in the same closure as the status change and audit.
+        if (next.status === 'verified' && oldStatus !== 'verified') {
+          next.verifiedBy = user.id;
+          next.verifiedAt = now;
+        }
         const reassigned = next.ownerId !== ownerBefore;
         appendAudit(db, {
           actorId: user.id,

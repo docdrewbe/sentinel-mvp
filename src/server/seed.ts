@@ -34,6 +34,8 @@ interface SeedTask {
   status: TaskStatus;
   evidence?: Array<{ label: string; holder: string }>;
   submittedBy?: string;
+  submissions?: Array<{ submittedBy: string; ownerAtSubmission: string }>;
+  verifiedBy?: string;
 }
 
 interface SeedTemplate {
@@ -91,7 +93,8 @@ const SEED_TASKS: SeedTask[] = [
       { label: 'Temperature log export (simulated)', holder: 'J. Ortiz' },
       { label: 'Corrective action note (simulated)', holder: 'M. Lee' }
     ],
-    submittedBy: 'u-nurse-mgr'
+    submittedBy: 'u-nurse-mgr',
+    submissions: [{ submittedBy: 'u-nurse-mgr', ownerAtSubmission: 'u-nurse-mgr' }]
   },
   {
     key: 'task-access-review',
@@ -111,7 +114,8 @@ const SEED_TASKS: SeedTask[] = [
     dueIn: -10,
     status: 'submitted',
     evidence: [{ label: 'Unit signage checklist (simulated)', holder: 'T. Nguyen' }],
-    submittedBy: 'u-staff'
+    submittedBy: 'u-staff',
+    submissions: [{ submittedBy: 'u-staff', ownerAtSubmission: 'u-staff' }]
   },
   {
     key: 'task-baa',
@@ -122,7 +126,9 @@ const SEED_TASKS: SeedTask[] = [
     dueIn: -20,
     status: 'verified',
     evidence: [{ label: 'Signed BAA bundle (simulated)', holder: 'J. Ortiz' }],
-    submittedBy: 'u-officer'
+    submittedBy: 'u-officer',
+    submissions: [{ submittedBy: 'u-officer', ownerAtSubmission: 'u-officer' }],
+    verifiedBy: 'u-admin'
   },
   // --- Outpatient clinic (primary demo) ---
   {
@@ -153,7 +159,9 @@ const SEED_TASKS: SeedTask[] = [
     dueIn: -6,
     status: 'verified',
     evidence: [{ label: 'Reception photo log (simulated)', holder: 'R. Gomez' }],
-    submittedBy: 'u-clinic-staff'
+    submittedBy: 'u-clinic-staff',
+    submissions: [{ submittedBy: 'u-clinic-staff', ownerAtSubmission: 'u-clinic-staff' }],
+    verifiedBy: 'u-officer'
   },
   // --- Cannabis microbusiness (secondary demo: model portability) ---
   {
@@ -234,6 +242,17 @@ export function seedDatabase(): DbShape {
       status: s.status,
       evidence,
       ...(s.submittedBy ? { submittedBy: s.submittedBy } : {}),
+      ...(s.submissions
+        ? {
+            submissions: s.submissions.map((entry, i) => ({
+              seq: i + 1,
+              submittedBy: entry.submittedBy,
+              ownerAtSubmission: entry.ownerAtSubmission,
+              at: t
+            }))
+          }
+        : {}),
+      ...(s.verifiedBy ? { verifiedBy: s.verifiedBy, verifiedAt: t } : {}),
       createdAt: t,
       updatedAt: t
     };

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { seedDatabase } from '../seed.js';
 import { verifyAuditChain } from '../store.js';
 import { requiredEvidenceCount } from '../../shared/evidence.js';
+import { ineligibleVerifiers } from '../../shared/verification.js';
 
 describe('synthetic demo data', () => {
   it('seeds a 25-bed critical access hospital plus clinic and cannabis orgs', () => {
@@ -94,5 +95,41 @@ describe('synthetic demo data', () => {
       );
     }
     assert.ok(count > 0, 'expected seeded submitted/verified tasks');
+  });
+
+  it('D5d: every seeded submitted task carries submission history', () => {
+    const db = seedDatabase();
+    let count = 0;
+    for (const t of db.tasks) {
+      if (t.status !== 'submitted') continue;
+      count++;
+      assert.ok((t.submissions ?? []).length > 0, `${t.id}: missing submissions`);
+      assert.deepEqual(
+        (t.submissions ?? []).map((s) => s.seq),
+        (t.submissions ?? []).map((_, i) => i + 1)
+      );
+    }
+    assert.ok(count > 0, 'expected seeded submitted tasks');
+  });
+
+  it('D5d: every seeded verified task shows an independent, authorized verifier', () => {
+    const db = seedDatabase();
+    let count = 0;
+    for (const t of db.tasks) {
+      if (t.status !== 'verified') continue;
+      count++;
+      assert.ok(t.verifiedBy, `${t.id}: missing verifiedBy`);
+      assert.ok(t.verifiedAt, `${t.id}: missing verifiedAt`);
+      const verifier = db.users.find((u) => u.id === t.verifiedBy);
+      assert.ok(
+        verifier && (verifier.role === 'administrator' || verifier.role === 'compliance_officer'),
+        `${t.id}: verifier lacks task.verify authority`
+      );
+      assert.ok(
+        !ineligibleVerifiers(t).includes(t.verifiedBy as string),
+        `${t.id}: verifier is in the ineligible set`
+      );
+    }
+    assert.ok(count > 0, 'expected seeded verified tasks');
   });
 });

@@ -97,6 +97,12 @@ export interface ComplianceTask {
    * (reassignments of submitted tasks add both sides). Server-maintained.
    */
   ownersWhileSubmitted?: string[];
+  /**
+   * D5d: who verified the task and when, recorded atomically with the
+   * transition into `verified`. Server-maintained; never from clients.
+   */
+  verifiedBy?: string;
+  verifiedAt?: string;
 }
 
 /** D5a: one recorded submission: who submitted whose work, and when. */

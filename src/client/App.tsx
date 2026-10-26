@@ -296,6 +296,12 @@ export default function App(): JSX.Element {
                   {task.submittedBy && (
                     <div><dt>Submitted by</dt><dd>{userName.get(task.submittedBy) ?? task.submittedBy}</dd></div>
                   )}
+                  {task.submissions && task.submissions.length > 0 && (
+                    <div><dt>Submissions</dt><dd>{task.submissions.length} submission{task.submissions.length === 1 ? '' : 's'}</dd></div>
+                  )}
+                  {task.verifiedBy && (
+                    <div><dt>Verified by</dt><dd>{userName.get(task.verifiedBy) ?? task.verifiedBy}{task.verifiedAt ? ` · ${new Date(task.verifiedAt).toLocaleString()}` : ''}</dd></div>
+                  )}
                   <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
                 </dl>
