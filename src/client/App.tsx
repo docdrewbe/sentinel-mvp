@@ -4,13 +4,14 @@ import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, 
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, isOverdueWork, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
 // isOverdue flags any past-target date (including submitted awaiting
-// verification) for red styling and due-soon exclusion. The Overdue KPI and
-// filters use isOverdueWork (open/in-progress only) so counts match rows.
+// verification) for red styling and due-soon exclusion; the local dueSoon
+// feeds only the inline badge. The KPI cards and filters use isOverdueWork
+// and isDueSoonWork (open/in-progress only) so counts match rows.
 const isOverdue = (t: ComplianceTask, today: string): boolean => t.status !== 'verified' && t.dueDate < today;
 const dueSoon = (t: ComplianceTask, today: string): boolean => {
   if (t.status === 'verified' || isOverdue(t, today)) return false;
@@ -167,14 +168,14 @@ export default function App(): JSX.Element {
   const filtered = tasks.filter((t) => {
     if (statusFilter === 'all') return true;
     if (statusFilter === 'overdue') return isOverdueWork(t, today);
-    if (statusFilter === 'dueSoon') return dueSoon(t, today);
+    if (statusFilter === 'dueSoon') return isDueSoonWork(t, today);
     return t.status === statusFilter;
   });
 
   const stats = {
     open: tasks.filter((t) => t.status === 'open').length,
     inProgress: tasks.filter((t) => t.status === 'in_progress').length,
-    dueSoon: tasks.filter((t) => dueSoon(t, today)).length,
+    dueSoon: tasks.filter((t) => isDueSoonWork(t, today)).length,
     overdue: tasks.filter((t) => isOverdueWork(t, today)).length,
     verified: tasks.filter((t) => t.status === 'verified').length
   };
@@ -508,6 +509,7 @@ export default function App(): JSX.Element {
                     {can(me, 'evidence.add', task) && (
                       <EvidenceForm
                         onAdd={(label, holder) => run(async () => api.addEvidence(task.id, { label, holder }))}
+                        lockedTitle={evidenceLockedReason(task) ?? undefined}
                       />
                     )}
                     {can(me, 'custody.transfer', task) && task.evidence.length > 0 && (
@@ -516,6 +518,7 @@ export default function App(): JSX.Element {
                         onTransfer={(evidenceId, toHolder, reason) =>
                           run(async () => api.transfer(task.id, { evidenceId, toHolder, reason }))
                         }
+                        lockedTitle={evidenceLockedReason(task) ?? undefined}
                       />
                     )}
                   </>
@@ -1204,10 +1207,13 @@ function NewTaskForm({ orgId, timeZone, domains, users, onSubmit }: { orgId: str
   );
 }
 
-function EvidenceForm({ onAdd, kinds }: { onAdd: (label: string, holder: string, kind?: string) => void; kinds?: Array<{ value: string; label: string }> }): JSX.Element {
+function EvidenceForm({ onAdd, kinds, lockedTitle }: { onAdd: (label: string, holder: string, kind?: string) => void; kinds?: Array<{ value: string; label: string }>; lockedTitle?: string }): JSX.Element {
   const [label, setLabel] = useState('');
   const [holder, setHolder] = useState('');
   const [kind, setKind] = useState(kinds?.[0]?.value ?? '');
+  // M-UI1: a locked form renders every control disabled with the explanation,
+  // mirroring CapaFieldEditor. Callers keep their own role gates.
+  const locked = lockedTitle !== undefined;
   return (
     <form
       className="form inline"
@@ -1218,27 +1224,29 @@ function EvidenceForm({ onAdd, kinds }: { onAdd: (label: string, holder: string,
         setHolder('');
       }}
     >
-      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" required />
-      <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" required />
+      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" required disabled={locked} title={lockedTitle} />
+      <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" required disabled={locked} title={lockedTitle} />
       {kinds && (
-        <select aria-label="Evidence kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+        <select aria-label="Evidence kind" value={kind} onChange={(e) => setKind(e.target.value)} disabled={locked} title={lockedTitle}>
           {kinds.map((k) => (
             <option key={k.value} value={k.value}>{k.label}</option>
           ))}
         </select>
       )}
-      <button type="submit">Add evidence</button>
+      <button type="submit" disabled={locked} title={lockedTitle}>Add evidence</button>
     </form>
   );
 }
 
-function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evidence']; onTransfer: (id: string, holder: string, reason?: string) => void }): JSX.Element {
+function TransferForm({ evidence, onTransfer, lockedTitle }: { evidence: ComplianceTask['evidence']; onTransfer: (id: string, holder: string, reason?: string) => void; lockedTitle?: string }): JSX.Element {
   const [evidenceId, setEvidenceId] = useState(evidence[0]?.id ?? '');
   const [toHolder, setToHolder] = useState('');
   const [reason, setReason] = useState('');
   useEffect(() => {
     setEvidenceId(evidence[0]?.id ?? '');
   }, [evidence]);
+  // M-UI1: locked forms disable every control with the explanation (see EvidenceForm).
+  const locked = lockedTitle !== undefined;
   return (
     <form
       className="form inline"
@@ -1249,14 +1257,14 @@ function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evid
         setReason('');
       }}
     >
-      <select value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item">
+      <select value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item" disabled={locked} title={lockedTitle}>
         {evidence.map((x) => (
           <option key={x.id} value={x.id}>{x.label} (now: {x.holder})</option>
         ))}
       </select>
-      <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required />
-      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" />
-      <button type="submit">Transfer custody</button>
+      <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required disabled={locked} title={lockedTitle} />
+      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" disabled={locked} title={lockedTitle} />
+      <button type="submit" disabled={locked} title={lockedTitle}>Transfer custody</button>
     </form>
   );
 }

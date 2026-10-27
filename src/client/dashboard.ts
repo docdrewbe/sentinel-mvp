@@ -185,6 +185,16 @@ export function reopenBlockReason(task: Pick<ComplianceTask, 'status'>): string 
   }
 }
 
+/**
+ * M-UI1: evidence-action lock reason for the task detail panel. Verified
+ * records accept no new evidence or custody transfers (the server refuses
+ * both); the dashboard disables those forms with this exact message.
+ * Mirrors the other status-gate reasons; the server still decides.
+ */
+export function evidenceLockedReason(task: Pick<ComplianceTask, 'status'>): string | null {
+  return task.status === 'verified' ? 'Verified records are locked.' : null;
+}
+
 /** Evidence shortfall for verification, mirroring the D4b server gate. Only submitted tasks are verifiable; unknown requirements defer to the server. */
 export function verifyEvidenceReason(
   task: Pick<ComplianceTask, 'requiredEvidence' | 'status'> & { evidence: readonly unknown[] }
@@ -341,6 +351,22 @@ export function isOverdueWork(
   todayISODate: string
 ): boolean {
   return calendarBucket(task, todayISODate) === 'overdue';
+}
+
+/**
+ * M-CAL15: actionable due-soon work as of an org-local `today` (YYYY-MM-DD).
+ * Single source for the "Due within 7 days" KPI card and every due-soon
+ * filter, so the count always matches the listed rows. Only open and
+ * in-progress tasks due within the existing civil window (today through
+ * today+7, inclusive) count; submitted, verified, past-due, and later work
+ * are excluded. The calendar inline "Due soon" badge still uses the local
+ * App.tsx helper so submitted work due soon keeps its badge.
+ */
+export function isDueSoonWork(
+  task: Pick<ComplianceTask, 'dueDate' | 'status'>,
+  todayISODate: string
+): boolean {
+  return calendarBucket(task, todayISODate) === 'dueSoon';
 }
 
 /** Task action label: returning a submitted task to in-progress reads as a send-back. */

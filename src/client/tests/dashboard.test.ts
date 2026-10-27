@@ -8,6 +8,8 @@ import {
   capaAdvanceBlockReason,
   capaReviewBlockReason,
   initialPanels,
+  evidenceLockedReason,
+  isDueSoonWork,
   isOverdueWork,
   newObligationBlockReason,
   overdueBadgeLabel,
@@ -706,5 +708,38 @@ describe('overdue KPI consistency (M-CAL12)', () => {
     assert.equal(overdueBadgeLabel(submittedPast, today), 'Awaiting verification — past target');
     assert.equal(overdueBadgeLabel(openPast, today), 'Overdue');
     assert.equal(overdueBadgeLabel(verifiedPast, today), null);
+  });
+});
+
+describe('due-soon KPI consistency (M-CAL15)', () => {
+  it('counts open and in-progress within the 7-day window only', () => {
+    const today = '2026-11-10';
+    const openToday = { dueDate: '2026-11-10', status: 'open' as const };
+    const inProgressEdge = { dueDate: '2026-11-17', status: 'in_progress' as const };
+    const openBeyond = { dueDate: '2026-11-18', status: 'open' as const };
+    const openPast = { dueDate: '2026-11-09', status: 'open' as const };
+    const submittedSoon = { dueDate: '2026-11-12', status: 'submitted' as const };
+    const verifiedSoon = { dueDate: '2026-11-12', status: 'verified' as const };
+    assert.equal(isDueSoonWork(openToday, today), true);
+    assert.equal(isDueSoonWork(inProgressEdge, today), true);
+    assert.equal(isDueSoonWork(openBeyond, today), false);
+    assert.equal(isDueSoonWork(openPast, today), false);
+    assert.equal(isDueSoonWork(submittedSoon, today), false);
+    assert.equal(isDueSoonWork(verifiedSoon, today), false);
+    // The KPI count uses the same bucket as the due-soon filters, so they match.
+    const rows = [openToday, inProgressEdge, openBeyond, openPast, submittedSoon, verifiedSoon];
+    const kpi = rows.filter((t) => isDueSoonWork(t, today)).length;
+    const filter = rows.filter((t) => calendarBucket(t, today) === 'dueSoon').length;
+    assert.equal(kpi, 2);
+    assert.equal(filter, kpi);
+  });
+});
+
+describe('verified-record evidence lock hint (M-UI1)', () => {
+  it('reports the lock for verified tasks only', () => {
+    assert.equal(evidenceLockedReason({ status: 'verified' }), 'Verified records are locked.');
+    assert.equal(evidenceLockedReason({ status: 'open' }), null);
+    assert.equal(evidenceLockedReason({ status: 'in_progress' }), null);
+    assert.equal(evidenceLockedReason({ status: 'submitted' }), null);
   });
 });
