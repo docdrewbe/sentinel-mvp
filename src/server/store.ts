@@ -1040,7 +1040,7 @@ export function generateObligationInstance(
     throw new ValidationError('Obligation target date is not a real calendar date.');
   }
   if (periodTaken(db, obligation, template.recurrence.frequency, periodKey)) {
-    throw new ValidationError('An instance for this obligation and due period already exists.');
+    throw new ValidationError(`An instance for ${periodKey} already exists.`);
   }
   const caller = db.users.find((u) => u.id === byUserId);
   const ownerId =
@@ -1049,7 +1049,7 @@ export function generateObligationInstance(
   const task = createTask(db, {
     orgId: obligation.orgId,
     domainId: template.domainId,
-    title: template.title,
+    title: `${template.title} — ${periodKey}`,
     ownerId,
     dueDate
   });

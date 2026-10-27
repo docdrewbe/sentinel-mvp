@@ -4,7 +4,7 @@ import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, 
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -294,7 +294,7 @@ export default function App(): JSX.Element {
                   <td>{userName.get(t.ownerId) ?? '—'}</td>
                   <td>
                     <span className={`status status-${t.status}`}>{STATUS_LABELS[t.status]}</span>
-                    {isOverdue(t, today) && <span className="status status-overdue">Overdue</span>}
+                    {overdueBadgeLabel(t, today) && <span className="status status-overdue">{overdueBadgeLabel(t, today)}</span>}
                     {!isOverdue(t, today) && dueSoon(t, today) && <span className="status status-submitted">Due soon</span>}
                   </td>
                 </tr>
@@ -310,7 +310,12 @@ export default function App(): JSX.Element {
             <h3>Recurring obligations (synthetic schedules — illustrative)</h3>
             <div className="panel-actions">
               {me && can(me, 'task.create') && (
-                <button className="primary" onClick={() => setShowNewObligation((s) => !s)} disabled={!obligationsReady || !templatesReady}>
+                <button
+                  className="primary"
+                  onClick={() => setShowNewObligation((s) => !s)}
+                  disabled={!obligationsReady || !templatesReady || newObligationBlockReason(templates) !== null}
+                  title={templatesReady && obligationsReady ? (newObligationBlockReason(templates) ?? '') : ''}
+                >
                   {showNewObligation ? 'Close' : 'New obligation'}
                 </button>
               )}
@@ -419,7 +424,7 @@ export default function App(): JSX.Element {
                     <td className={isOverdue(t, today) ? 'overdue' : ''}>{t.dueDate}</td>
                     <td>
                       <span className={`status status-${t.status}`}>{STATUS_LABELS[t.status]}</span>
-                      {isOverdue(t, today) && <span className="status status-overdue">Overdue</span>}
+                      {overdueBadgeLabel(t, today) && <span className="status status-overdue">{overdueBadgeLabel(t, today)}</span>}
                     </td>
                   </tr>
                 ))}

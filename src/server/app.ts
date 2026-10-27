@@ -1109,22 +1109,30 @@ export function createApp(db: DbShape): express.Express {
       res.status(400).json({ error: 'active must be true or false.' });
       return;
     }
-    const touchesSchedule =
-      patch.nextDueDate !== undefined || patch.assigneeId !== undefined || patch.active !== undefined;
-    const reason = (patch.reason ?? '').trim();
-    if (touchesSchedule && !reason) {
-      res.status(400).json({ error: 'A reason is required to change the schedule.' });
-      return;
-    }
     const oldTarget = obligation.nextDueDate;
     const oldAssignee = obligation.assigneeId ?? '';
     const oldActive = obligation.active;
+    const targetChanged = patch.nextDueDate !== undefined && patch.nextDueDate !== oldTarget;
+    const assigneeChanged = patch.assigneeId !== undefined && patch.assigneeId !== oldAssignee;
+    const activeChanged = patch.active !== undefined && patch.active !== oldActive;
+    // M-CAL2: true no-op — reason-only, forged-only, or unchanged values change
+    // nothing, so return without a write, audit event, or updatedAt bump.
+    // Authorization and type checks above still apply.
+    if (!targetChanged && !assigneeChanged && !activeChanged) {
+      res.json(obligation);
+      return;
+    }
+    const reason = (patch.reason ?? '').trim();
+    if (!reason) {
+      res.status(400).json({ error: 'A reason is required to change the schedule.' });
+      return;
+    }
     try {
       const updated = mutateDb(db, () => {
         const next = updateObligation(db, obligation.id, {
-          ...(patch.nextDueDate !== undefined ? { nextDueDate: patch.nextDueDate } : {}),
-          ...(patch.assigneeId !== undefined ? { assigneeId: patch.assigneeId } : {}),
-          ...(patch.active !== undefined ? { active: patch.active } : {})
+          ...(targetChanged ? { nextDueDate: patch.nextDueDate as string } : {}),
+          ...(assigneeChanged ? { assigneeId: patch.assigneeId as string } : {}),
+          ...(activeChanged ? { active: patch.active as boolean } : {})
         });
         // One history entry per field that actually changed, atomically
         // with the update and its audit event.

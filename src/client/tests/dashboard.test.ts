@@ -8,6 +8,8 @@ import {
   capaAdvanceBlockReason,
   capaReviewBlockReason,
   initialPanels,
+  newObligationBlockReason,
+  overdueBadgeLabel,
   panelData,
   pickerOrgIds,
   reopenBlockReason,
@@ -649,5 +651,33 @@ describe('review history evidence traceability (P4)', () => {
       'e-gone'
     ]);
     assert.deepEqual(reviewEvidenceLabels(evidence, []), []);
+  });
+});
+
+describe('calendar polish M-CAL3/M-CAL4 (unit)', () => {
+  it('M-CAL4: submitted work past its target reads as awaiting verification', () => {
+    const today = '2026-11-03';
+    assert.equal(
+      overdueBadgeLabel({ dueDate: '2026-11-02', status: 'submitted' }, today),
+      'Awaiting verification — past target'
+    );
+    assert.equal(overdueBadgeLabel({ dueDate: '2026-11-02', status: 'open' }, today), 'Overdue');
+    assert.equal(
+      overdueBadgeLabel({ dueDate: '2026-11-02', status: 'in_progress' }, today),
+      'Overdue'
+    );
+    assert.equal(overdueBadgeLabel({ dueDate: '2026-11-02', status: 'verified' }, today), null);
+    assert.equal(overdueBadgeLabel({ dueDate: '2026-11-03', status: 'submitted' }, today), null);
+    assert.equal(overdueBadgeLabel({ dueDate: '2026-11-10', status: 'open' }, today), null);
+  });
+
+  it('M-CAL3: New obligation is blocked only when no active template exists', () => {
+    assert.equal(newObligationBlockReason([]), 'No templates available for this organization.');
+    assert.equal(
+      newObligationBlockReason([{ active: false }]),
+      'No templates available for this organization.'
+    );
+    assert.equal(newObligationBlockReason([{ active: true }]), null);
+    assert.equal(newObligationBlockReason([{ active: false }, { active: true }]), null);
   });
 });

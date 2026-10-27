@@ -333,6 +333,31 @@ export function startButtonLabel(task: Pick<ComplianceTask, 'status'>): string {
   return task.status === 'submitted' ? 'Send back' : 'Start';
 }
 
+/**
+ * M-CAL4: overdue badge text as of an org-local `today` (YYYY-MM-DD).
+ * Submitted work past its target reads as awaiting verification — not
+ * "Overdue" — so the calendar never shows the confusing Submitted + Overdue
+ * pair. Returns null when not past due or verified. Counts and filters
+ * still treat past-due submitted work as overdue; only the wording changes.
+ */
+export function overdueBadgeLabel(
+  task: Pick<ComplianceTask, 'dueDate' | 'status'>,
+  todayISODate: string
+): string | null {
+  if (task.status === 'verified') return null;
+  if (task.dueDate >= todayISODate) return null;
+  return task.status === 'submitted' ? 'Awaiting verification — past target' : 'Overdue';
+}
+
+/**
+ * M-CAL3: New-obligation gate — disabled when the org has no active templates
+ * to build from. Returns the disabled reason, or null when creation is
+ * allowed. Callers check panel readiness separately.
+ */
+export function newObligationBlockReason(templates: Pick<TaskTemplate, 'active'>[]): string | null {
+  return templates.some((t) => t.active) ? null : 'No templates available for this organization.';
+}
+
 /** Org ids the picker may offer for this user (all of them while loading). */
 export function pickerOrgIds(orgs: Organization[], me: DemoUser | null): string[] {
   const ids = orgs.map((o) => o.id);
