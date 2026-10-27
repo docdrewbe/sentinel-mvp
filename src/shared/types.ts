@@ -75,7 +75,7 @@ export interface ComplianceTask {
   templateId?: string;
   /** Source obligation, when generated from a recurring obligation. */
   obligationId?: string;
-  /** Due period this instance covers (the obligation's target date). */
+  /** Recurrence period covered (week/month/quarter/year key, or 'once'). */
   periodKey?: string;
   title: string;
   ownerId: string;
@@ -395,7 +395,7 @@ export interface RecurringObligation {
   /** Responsible person; generated instances are owned by them. */
   assigneeId?: string;
   active: boolean;
-  /** Due periods already generated (period keys), append-only. */
+  /** Recurrence periods already generated (period keys), append-only. */
   generatedPeriods: string[];
   createdAt: string;
   updatedAt: string;

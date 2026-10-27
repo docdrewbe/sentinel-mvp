@@ -1162,7 +1162,7 @@ export function createApp(db: DbShape): express.Express {
           recordType: 'task',
           recordId: out.task.id,
           orgId: out.task.orgId,
-          detail: `From obligation: ${template?.title ?? out.obligation.templateId} (${out.task.periodKey})`
+          detail: `From obligation: ${template?.title ?? out.obligation.templateId} (${out.task.periodKey}, due ${out.task.dueDate})`
         });
         appendAudit(db, {
           actorId: user.id,
@@ -1171,8 +1171,8 @@ export function createApp(db: DbShape): express.Express {
           recordId: out.obligation.id,
           orgId: out.obligation.orgId,
           detail: out.obligation.active
-            ? `Generated ${out.task.id} for ${out.task.periodKey}; next target ${out.obligation.nextDueDate}`
-            : `Generated ${out.task.id} for ${out.task.periodKey}; schedule complete`
+            ? `Generated ${out.task.id} for ${out.task.periodKey} (due ${out.task.dueDate}); next target ${out.obligation.nextDueDate}`
+            : `Generated ${out.task.id} for ${out.task.periodKey} (due ${out.task.dueDate}); schedule complete`
         });
         return out;
       });

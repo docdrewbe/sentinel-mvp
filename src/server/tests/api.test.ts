@@ -5363,10 +5363,10 @@ describe('Calendar slice 1: obligations (HTTP)', () => {
       assert.equal(body.task.ownerId, 'u-nurse-mgr');
       assert.equal(body.task.templateId, 'tpl-access-review');
       assert.equal(body.task.obligationId, id);
-      assert.equal(body.task.periodKey, '2026-11-15');
+      assert.equal(body.task.periodKey, '2026-11');
       assert.equal(body.task.requiredEvidence, 1);
       assert.equal(body.obligation.nextDueDate, '2026-12-15');
-      assert.deepEqual(body.obligation.generatedPeriods, ['2026-11-15']);
+      assert.deepEqual(body.obligation.generatedPeriods, ['2026-11']);
       const fetched = await taskById(base, 'u-nurse-mgr', 'org-cah', body.task.id);
       assert.equal(fetched.obligationId, id);
       const taskEvents = await recordAudits(base, body.task.id);
@@ -5390,30 +5390,25 @@ describe('Calendar slice 1: obligations (HTTP)', () => {
     try {
       const id = await makeObligation(base, 'u-nurse-mgr');
       assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr')).status, 201);
-      // Rewinding the target to a generated period must not mint a twin.
-      assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2026-11-15' })).status,
-        200
-      );
+      // CAL2: rewinding the target into a generated period is rejected at
+      // PATCH time, so the twin can never be minted.
       const diskBefore = readFileSync(dataFile, 'utf8');
       const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
       const audits = await auditTotal(base);
-      const duplicate = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
-      assert.equal(duplicate.status, 400);
-      assert.equal(duplicate.json.error, 'An instance for this obligation and due period already exists.');
+      const rewind = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        nextDueDate: '2026-11-15'
+      });
+      assert.equal(rewind.status, 400);
+      assert.equal(rewind.json.error, 'An instance for 2026-11 already exists.');
       assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
       assert.equal(await auditTotal(base), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
-      // A fresh period still generates.
-      assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2026-12-15' })).status,
-        200
-      );
+      // The advanced period still generates.
       const second = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
       assert.equal(second.status, 201);
       assert.deepEqual(
         (await obligationById(base, 'u-nurse-mgr', 'org-cah', id)).generatedPeriods,
-        ['2026-11-15', '2026-12-15']
+        ['2026-11', '2026-12']
       );
       assertDiskMatchesMemory(db);
     } finally {
@@ -5484,7 +5479,7 @@ describe('Calendar slice 1: obligations (HTTP)', () => {
       assert.equal((await call(base, 'POST', `/api/obligations/${once}/generate`, 'u-nurse-mgr')).status, 201);
       const done = await obligationById(base, 'u-nurse-mgr', 'org-cah', once);
       assert.equal(done.active, false);
-      assert.deepEqual(done.generatedPeriods, ['2026-11-15']);
+      assert.deepEqual(done.generatedPeriods, ['once']);
       assert.equal((await call(base, 'POST', `/api/obligations/${once}/generate`, 'u-nurse-mgr')).status, 400);
       assertDiskMatchesMemory(db);
     } finally {
@@ -5800,6 +5795,271 @@ describe('CAL1 strict dates (HTTP)', () => {
       assert.equal(await auditTotal(base), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assert.deepEqual(tempFiles(), []);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('CAL2 recurrence periods (HTTP)', () => {
+  async function auditTotal(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function taskCount(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/tasks?orgId=org-cah', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  function fetchObligation(base: string, userId: string, id: string): () => Promise<Record<string, unknown>> {
+    return async () => {
+      const res = await call(base, 'GET', '/api/obligations?orgId=org-cah', userId);
+      assert.equal(res.status, 200);
+      const found = (res.json as unknown as Array<Record<string, unknown>>).find((o) => o.id === id);
+      assert.ok(found, `obligation ${id} visible`);
+      return found;
+    };
+  }
+
+  async function makeObligation(
+    base: string,
+    userId: string,
+    over: Record<string, unknown> = {}
+  ): Promise<string> {
+    const created = await call(base, 'POST', '/api/obligations', userId, {
+      orgId: 'org-cah',
+      templateId: 'tpl-access-review',
+      nextDueDate: '2027-06-15',
+      assigneeId: 'u-nurse-mgr',
+      ...over
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  async function makeTemplate(base: string, frequency: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/templates', 'u-admin', {
+      orgId: 'org-cah',
+      domainId: 'dom-osha-h',
+      title: `${frequency} probe (simulated).`,
+      description: `${frequency} probe (simulated).`,
+      controlType: 'best_practice',
+      regulatoryRefs: [],
+      responsibleRoles: ['department_manager'],
+      recurrence: { frequency },
+      evidenceRequired: [],
+      escalation: []
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  it('blocks the exact same-period twin exploit', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr')).status, 201);
+      const fetch = fetchObligation(base, 'u-nurse-mgr', id);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await fetch();
+      const count = await taskCount(base);
+      const audits = await auditTotal(base);
+      // The report's reproduction: shift within June after generating June.
+      const shift = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        nextDueDate: '2027-06-28'
+      });
+      assert.equal(shift.status, 400);
+      assert.equal(shift.json.error, 'An instance for 2027-06 already exists.');
+      assert.deepEqual(await fetch(), before);
+      assert.equal(await taskCount(base), count);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      // Forward movement still works and mints only the new period.
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-08-02' })).status,
+        200
+      );
+      const second = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(second.status, 201);
+      assert.equal((second.json as unknown as { task: { periodKey: string } }).task.periodKey, '2027-08');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('allows moving to a later period before generating', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-07-20' })).status,
+        200
+      );
+      const generated = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(generated.status, 201);
+      const body = generated.json as unknown as { task: { periodKey: string; dueDate: string } };
+      assert.equal(body.task.periodKey, '2027-07');
+      assert.equal(body.task.dueDate, '2027-07-20');
+      assert.deepEqual((await fetchObligation(base, 'u-nurse-mgr', id)()).generatedPeriods, ['2027-07']);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('treats ISO weeks as periods across the year boundary', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const templateId = await makeTemplate(base, 'weekly');
+      const id = await makeObligation(base, 'u-nurse-mgr', { templateId, nextDueDate: '2027-06-15' });
+      assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr')).status, 201);
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-06-17' })).status,
+        400
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-06-21' })).status,
+        200
+      );
+      const second = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
+      assert.equal(second.status, 201);
+      assert.equal((second.json as unknown as { task: { periodKey: string } }).task.periodKey, '2027-W25');
+      // Year boundary: 2026-12-31 and 2027-01-01 share ISO week 2026-W53.
+      const edge = await makeObligation(base, 'u-nurse-mgr', { templateId, nextDueDate: '2026-12-31' });
+      assert.equal((await call(base, 'POST', `/api/obligations/${edge}/generate`, 'u-nurse-mgr')).status, 201);
+      const sameWeek = await call(base, 'PATCH', `/api/obligations/${edge}`, 'u-nurse-mgr', {
+        nextDueDate: '2027-01-01'
+      });
+      assert.equal(sameWeek.status, 400);
+      assert.equal(sameWeek.json.error, 'An instance for 2026-W53 already exists.');
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${edge}`, 'u-nurse-mgr', { nextDueDate: '2027-01-04' })).status,
+        200
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('treats quarters and years as periods', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const quarterly = await makeObligation(base, 'u-nurse-mgr', {
+        templateId: 'tpl-sharps-review',
+        nextDueDate: '2026-01-31'
+      });
+      assert.equal((await call(base, 'POST', `/api/obligations/${quarterly}/generate`, 'u-nurse-mgr')).status, 201);
+      const sameQuarter = await call(base, 'PATCH', `/api/obligations/${quarterly}`, 'u-nurse-mgr', {
+        nextDueDate: '2026-02-15'
+      });
+      assert.equal(sameQuarter.status, 400);
+      assert.equal(sameQuarter.json.error, 'An instance for 2026-Q1 already exists.');
+      const annualTemplate = await makeTemplate(base, 'annually');
+      const annual = await makeObligation(base, 'u-nurse-mgr', {
+        templateId: annualTemplate,
+        nextDueDate: '2026-06-01'
+      });
+      assert.equal((await call(base, 'POST', `/api/obligations/${annual}/generate`, 'u-nurse-mgr')).status, 201);
+      const sameYear = await call(base, 'PATCH', `/api/obligations/${annual}`, 'u-nurse-mgr', {
+        nextDueDate: '2026-12-01'
+      });
+      assert.equal(sameYear.status, 400);
+      assert.equal(sameYear.json.error, 'An instance for 2026 already exists.');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('mints distinct periods under concurrent generation', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const count = await taskCount(base);
+      // Each winner advances the target, so concurrent requests must mint
+      // successive periods — never two instances for one period.
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr'))
+      );
+      assert.ok(results.every((r) => r.status === 201));
+      assert.equal(await taskCount(base), count + 5);
+      const periods = (await fetchObligation(base, 'u-nurse-mgr', id)()).generatedPeriods as string[];
+      assert.equal(periods.length, 5);
+      assert.equal(new Set(periods).size, 5);
+      const res = await call(base, 'GET', '/api/tasks?orgId=org-cah', 'u-officer');
+      const keys = (res.json as unknown as Array<{ obligationId?: string; periodKey?: string }>)
+        .filter((t) => t.obligationId === id)
+        .map((t) => t.periodKey);
+      assert.equal(keys.length, 5);
+      assert.equal(new Set(keys).size, 5);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps legacy exact-date periods taken', async () => {
+    const { db, base, close } = await startServer((seed) => {
+      seed.obligations.push({
+        id: 'obl-legacy-date',
+        orgId: 'org-cah',
+        templateId: 'tpl-access-review',
+        nextDueDate: '2027-07-15',
+        anchorDay: 15,
+        assigneeId: 'u-nurse-mgr',
+        active: true,
+        generatedPeriods: ['2027-06-15'],
+        createdAt: 't',
+        updatedAt: 't'
+      });
+      seed.obligations.push({
+        id: 'obl-legacy-task',
+        orgId: 'org-cah',
+        templateId: 'tpl-access-review',
+        nextDueDate: '2027-06-15',
+        anchorDay: 15,
+        assigneeId: 'u-nurse-mgr',
+        active: true,
+        generatedPeriods: [],
+        createdAt: 't',
+        updatedAt: 't'
+      });
+      seed.tasks.push({
+        id: 'task-legacy-twin',
+        orgId: 'org-cah',
+        domainId: 'dom-hipaa-h',
+        templateId: 'tpl-access-review',
+        obligationId: 'obl-legacy-task',
+        periodKey: '2027-06-15',
+        title: 'Legacy instance (simulated).',
+        ownerId: 'u-nurse-mgr',
+        dueDate: '2027-06-15',
+        status: 'open',
+        evidence: [],
+        createdAt: 't',
+        updatedAt: 't'
+      });
+    });
+    try {
+      const audits = await auditTotal(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const shift = await call(base, 'PATCH', '/api/obligations/obl-legacy-date', 'u-nurse-mgr', {
+        nextDueDate: '2027-06-20'
+      });
+      assert.equal(shift.status, 400);
+      assert.equal(shift.json.error, 'An instance for 2027-06 already exists.');
+      // A legacy task-side entry blocks generation with the same message.
+      const twin = await call(base, 'POST', '/api/obligations/obl-legacy-task/generate', 'u-nurse-mgr');
+      assert.equal(twin.status, 400);
+      assert.equal(twin.json.error, 'An instance for this obligation and due period already exists.');
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assertDiskMatchesMemory(db);
     } finally {
       await close();

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
-import { isValidIsoDate, nextDueDate } from '../shared/scheduling.js';
+import { isValidIsoDate, nextDueDate, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
@@ -1061,7 +1061,9 @@ function ObligationRow({ obligation: o, template, ready, userName, canGenerate, 
   canGenerate: boolean;
   onGenerate: () => void;
 }): JSX.Element {
-  const duplicate = o.generatedPeriods.includes(o.nextDueDate);
+  // CAL2: mirror the server's period check; the server still decides.
+  const period = template ? periodKeyFor(o.nextDueDate, template.recurrence.frequency) : null;
+  const duplicate = period !== null && o.generatedPeriods.includes(period);
   const allowed = ready && canGenerate && o.active && !duplicate;
   const reason = !ready
     ? 'Unavailable while data is loading or failed.'

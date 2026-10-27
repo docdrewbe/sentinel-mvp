@@ -116,6 +116,48 @@ export function addDaysISO(fromISODate: string, days: number): string | null {
   return fromSerial(toSerial(parsed.y, parsed.m, parsed.d) + days);
 }
 
+/** ISO 8601 week label (`2027-W24`) for a civil date, or null when invalid. */
+export function isoWeekLabel(fromISODate: string): string | null {
+  const parsed = parseIsoDate(fromISODate);
+  if (!parsed) return null;
+  const serial = toSerial(parsed.y, parsed.m, parsed.d);
+  // Monday = 0 (1970-01-01 was a Thursday).
+  const dow = (((serial + 3) % 7) + 7) % 7;
+  // The Thursday of this week names the week-numbering year.
+  const thursday = serial + (3 - dow);
+  const weekYear = Number(fromSerial(thursday).slice(0, 4));
+  const jan4 = toSerial(weekYear, 1, 4);
+  const jan4Dow = (((jan4 + 3) % 7) + 7) % 7;
+  const week1Monday = jan4 - jan4Dow;
+  const week = Math.floor((serial - week1Monday) / 7) + 1;
+  return `${weekYear}-W${pad2(week)}`;
+}
+
+/**
+ * CAL2: recurrence-period key for a due date under a template frequency:
+ * weekly → ISO week (`2027-W24`), monthly → `YYYY-MM`, quarterly →
+ * `YYYY-Qn`, annually → `YYYY`, once → `once`. The key names the period
+ * independent of the exact target day, so moving a target within a
+ * generated period cannot mint a second instance. Null when invalid.
+ */
+export function periodKeyFor(fromISODate: string, frequency: RecurrenceFrequency): string | null {
+  if (frequency === 'once') return isValidIsoDate(fromISODate) ? 'once' : null;
+  const parsed = parseIsoDate(fromISODate);
+  if (!parsed) return null;
+  switch (frequency) {
+    case 'weekly':
+      return isoWeekLabel(fromISODate);
+    case 'monthly':
+      return `${pad4(parsed.y)}-${pad2(parsed.m)}`;
+    case 'quarterly':
+      return `${pad4(parsed.y)}-Q${Math.floor((parsed.m - 1) / 3) + 1}`;
+    case 'annually':
+      return `${pad4(parsed.y)}`;
+    default:
+      return null;
+  }
+}
+
 /** Whole days overdue as of `asOfISODate`; verified work is never overdue. */
 export function daysOverdue(dueDate: string, status: string, asOfISODate: string): number {
   if (status === 'verified') return 0;

@@ -37,7 +37,7 @@ import { CAPA_CRITERIA_LOCKED_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } fro
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
-import { isValidIsoDate, nextDueDate, nextOccurrence } from '../shared/scheduling.js';
+import { isValidIsoDate, nextDueDate, nextOccurrence, periodKeyFor } from '../shared/scheduling.js';
 
 export interface DbShape {
   version: 1;
@@ -943,6 +943,28 @@ export function createObligation(db: DbShape, input: ObligationInput): Recurring
   return obligation;
 }
 
+/**
+ * CAL2: true when `period` already has an instance for this obligation,
+ * checking both the obligation's own history and task records. Pre-CAL2
+ * exact-date entries normalize through the template's current frequency,
+ * so legacy periods stay taken.
+ */
+function periodTaken(
+  db: DbShape,
+  obligation: RecurringObligation,
+  frequency: RecurrenceFrequency,
+  period: string
+): boolean {
+  if (obligation.generatedPeriods.includes(period)) return true;
+  for (const entry of obligation.generatedPeriods) {
+    if (periodKeyFor(entry, frequency) === period) return true;
+  }
+  return db.tasks.some((t) => {
+    if (t.obligationId !== obligation.id || t.periodKey === undefined) return false;
+    return t.periodKey === period || periodKeyFor(t.periodKey, frequency) === period;
+  });
+}
+
 export function updateObligation(
   db: DbShape,
   id: string,
@@ -952,6 +974,13 @@ export function updateObligation(
   if (!obligation) throw new ValidationError('Obligation not found.');
   if (patch.nextDueDate !== undefined) {
     assertDueDate(patch.nextDueDate);
+    // CAL2: a target may move within an ungenerated period or forward, but
+    // never into a period that already has an instance.
+    const template = db.templates.find((t) => t.id === obligation.templateId);
+    const period = template ? periodKeyFor(patch.nextDueDate, template.recurrence.frequency) : null;
+    if (template && period && periodTaken(db, obligation, template.recurrence.frequency, period)) {
+      throw new ValidationError(`An instance for ${period} already exists.`);
+    }
     obligation.nextDueDate = patch.nextDueDate;
     // A manually reset target re-anchors the schedule to its day-of-month.
     obligation.anchorDay = Number(patch.nextDueDate.slice(8, 10));
@@ -975,9 +1004,15 @@ export function updateObligation(
 /**
  * Generate the next task instance for an obligation: one task due on the
  * current target date, then advance the target deterministically. Refuses
- * duplicates for an already-generated due period, inactive obligations,
- * and generation without a responsible owner. Instances are ordinary
- * tasks, so evidence, verification, and separation-of-duties gates apply.
+ * duplicates for an already-generated recurrence period (CAL2), inactive
+ * obligations, and generation without a responsible owner. Instances are
+ * ordinary tasks, so evidence, verification, and separation-of-duties
+ * gates apply.
+ *
+ * Frequency changes: the period definition follows the template at
+ * generation time, while each stored periodKey keeps the form computed
+ * under its own frequency — so a mid-stream frequency change can neither
+ * false-positive on old keys nor silently merge distinct periods.
  */
 export function generateObligationInstance(
   db: DbShape,
@@ -990,16 +1025,14 @@ export function generateObligationInstance(
   const template = db.templates.find((t) => t.id === obligation.templateId);
   if (!template) throw new ValidationError('Template not found.');
   if (!template.active) throw new ValidationError('Template is inactive.');
-  const periodKey = obligation.nextDueDate;
+  const dueDate = obligation.nextDueDate;
   // CAL1: a legacy unparsable target fails loudly — never a bad-dated task,
   // and never a silent deactivation.
-  if (!isValidIsoDate(periodKey)) {
+  const periodKey = periodKeyFor(dueDate, template.recurrence.frequency);
+  if (!isValidIsoDate(dueDate) || !periodKey) {
     throw new ValidationError('Obligation target date is not a real calendar date.');
   }
-  const duplicate =
-    obligation.generatedPeriods.includes(periodKey) ||
-    db.tasks.some((t) => t.obligationId === obligation.id && t.periodKey === periodKey);
-  if (duplicate) {
+  if (periodTaken(db, obligation, template.recurrence.frequency, periodKey)) {
     throw new ValidationError('An instance for this obligation and due period already exists.');
   }
   const caller = db.users.find((u) => u.id === byUserId);
@@ -1011,12 +1044,12 @@ export function generateObligationInstance(
     domainId: template.domainId,
     title: template.title,
     ownerId,
-    dueDate: periodKey
+    dueDate
   });
   task.templateId = template.id;
   task.obligationId = obligation.id;
   task.periodKey = periodKey;
-  const next = nextOccurrence(periodKey, template.recurrence.frequency, obligation.anchorDay);
+  const next = nextOccurrence(dueDate, template.recurrence.frequency, obligation.anchorDay);
   if (next === null) {
     obligation.active = false;
   } else {

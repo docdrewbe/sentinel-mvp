@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDaysISO, daysInMonth, isValidIsoDate, nextDueDate, nextOccurrence } from '../scheduling.js';
+import { addDaysISO, daysInMonth, isValidIsoDate, nextDueDate, nextOccurrence, periodKeyFor } from '../scheduling.js';
 
 describe('calendar math (calendar slice 1)', () => {
   it('counts month days with leap years', () => {
@@ -71,6 +71,34 @@ describe('calendar math (calendar slice 1)', () => {
   it('keeps the legacy template helper for instantiate defaults', () => {
     assert.equal(nextDueDate('2026-10-26', 'once'), null);
     assert.equal(nextDueDate('2026-10-26', 'weekly'), '2026-11-02');
+  });
+});
+
+describe('recurrence period keys (CAL2)', () => {
+  it('names weekly periods by ISO week, including year boundaries', () => {
+    assert.equal(periodKeyFor('2027-06-15', 'weekly'), '2027-W24');
+    assert.equal(periodKeyFor('2027-06-17', 'weekly'), '2027-W24');
+    assert.equal(periodKeyFor('2027-06-21', 'weekly'), '2027-W25');
+    assert.equal(periodKeyFor('2026-01-01', 'weekly'), '2026-W01');
+    assert.equal(periodKeyFor('2026-12-31', 'weekly'), '2026-W53');
+    assert.equal(periodKeyFor('2027-01-01', 'weekly'), '2026-W53');
+    assert.equal(periodKeyFor('2027-01-04', 'weekly'), '2027-W01');
+    assert.equal(periodKeyFor('2025-12-29', 'weekly'), '2026-W01');
+  });
+
+  it('names monthly, quarterly, annual, and one-time periods', () => {
+    assert.equal(periodKeyFor('2027-06-15', 'monthly'), '2027-06');
+    assert.equal(periodKeyFor('2027-06-28', 'monthly'), '2027-06');
+    assert.equal(periodKeyFor('2026-01-31', 'quarterly'), '2026-Q1');
+    assert.equal(periodKeyFor('2026-03-31', 'quarterly'), '2026-Q1');
+    assert.equal(periodKeyFor('2026-04-01', 'quarterly'), '2026-Q2');
+    assert.equal(periodKeyFor('2026-12-31', 'quarterly'), '2026-Q4');
+    assert.equal(periodKeyFor('2026-06-01', 'annually'), '2026');
+    assert.equal(periodKeyFor('2026-12-31', 'annually'), '2026');
+    assert.equal(periodKeyFor('2026-11-15', 'once'), 'once');
+    assert.equal(periodKeyFor('not-a-date', 'monthly'), null);
+    assert.equal(periodKeyFor('2027-02-30', 'monthly'), null);
+    assert.equal(periodKeyFor('2026-11-15', 'fortnightly' as 'monthly'), null);
   });
 });
 
