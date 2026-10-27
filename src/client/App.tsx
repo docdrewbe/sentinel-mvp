@@ -4,7 +4,7 @@ import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, 
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -57,6 +57,9 @@ export default function App(): JSX.Element {
   const obligationsReady = canAct(panels.obligations, contextKey);
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const capa = capas.find((c) => c.id === capaId) ?? null;
+  // M-UI1: id of the visible verified-lock explanation; locked detail-panel
+  // controls reference it via aria-describedby. Null unless verified.
+  const taskLockNoteId = task ? verifiedLockNoteId(task) : null;
 
   const userName = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
   const privilegedIds = useMemo(
@@ -473,6 +476,11 @@ export default function App(): JSX.Element {
                 <EvidenceRequirement task={task} />
                 {tasksReady ? (
                   <>
+                    {taskLockNoteId && (
+                      <p className="sod-note" id={taskLockNoteId}>
+                        Verified records are locked.
+                      </p>
+                    )}
                     <StatusButtons
                       me={me}
                       task={task}
@@ -480,6 +488,7 @@ export default function App(): JSX.Element {
                       submitBlockReason={submitStatusReason(task) ?? submitBlockReason(task)}
                       verifyBlockReason={verifyStatusReason(task) ?? verifyBlockReason(me, task, privilegedIds) ?? verifyEvidenceReason(task)}
                       reopenBlockReason={reopenBlockReason(task)}
+                      lockNoteId={taskLockNoteId ?? undefined}
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
                     <h5>Evidence & chain of custody ({task.evidence.length})</h5>
@@ -510,6 +519,7 @@ export default function App(): JSX.Element {
                       <EvidenceForm
                         onAdd={(label, holder) => run(async () => api.addEvidence(task.id, { label, holder }))}
                         lockedTitle={evidenceLockedReason(task) ?? undefined}
+                        describedBy={taskLockNoteId ?? undefined}
                       />
                     )}
                     {can(me, 'custody.transfer', task) && task.evidence.length > 0 && (
@@ -519,6 +529,7 @@ export default function App(): JSX.Element {
                           run(async () => api.transfer(task.id, { evidenceId, toHolder, reason }))
                         }
                         lockedTitle={evidenceLockedReason(task) ?? undefined}
+                        describedBy={taskLockNoteId ?? undefined}
                       />
                     )}
                   </>
@@ -1046,14 +1057,16 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
   );
 }
 
-function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBlockReason, reopenBlockReason, onChange }: { me: DemoUser; task: ComplianceTask; startBlockReason: string | null; submitBlockReason: string | null; verifyBlockReason: string | null; reopenBlockReason: string | null; onChange: (s: TaskStatus) => void }): JSX.Element {
+function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBlockReason, reopenBlockReason, lockNoteId, onChange }: { me: DemoUser; task: ComplianceTask; startBlockReason: string | null; submitBlockReason: string | null; verifyBlockReason: string | null; reopenBlockReason: string | null; lockNoteId?: string; onChange: (s: TaskStatus) => void }): JSX.Element {
   // A button is enabled only when the role allows it AND no state reason
   // blocks it. The tooltip names the role gap first, else the state reason.
+  // M-UI1: on verified tasks every button also references the visible lock
+  // explanation via aria-describedby (lockNoteId is absent otherwise).
   const btn = (label: string, status: TaskStatus, action: Action, reason: string | null, need: string): JSX.Element => {
     const roleOk = can(me, action, task);
     const allowed = roleOk && reason === null;
     return (
-      <button key={status} disabled={!allowed} title={allowed ? '' : (roleOk ? (reason ?? '') : `Requires: ${need}`)} onClick={() => onChange(status)}>
+      <button key={status} disabled={!allowed} title={allowed ? '' : (roleOk ? (reason ?? '') : `Requires: ${need}`)} aria-describedby={lockNoteId} onClick={() => onChange(status)}>
         {label}
       </button>
     );
@@ -1207,7 +1220,7 @@ function NewTaskForm({ orgId, timeZone, domains, users, onSubmit }: { orgId: str
   );
 }
 
-function EvidenceForm({ onAdd, kinds, lockedTitle }: { onAdd: (label: string, holder: string, kind?: string) => void; kinds?: Array<{ value: string; label: string }>; lockedTitle?: string }): JSX.Element {
+function EvidenceForm({ onAdd, kinds, lockedTitle, describedBy }: { onAdd: (label: string, holder: string, kind?: string) => void; kinds?: Array<{ value: string; label: string }>; lockedTitle?: string; describedBy?: string }): JSX.Element {
   const [label, setLabel] = useState('');
   const [holder, setHolder] = useState('');
   const [kind, setKind] = useState(kinds?.[0]?.value ?? '');
@@ -1224,21 +1237,21 @@ function EvidenceForm({ onAdd, kinds, lockedTitle }: { onAdd: (label: string, ho
         setHolder('');
       }}
     >
-      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" required disabled={locked} title={lockedTitle} />
-      <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" required disabled={locked} title={lockedTitle} />
+      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
       {kinds && (
-        <select aria-label="Evidence kind" value={kind} onChange={(e) => setKind(e.target.value)} disabled={locked} title={lockedTitle}>
+        <select aria-label="Evidence kind" value={kind} onChange={(e) => setKind(e.target.value)} disabled={locked} title={lockedTitle} aria-describedby={describedBy}>
           {kinds.map((k) => (
             <option key={k.value} value={k.value}>{k.label}</option>
           ))}
         </select>
       )}
-      <button type="submit" disabled={locked} title={lockedTitle}>Add evidence</button>
+      <button type="submit" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>Add evidence</button>
     </form>
   );
 }
 
-function TransferForm({ evidence, onTransfer, lockedTitle }: { evidence: ComplianceTask['evidence']; onTransfer: (id: string, holder: string, reason?: string) => void; lockedTitle?: string }): JSX.Element {
+function TransferForm({ evidence, onTransfer, lockedTitle, describedBy }: { evidence: ComplianceTask['evidence']; onTransfer: (id: string, holder: string, reason?: string) => void; lockedTitle?: string; describedBy?: string }): JSX.Element {
   const [evidenceId, setEvidenceId] = useState(evidence[0]?.id ?? '');
   const [toHolder, setToHolder] = useState('');
   const [reason, setReason] = useState('');
@@ -1257,14 +1270,14 @@ function TransferForm({ evidence, onTransfer, lockedTitle }: { evidence: Complia
         setReason('');
       }}
     >
-      <select value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item" disabled={locked} title={lockedTitle}>
+      <select value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>
         {evidence.map((x) => (
           <option key={x.id} value={x.id}>{x.label} (now: {x.holder})</option>
         ))}
       </select>
-      <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required disabled={locked} title={lockedTitle} />
-      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" disabled={locked} title={lockedTitle} />
-      <button type="submit" disabled={locked} title={lockedTitle}>Transfer custody</button>
+      <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <button type="submit" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>Transfer custody</button>
     </form>
   );
 }

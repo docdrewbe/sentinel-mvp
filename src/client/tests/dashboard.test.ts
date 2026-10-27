@@ -26,7 +26,8 @@ import {
   submitStatusReason,
   verifyBlockReason,
   verifyEvidenceReason,
-  verifyStatusReason
+  verifyStatusReason,
+  verifiedLockNoteId
 } from '../dashboard.js';
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
@@ -741,5 +742,21 @@ describe('verified-record evidence lock hint (M-UI1)', () => {
     assert.equal(evidenceLockedReason({ status: 'open' }), null);
     assert.equal(evidenceLockedReason({ status: 'in_progress' }), null);
     assert.equal(evidenceLockedReason({ status: 'submitted' }), null);
+  });
+
+  it('names a stable note id for verified tasks only', () => {
+    assert.equal(verifiedLockNoteId({ id: 'task-1', status: 'verified' }), 'verified-lock-task-1');
+    assert.equal(verifiedLockNoteId({ id: 'task-1', status: 'open' }), null);
+    assert.equal(verifiedLockNoteId({ id: 'task-1', status: 'in_progress' }), null);
+    assert.equal(verifiedLockNoteId({ id: 'task-1', status: 'submitted' }), null);
+  });
+
+  it('keeps the lock message and note id in sync across statuses', () => {
+    // The visible note must exist exactly when locked controls reference it.
+    for (const status of ['open', 'in_progress', 'submitted', 'verified'] as const) {
+      const reasoned = evidenceLockedReason({ status }) !== null;
+      const noted = verifiedLockNoteId({ id: 't', status }) !== null;
+      assert.equal(noted, reasoned, status);
+    }
   });
 });

@@ -195,6 +195,17 @@ export function evidenceLockedReason(task: Pick<ComplianceTask, 'status'>): stri
   return task.status === 'verified' ? 'Verified records are locked.' : null;
 }
 
+/**
+ * M-UI1 accessibility: id of the visible verified-lock explanation in the
+ * task detail panel. Locked evidence, custody, and workflow controls point
+ * at it with `aria-describedby`; null for every other status so no dangling
+ * reference is ever rendered. Keyboard-focusable locked controls are
+ * deferred to M-A11Y1 — do not add tabIndex to disabled controls here.
+ */
+export function verifiedLockNoteId(task: Pick<ComplianceTask, 'id' | 'status'>): string | null {
+  return task.status === 'verified' ? `verified-lock-${task.id}` : null;
+}
+
 /** Evidence shortfall for verification, mirroring the D4b server gate. Only submitted tasks are verifiable; unknown requirements defer to the server. */
 export function verifyEvidenceReason(
   task: Pick<ComplianceTask, 'requiredEvidence' | 'status'> & { evidence: readonly unknown[] }
