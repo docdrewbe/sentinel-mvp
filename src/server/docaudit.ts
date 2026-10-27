@@ -12,6 +12,7 @@
 // finding is correct. Missing passages are reported as unidentified, never as
 // proof of noncompliance. Model output never executes actions.
 import { createHash } from 'node:crypto';
+import { createBasetenProvider, isBasetenConfigured } from './docaudit-baseten.js';
 import { ValidationError } from './store.js';
 import type { DbShape } from './store.js';
 import type { DocAuditIdempotencyRecord, DocAuditSavedPassage } from '../shared/types.js';
@@ -483,12 +484,18 @@ export function createMockProvider(): DocAuditProvider {
 }
 
 /**
- * Provider selection, read per call. Unset, `off`, unknown, and (until
- * Phase 3 wires it) `baseten` all resolve to null: the route answers 503
- * and performs no work. Only an explicit `mock` enables comparisons.
+ * Provider selection, read per call. Unset, `off`, and unknown values
+ * resolve to null: the route answers 503 and performs no work. An
+ * explicit `mock` enables fixture comparisons; an explicit `baseten`
+ * enables the real adapter only when key, model, and base URL are all
+ * usable — anything less resolves to null (503) without consuming
+ * throttle budget, exactly like a disabled provider.
  */
 export function resolveProvider(): DocAuditProvider | null {
   if (process.env.DOCAUDIT_PROVIDER === 'mock') return createMockProvider();
+  if (process.env.DOCAUDIT_PROVIDER === 'baseten' && isBasetenConfigured()) {
+    return createBasetenProvider();
+  }
   return null;
 }
 
