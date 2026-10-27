@@ -1237,8 +1237,8 @@ function EvidenceForm({ onAdd, kinds, lockedTitle, describedBy }: { onAdd: (labe
         setHolder('');
       }}
     >
-      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
-      <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Evidence label" aria-label="Evidence label" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="Holder" aria-label="Holder" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
       {kinds && (
         <select aria-label="Evidence kind" value={kind} onChange={(e) => setKind(e.target.value)} disabled={locked} title={lockedTitle} aria-describedby={describedBy}>
           {kinds.map((k) => (
@@ -1275,8 +1275,8 @@ function TransferForm({ evidence, onTransfer, lockedTitle, describedBy }: { evid
           <option key={x.id} value={x.id}>{x.label} (now: {x.holder})</option>
         ))}
       </select>
-      <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
-      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" aria-label="Transfer to (new holder)" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
+      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" aria-label="Reason (optional)" disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
       <button type="submit" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>Transfer custody</button>
     </form>
   );

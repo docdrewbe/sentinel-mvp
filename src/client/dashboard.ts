@@ -199,8 +199,8 @@ export function evidenceLockedReason(task: Pick<ComplianceTask, 'status'>): stri
  * M-UI1 accessibility: id of the visible verified-lock explanation in the
  * task detail panel. Locked evidence, custody, and workflow controls point
  * at it with `aria-describedby`; null for every other status so no dangling
- * reference is ever rendered. Keyboard-focusable locked controls are
- * deferred to M-A11Y1 — do not add tabIndex to disabled controls here.
+ * reference is ever rendered. Disabled controls stay outside the Tab order.
+ * M-A11Y1 (keyboard opening of task/CAPA rows) is tracked separately.
  */
 export function verifiedLockNoteId(task: Pick<ComplianceTask, 'id' | 'status'>): string | null {
   return task.status === 'verified' ? `verified-lock-${task.id}` : null;
