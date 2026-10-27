@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, type NewTask } from './api.js';
+import {
+  ApiError,
+  api,
+  type DocAuditCompareResult,
+  type DocAuditFinding,
+  type DocAuditFollowupPayload,
+  type NewTask
+} from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type Panels } from './dashboard.js';
+import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applySettled, beginContext, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type FollowupPreviewRow, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -38,6 +45,19 @@ export default function App(): JSX.Element {
   const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState('');
+  // WM2 client: document-audit review state. Findings, verdicts, selections,
+  // previews, and pending attempts all belong to one user+org context and
+  // are cleared synchronously whenever it changes (see the context effect).
+  const [docaTextA, setDocaTextA] = useState('');
+  const [docaTextB, setDocaTextB] = useState('');
+  const [docaResult, setDocaResult] = useState<{ key: string; seq: number; result: DocAuditCompareResult } | null>(null);
+  const [docaBusy, setDocaBusy] = useState(false);
+  const [docaPosting, setDocaPosting] = useState(false);
+  const [docaError, setDocaError] = useState('');
+  const [docaPending, setDocaPending] = useState<{ findingId: string; payload: DocAuditFollowupPayload; busy: boolean } | null>(null);
+  const [docaCompleted, setDocaCompleted] = useState<Record<string, { taskId: string; title: string; duplicate: boolean }>>({});
+  const docaSeq = useRef(0);
+  const docaBusyRef = useRef(false);
 
   const me = users.find((u) => u.id === userId) ?? null;
   const org = orgs.find((o) => o.id === orgId) ?? null;
@@ -108,6 +128,20 @@ export default function App(): JSX.Element {
     );
   }, []);
 
+  /** Synchronous review-state clear for user/org switches; never async. */
+  const clearDocAudit = useCallback((): void => {
+    docaSeq.current += 1;
+    setDocaTextA('');
+    setDocaTextB('');
+    setDocaResult(null);
+    setDocaBusy(false);
+    setDocaPosting(false);
+    setDocaError('');
+    setDocaPending(null);
+    setDocaCompleted({});
+    docaBusyRef.current = false;
+  }, []);
+
   useEffect(() => {
     api.orgs()
       .then((o) => {
@@ -150,9 +184,10 @@ export default function App(): JSX.Element {
       setShowNew(false);
       setShowNewObligation(false);
       setError('');
+      clearDocAudit();
     }
     refresh(orgId, nextKey).catch((e: Error) => setError(e.message));
-  }, [userId, orgId, users, orgs, refresh]);
+  }, [userId, orgId, users, orgs, refresh, clearDocAudit]);
 
   const run = async (fn: () => Promise<unknown>): Promise<void> => {
     setError('');
@@ -167,6 +202,113 @@ export default function App(): JSX.Element {
   const retry = (): void => {
     refresh(orgId, contextKey).catch((e: Error) => setError(e.message));
   };
+
+  /**
+   * Source-text edits invalidate findings, verdicts, selections, previews,
+   * and completions (finding cards unmount with the result). The sequence
+   * bump additionally discards any late compare response.
+   */
+  const invalidateDocAuditResults = useCallback((): void => {
+    docaSeq.current += 1;
+    setDocaResult(null);
+    setDocaError('');
+    setDocaCompleted({});
+  }, []);
+
+  const setDocaInput = useCallback(
+    (side: 'A' | 'B', value: string): void => {
+      if (side === 'A') setDocaTextA(value);
+      else setDocaTextB(value);
+      invalidateDocAuditResults();
+    },
+    [invalidateDocAuditResults]
+  );
+
+  const runCompare = useCallback(async (): Promise<void> => {
+    if (docaBusyRef.current || docaPending) return;
+    docaBusyRef.current = true;
+    const key = `${userId}|${orgId}`;
+    const seq = ++docaSeq.current;
+    setDocaBusy(true);
+    setDocaError('');
+    try {
+      const result = await api.docauditCompare({ orgId, textA: docaTextA, textB: docaTextB });
+      if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) return;
+      setDocaResult({ key, seq, result });
+      setDocaCompleted({});
+    } catch (e) {
+      if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) return;
+      setDocaError(e instanceof Error ? e.message : 'Comparison failed.');
+    } finally {
+      // Unconditional: single-flight plus invalidation-on-edit means no
+      // second request can be mid-air when this settles.
+      docaBusyRef.current = false;
+      setDocaBusy(false);
+    }
+  }, [docaPending, userId, orgId, docaTextA, docaTextB]);
+
+  const sendFollowup = useCallback(
+    async (findingId: string, payload: DocAuditFollowupPayload, isRetry: boolean): Promise<void> => {
+      if (docaPosting) return;
+      const key = `${userId}|${orgId}`;
+      const seq = ++docaSeq.current;
+      setDocaPosting(true);
+      if (isRetry) setDocaPending((p) => (p ? { ...p, busy: true } : p));
+      setDocaError('');
+      try {
+        const res = await api.docauditFollowup(payload);
+        if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) {
+          refresh(orgId, contextKeyRef.current).catch(() => {});
+          return;
+        }
+        setDocaPending(null);
+        setDocaCompleted((prev) => ({
+          ...prev,
+          [findingId]: { taskId: res.task.id, title: res.task.title, duplicate: res.duplicate }
+        }));
+        refresh(orgId, contextKey).catch((e: Error) => setDocaError(e.message));
+      } catch (e) {
+        if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) {
+          refresh(orgId, contextKeyRef.current).catch(() => {});
+          return;
+        }
+        // Certain failures: the server created nothing, so the reviewer may
+        // edit the draft and try again with a freshly minted key.
+        const apiErr = e instanceof ApiError ? e : null;
+        const certain =
+          apiErr !== null &&
+          (apiErr.status === 400 ||
+            apiErr.status === 403 ||
+            apiErr.status === 409 ||
+            (apiErr.status === 503 && apiErr.code === DOCAUDIT_KEYS_UNAVAILABLE_CODE));
+        if (certain && apiErr) {
+          setDocaPending(null);
+          setDocaError(
+            apiErr.status === 409
+              ? `${apiErr.message} Edit any field to mint a new key, or open the existing task instead.`
+              : apiErr.status === 503
+                ? `${apiErr.message} Other features are unaffected.`
+                : apiErr.message
+          );
+        } else {
+          // Ambiguous outcome (network drop, timeout, 500): preserve the
+          // exact payload and key for retry; edited replacements stay
+          // blocked until this attempt resolves.
+          setDocaPending({ findingId, payload, busy: false });
+          setDocaError('Unknown outcome — the task may or may not have been created. Retry with the same key.');
+        }
+      } finally {
+        setDocaPosting(false);
+        setDocaPending((p) => (p ? { ...p, busy: false } : p));
+      }
+    },
+    [docaPosting, userId, orgId, contextKey, refresh]
+  );
+
+  const retryFollowup = useCallback((): void => {
+    if (!docaPending || docaPending.busy || docaPosting) return;
+    sendFollowup(docaPending.findingId, docaPending.payload, true).catch(() => {});
+  }, [docaPending, docaPosting, sendFollowup]);
 
   const filtered = tasks.filter((t) => {
     if (statusFilter === 'all') return true;
@@ -738,6 +880,39 @@ export default function App(): JSX.Element {
             </tbody>
           </table>
         </section>
+
+        {me && can(me, 'docaudit.run', { orgId, ownerId: '' }) && (
+          <DocAuditPanel
+            orgId={orgId}
+            orgName={org?.name ?? 'this organization'}
+            userId={userId}
+            domains={domains}
+            users={orgUsers}
+            textA={docaTextA}
+            textB={docaTextB}
+            result={docaResult?.result ?? null}
+            resultKey={docaResult ? `${docaResult.key}#${docaResult.seq}` : ''}
+            busy={docaBusy}
+            posting={docaPosting}
+            pending={docaPending}
+            completed={docaCompleted}
+            panelError={docaError}
+            onInput={setDocaInput}
+            onSamples={() => {
+              setDocaTextA(DOCAUDIT_SAMPLE_A);
+              setDocaTextB(DOCAUDIT_SAMPLE_B);
+              invalidateDocAuditResults();
+            }}
+            onCompare={() => {
+              runCompare().catch(() => {});
+            }}
+            onCreate={(findingId, payload) => {
+              sendFollowup(findingId, payload, false).catch(() => {});
+            }}
+            onRetry={retryFollowup}
+            onDismissError={() => setDocaError('')}
+          />
+        )}
       </main>
 
       <footer>
@@ -1314,5 +1489,376 @@ function InstantiateForm({ template, timeZone, users, onSubmit }: { template: Ta
       <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required />
       <button className="primary" type="submit">Create task</button>
     </form>
+  );
+}
+
+function DocAuditPanel({ orgId, orgName, userId, domains, users, textA, textB, result, resultKey, busy, posting, pending, completed, panelError, onInput, onSamples, onCompare, onCreate, onRetry, onDismissError }: {
+  orgId: string;
+  orgName: string;
+  userId: string;
+  domains: RegulatoryDomain[];
+  users: DemoUser[];
+  textA: string;
+  textB: string;
+  result: DocAuditCompareResult | null;
+  /** Changes on every context switch and comparison, remounting finding cards. */
+  resultKey: string;
+  busy: boolean;
+  posting: boolean;
+  pending: { findingId: string; payload: DocAuditFollowupPayload; busy: boolean } | null;
+  completed: Record<string, { taskId: string; title: string; duplicate: boolean }>;
+  panelError: string;
+  onInput: (side: 'A' | 'B', value: string) => void;
+  onSamples: () => void;
+  onCompare: () => void;
+  onCreate: (findingId: string, payload: DocAuditFollowupPayload) => void;
+  onRetry: () => void;
+  onDismissError: () => void;
+}): JSX.Element {
+  // An unresolved attempt locks the whole review workflow: no edits, no new
+  // comparisons, no replacement creates — only retrying the preserved
+  // payload with its preserved key.
+  const locked = pending !== null || posting;
+  const canCompare = !busy && !locked && textA.trim().length > 0 && textB.trim().length > 0;
+  return (
+    <section className="panel" aria-label="Document audit">
+      <div className="panel-head">
+        <h3>Document audit (Working Memory — synthetic review only)</h3>
+      </div>
+      <p className="empty">
+        Compare two pasted texts, accept or dismiss the suggested findings, and optionally create one
+        follow-up task per finding. Comparisons never store your texts; paste synthetic text only.
+      </p>
+      <div className="doca-grid">
+        <div>
+          <label htmlFor="doca-text-a">Source text A (synthetic only)</label>
+          <textarea
+            id="doca-text-a"
+            value={textA}
+            maxLength={DOCAUDIT_TEXT_MAX}
+            rows={6}
+            disabled={locked}
+            onChange={(e) => onInput('A', e.target.value)}
+          />
+          <p className="doca-count">{textA.length} / {DOCAUDIT_TEXT_MAX} characters</p>
+        </div>
+        <div>
+          <label htmlFor="doca-text-b">Source text B (synthetic only)</label>
+          <textarea
+            id="doca-text-b"
+            value={textB}
+            maxLength={DOCAUDIT_TEXT_MAX}
+            rows={6}
+            disabled={locked}
+            onChange={(e) => onInput('B', e.target.value)}
+          />
+          <p className="doca-count">{textB.length} / {DOCAUDIT_TEXT_MAX} characters</p>
+        </div>
+      </div>
+      <div className="panel-actions">
+        <button onClick={onSamples} disabled={locked}>Load synthetic sample texts</button>
+        <button className="primary" onClick={onCompare} disabled={!canCompare}>
+          {busy ? 'Comparing…' : 'Compare texts'}
+        </button>
+      </div>
+      {pending && (
+        <div className="doca-pending" role="alert">
+          <p>
+            Follow-up for finding {pending.findingId} has an unknown outcome — the task may or may not
+            have been created. Retry uses the preserved payload and key <code>{pending.payload.idempotencyKey}</code>.
+          </p>
+          <button className="primary" onClick={onRetry} disabled={pending.busy}>
+            {pending.busy ? 'Retrying…' : 'Retry follow-up task'}
+          </button>
+        </div>
+      )}
+      {!pending && panelError && (
+        <div className="panel-alert" role="alert">
+          <p>{panelError}</p>
+          <button onClick={onDismissError} aria-label="Dismiss document audit error">Dismiss</button>
+        </div>
+      )}
+      {result && (
+        <div className="doca-results">
+          {result.notice && (
+            <div className="doca-notice" role="note">
+              <strong>{result.notice}</strong>
+              <p>Provider: {result.provider} · Comparison {result.runId}</p>
+            </div>
+          )}
+          <p>
+            {result.findings.length === 0
+              ? 'No differences found.'
+              : `${result.findings.length} suggested finding${result.findings.length === 1 ? '' : 's'} — accepting or dismissing changes nothing until you create a follow-up task.`}
+          </p>
+          {result.findings.map((finding) => (
+            <DocAuditFindingCard
+              key={`${userId}|${orgId}|${resultKey}|${finding.id}`}
+              finding={finding}
+              missingLabel={result.missingLabel}
+              disabled={locked}
+              completed={completed[finding.id]}
+              orgId={orgId}
+              orgName={orgName}
+              domains={domains}
+              users={users}
+              textA={textA}
+              textB={textB}
+              onCreate={onCreate}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DocAuditFindingCard({ finding, missingLabel, disabled, completed, orgId, orgName, domains, users, textA, textB, onCreate }: {
+  finding: DocAuditFinding;
+  missingLabel: string;
+  disabled: boolean;
+  completed: { taskId: string; title: string; duplicate: boolean } | undefined;
+  orgId: string;
+  orgName: string;
+  domains: RegulatoryDomain[];
+  users: DemoUser[];
+  textA: string;
+  textB: string;
+  onCreate: (findingId: string, payload: DocAuditFollowupPayload) => void;
+}): JSX.Element {
+  const [verdict, setVerdict] = useState<DocAuditVerdict | undefined>(undefined);
+  // Unambiguous passages resolve to their only location; repeated passages
+  // require an explicit reviewer choice (never preselected).
+  const [selectionA, setSelectionA] = useState<number | undefined>(
+    finding.passageA && finding.passageA.totalOccurrences === 1 ? 0 : undefined
+  );
+  const [selectionB, setSelectionB] = useState<number | undefined>(
+    finding.passageB && finding.passageB.totalOccurrences === 1 ? 0 : undefined
+  );
+  const [summary, setSummary] = useState(finding.summary);
+  const [domainId, setDomainId] = useState(domains[0]?.id ?? '');
+  const [title, setTitle] = useState('');
+  const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
+  const [dueDate, setDueDate] = useState('');
+  const [preview, setPreview] = useState<{ content: Omit<DocAuditFollowupPayload, 'idempotencyKey'>; contentJson: string; rows: FollowupPreviewRow[]; key: string } | null>(null);
+  const [previewErrors, setPreviewErrors] = useState<string[]>([]);
+  const bindingRef = useRef<FollowupKeyBinding | null>(null);
+  const previewHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    setDomainId(domains[0]?.id ?? '');
+  }, [domains]);
+  useEffect(() => {
+    setOwnerId(users[0]?.id ?? '');
+  }, [users]);
+  useEffect(() => {
+    if (preview) previewHeadingRef.current?.focus();
+  }, [preview]);
+  // Any draft edit closes the preview so creation always confirms the shown payload.
+  const touch = (): void => setPreview(null);
+  const blockers = findingBlockers({ verdict, finding, selectionA, selectionB, completed: completed !== undefined });
+  const domainName = domains.find((d) => d.id === domainId);
+  const ownerName = users.find((u) => u.id === ownerId);
+
+  const openPreview = (): void => {
+    const gate = findingBlockers({ verdict, finding, selectionA, selectionB, completed: completed !== undefined });
+    if (gate.length > 0) {
+      setPreviewErrors(gate);
+      setPreview(null);
+      return;
+    }
+    const built = buildFollowupPreview({
+      orgId,
+      orgName,
+      domainId,
+      domainName: domainName ? `${domainName.code} — ${domainName.name}` : domainId,
+      title,
+      ownerId,
+      ownerName: ownerName ? `${ownerName.name} (${ROLE_LABELS[ownerName.role]})` : ownerId,
+      dueDate,
+      finding,
+      summary,
+      selectionA,
+      selectionB,
+      textA,
+      textB
+    });
+    if (!built.ok) {
+      setPreviewErrors(built.errors);
+      setPreview(null);
+      return;
+    }
+    const key = resolveFollowupKey(built.contentJson, bindingRef.current) ?? crypto.randomUUID();
+    bindingRef.current = { contentJson: built.contentJson, key };
+    setPreviewErrors([]);
+    setPreview({ content: built.content, contentJson: built.contentJson, rows: built.rows, key });
+  };
+
+  const renderPassage = (side: 'A' | 'B', passage: DocAuditFinding['passageA']): JSX.Element | null => {
+    if (!passage) return <p className="empty">{missingLabel} (source text {side}).</p>;
+    const selected = side === 'A' ? selectionA : selectionB;
+    const setSelected = side === 'A' ? setSelectionA : setSelectionB;
+    return (
+      <div className="doca-passage">
+        <blockquote className="doca-quote">{passage.text}</blockquote>
+        <p>
+          {passage.totalOccurrences === 1
+            ? `Only location in source text ${side}: characters ${passage.occurrences[0]?.start ?? 0}–${passage.occurrences[0]?.end ?? 0}.`
+            : `${passage.totalOccurrences} locations in source text ${side} — choose one.`}
+        </p>
+        {occurrencesTruncated(passage) && (
+          <p className="empty">Showing the first {passage.occurrences.length} of {passage.totalOccurrences}; narrow the quotation to see more.</p>
+        )}
+        {passage.totalOccurrences > 1 && (
+          <fieldset>
+            <legend>Location for source text {side} passage</legend>
+            {passage.occurrences.map((o, i) => (
+              <label key={o.start} className="doca-option">
+                <input
+                  type="radio"
+                  name={`doca-${finding.id}-${side}`}
+                  checked={selected === i}
+                  disabled={disabled}
+                  onChange={() => {
+                    setSelected(i);
+                    touch();
+                  }}
+                />
+                <span>
+                  <strong>{occurrenceLabel(i, passage.totalOccurrences, o.start, o.end)}</strong>
+                  <br />
+                  <span className="doca-context">…{o.contextBefore}<mark>{passage.text}</mark>{o.contextAfter}…</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <article className="doca-finding" aria-label={`Finding ${finding.id}`}>
+      <h4>Finding {finding.id} — {findingKindLabel(finding.kind)}</h4>
+      {completed ? (
+        <p className="doca-created" role="status">
+          Follow-up task created: {completed.title} (<code>{completed.taskId.slice(0, 8)}</code>)
+          {completed.duplicate ? ' — this retry reused the original task.' : '.'}
+        </p>
+      ) : (
+        <div className="panel-actions" role="group" aria-label={`Decision for finding ${finding.id}`}>
+          <button onClick={() => { setVerdict('accepted'); touch(); }} disabled={disabled} aria-pressed={verdict === 'accepted'}>
+            {verdict === 'accepted' ? 'Accepted' : `Accept finding ${finding.id}`}
+          </button>
+          <button onClick={() => { setVerdict('dismissed'); touch(); }} disabled={disabled} aria-pressed={verdict === 'dismissed'}>
+            {verdict === 'dismissed' ? 'Dismissed' : `Dismiss finding ${finding.id}`}
+          </button>
+        </div>
+      )}
+      <div>
+        <label htmlFor={`doca-summary-${finding.id}`}>Finding {finding.id} summary (reviewer-confirmed)</label>
+        <textarea
+          id={`doca-summary-${finding.id}`}
+          value={summary}
+          maxLength={DOCAUDIT_SUMMARY_MAX}
+          rows={2}
+          disabled={disabled || completed !== undefined}
+          onChange={(e) => {
+            setSummary(e.target.value);
+            touch();
+          }}
+        />
+        <p className="doca-count">{summary.length} / {DOCAUDIT_SUMMARY_MAX} characters</p>
+      </div>
+      {renderPassage('A', finding.passageA)}
+      {renderPassage('B', finding.passageB)}
+      {!completed && (
+        <div className="form">
+          <input
+            value={title}
+            maxLength={DOCAUDIT_TASK_TITLE_MAX}
+            onChange={(e) => {
+              setTitle(e.target.value);
+              touch();
+            }}
+            placeholder="Follow-up task title"
+            aria-label={`Follow-up task title for finding ${finding.id}`}
+            disabled={disabled}
+          />
+          <select
+            value={domainId}
+            onChange={(e) => {
+              setDomainId(e.target.value);
+              touch();
+            }}
+            aria-label={`Regulatory domain for finding ${finding.id}`}
+            disabled={disabled}
+          >
+            {domains.map((d) => (
+              <option key={d.id} value={d.id}>{d.code} — {d.name}</option>
+            ))}
+          </select>
+          <select
+            value={ownerId}
+            onChange={(e) => {
+              setOwnerId(e.target.value);
+              touch();
+            }}
+            aria-label={`Owner for finding ${finding.id}`}
+            disabled={disabled}
+          >
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
+            ))}
+          </select>
+          <input
+            type="date"
+            value={dueDate}
+            onChange={(e) => {
+              setDueDate(e.target.value);
+              touch();
+            }}
+            aria-label={`Due date for finding ${finding.id} (required)`}
+            disabled={disabled}
+          />
+          <button onClick={openPreview} disabled={disabled || blockers.length > 0} title={blockers[0] ?? ''}>
+            Review follow-up task for finding {finding.id}
+          </button>
+          {blockers.length > 0 && verdict !== undefined && <p className="empty">{blockers[0]}</p>}
+        </div>
+      )}
+      {previewErrors.length > 0 && (
+        <ul className="doca-errors" role="alert">
+          {previewErrors.map((message) => (
+            <li key={message}>{message}</li>
+          ))}
+        </ul>
+      )}
+      {preview && !completed && (
+        <section className="doca-preview" aria-label={`Save preview for finding ${finding.id}`}>
+          <h5 ref={previewHeadingRef} tabIndex={-1}>Save preview — finding {finding.id}</h5>
+          <p>This creates one task with exactly the following saved content.</p>
+          <dl className="meta">
+            {preview.rows.map((row) => (
+              <div key={row.label}>
+                <dt>{row.label}</dt>
+                <dd>{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+          <p><strong>{FOLLOWUP_EVIDENCE_NOTE}</strong></p>
+          <p className="empty">Retry key: <code>{preview.key}</code> — identical retries reuse this key.</p>
+          <div className="panel-actions">
+            <button
+              className="primary"
+              disabled={disabled}
+              onClick={() => onCreate(finding.id, { ...preview.content, idempotencyKey: preview.key })}
+            >
+              Create follow-up task
+            </button>
+            <button onClick={() => setPreview(null)} disabled={disabled}>Back to review</button>
+          </div>
+        </section>
+      )}
+    </article>
   );
 }

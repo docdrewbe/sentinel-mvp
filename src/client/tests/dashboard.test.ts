@@ -1,13 +1,27 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DOCAUDIT_KEYS_UNAVAILABLE_CODE,
+  DOCAUDIT_SAMPLE_A,
+  DOCAUDIT_SAMPLE_B,
+  DOCAUDIT_SUMMARY_MAX,
+  DOCAUDIT_TASK_TITLE_MAX,
+  DOCAUDIT_TEXT_MAX,
+  FOLLOWUP_EVIDENCE_NOTE,
   applySettled,
   beginContext,
+  buildFollowupPreview,
   canAct,
   calendarBucket,
   capaAdvanceBlockReason,
   capaReviewBlockReason,
+  findingBlockers,
+  findingKindLabel,
   initialPanels,
+  occurrenceLabel,
+  occurrencesTruncated,
+  resolveFollowupKey,
+  shouldApplyDocAuditResponse,
   evidenceLockedReason,
   isDueSoonWork,
   isOverdueWork,
@@ -29,6 +43,12 @@ import {
   verifyStatusReason,
   verifiedLockNoteId
 } from '../dashboard.js';
+// Test-only cross-layer pin: the client mirrors these server constants.
+import {
+  DOCAUDIT_MAX_SUMMARY_CHARS,
+  DOCAUDIT_MAX_TEXT_CHARS,
+  FOLLOWUPS_UNAVAILABLE_CODE
+} from '../../server/docaudit.js';
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
 const orgs: Organization[] = [
@@ -758,5 +778,169 @@ describe('verified-record evidence lock hint (M-UI1)', () => {
       const noted = verifiedLockNoteId({ id: 't', status }) !== null;
       assert.equal(noted, reasoned, status);
     }
+  });
+});
+
+describe('document-audit review helpers (WM2 client)', () => {
+  it('mirrors the server caps and diagnostic code exactly', () => {
+    assert.equal(DOCAUDIT_TEXT_MAX, DOCAUDIT_MAX_TEXT_CHARS);
+    assert.equal(DOCAUDIT_SUMMARY_MAX, DOCAUDIT_MAX_SUMMARY_CHARS);
+    assert.equal(DOCAUDIT_TASK_TITLE_MAX, 200);
+    assert.equal(DOCAUDIT_KEYS_UNAVAILABLE_CODE, FOLLOWUPS_UNAVAILABLE_CODE);
+    assert.equal(FOLLOWUP_EVIDENCE_NOTE, 'Saved passages are review source material. They do not count as completion evidence.');
+  });
+
+  it('ships fixed synthetic sample texts within caps', () => {
+    for (const [name, text] of [['A', DOCAUDIT_SAMPLE_A], ['B', DOCAUDIT_SAMPLE_B]] as const) {
+      assert.ok(text.trim().length > 0, name);
+      assert.ok(text.length <= DOCAUDIT_TEXT_MAX, name);
+    }
+    assert.notEqual(DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B);
+  });
+
+  it('labels kinds and occurrence locations for reviewers', () => {
+    assert.equal(findingKindLabel('difference'), 'Difference');
+    assert.equal(findingKindLabel('missing_in_a'), 'Only in second text');
+    assert.equal(findingKindLabel('missing_in_b'), 'Only in first text');
+    assert.equal(occurrenceLabel(1, 3, 14, 27), 'Location 2 of 3 — characters 14–27');
+    const one = { start: 0, end: 3, contextBefore: '', contextAfter: '' };
+    assert.equal(occurrencesTruncated({ occurrences: [one, one], totalOccurrences: 2 }), false);
+    assert.equal(occurrencesTruncated({ occurrences: [one], totalOccurrences: 30 }), true);
+  });
+
+  it('applies docaudit responses only for the current context and request', () => {
+    assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'u|o', 3), true);
+    assert.equal(shouldApplyDocAuditResponse('u|o', 2, 'u|o', 3), false);
+    assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'u|other', 3), false);
+    assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'someone|o', 3), false);
+  });
+
+  it('reuses the key only for byte-identical payloads', () => {
+    const prior = { contentJson: '{"a":1}', key: 'key-1' };
+    assert.equal(resolveFollowupKey('{"a":1}', prior), 'key-1');
+    assert.equal(resolveFollowupKey('{"a":2}', prior), null);
+    assert.equal(resolveFollowupKey('{"a":1}', null), null);
+  });
+
+  it('blocks creation until accepted, located, and uncompleted', () => {
+    const passage = { text: 'q', occurrences: [], totalOccurrences: 1 };
+    const twoSided = { passageA: passage, passageB: passage };
+    assert.deepEqual(
+      findingBlockers({ verdict: undefined, finding: twoSided, selectionA: 0, selectionB: 0, completed: false }),
+      ['Accept this finding to proceed.']
+    );
+    assert.deepEqual(
+      findingBlockers({ verdict: 'dismissed', finding: twoSided, selectionA: 0, selectionB: 0, completed: false }),
+      ['This finding was dismissed.']
+    );
+    assert.deepEqual(
+      findingBlockers({ verdict: 'accepted', finding: twoSided, selectionA: undefined, selectionB: 1, completed: false }),
+      ['Choose a location for the source text A passage.']
+    );
+    assert.deepEqual(
+      findingBlockers({ verdict: 'accepted', finding: { passageA: null, passageB: passage }, selectionA: undefined, selectionB: 0, completed: false }),
+      []
+    );
+    assert.deepEqual(
+      findingBlockers({ verdict: 'accepted', finding: twoSided, selectionA: 0, selectionB: 0, completed: true }),
+      ['A follow-up task was already created for this finding.']
+    );
+  });
+
+  const PREVIEW_FINDING = {
+    id: 'f1',
+    kind: 'difference' as const,
+    summary: 'Logging method differs between drafts.',
+    passageA: {
+      text: 'logged by hand',
+      occurrences: [{ start: 62, end: 76, contextBefore: 'counts are ', contextAfter: '.' }],
+      totalOccurrences: 1
+    },
+    passageB: {
+      text: 'logged by scanner',
+      occurrences: [
+        { start: 62, end: 79, contextBefore: 'counts are ', contextAfter: '.' },
+        { start: 120, end: 137, contextBefore: 'again ', contextAfter: '.' }
+      ],
+      totalOccurrences: 2
+    }
+  };
+
+  function previewInput(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      orgId: 'org-cah',
+      orgName: 'North Pine Critical Access Hospital',
+      domainId: 'dom-hipaa-h',
+      domainName: 'HIPAA — HIPAA Privacy & Security',
+      title: 'Recheck nightly fuel counts',
+      ownerId: 'u-nurse-mgr',
+      ownerName: 'M. Lee (Department Manager)',
+      dueDate: '2027-03-01',
+      finding: PREVIEW_FINDING,
+      summary: 'Logging method differs between drafts.',
+      selectionA: 0,
+      selectionB: 1,
+      textA: 'Text A body.',
+      textB: 'Text B body.',
+      ...over
+    };
+  }
+
+  it('builds the exact saved content with one row per field', () => {
+    const preview = buildFollowupPreview(previewInput() as never);
+    assert.equal(preview.ok, true);
+    if (!preview.ok) return;
+    assert.deepEqual(preview.content, {
+      orgId: 'org-cah',
+      domainId: 'dom-hipaa-h',
+      title: 'Recheck nightly fuel counts',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2027-03-01',
+      findingId: 'f1',
+      kind: 'difference',
+      summary: 'Logging method differs between drafts.',
+      textA: 'Text A body.',
+      textB: 'Text B body.',
+      passages: [
+        { side: 'A', text: 'logged by hand', start: 62, end: 76, occurrenceIndex: 0 },
+        { side: 'B', text: 'logged by scanner', start: 120, end: 137, occurrenceIndex: 1 }
+      ]
+    });
+    // The binding JSON excludes the key so identical retries rebind.
+    assert.ok(!preview.contentJson.includes('idempotencyKey'));
+    assert.deepEqual(JSON.parse(preview.contentJson), preview.content);
+    assert.deepEqual(
+      preview.rows.map((r) => r.label),
+      ['Organization', 'Regulatory domain', 'Title', 'Owner', 'Due date', 'Finding', 'Summary', 'Passage 1 (source text A)', 'Passage 2 (source text B)']
+    );
+    assert.ok(preview.rows.some((r) => r.label === 'Summary' && r.value === 'Logging method differs between drafts.'));
+    assert.ok(preview.rows.some((r) => r.value.includes('characters 120–137 (location 2)')));
+  });
+
+  it('rejects incomplete drafts with every error at once', () => {
+    const preview = buildFollowupPreview(
+      previewInput({ domainId: '', title: '  ', ownerId: '', dueDate: '2027-02-30', summary: '', selectionB: undefined }) as never
+    );
+    assert.equal(preview.ok, false);
+    if (preview.ok) return;
+    assert.deepEqual(preview.errors, [
+      'Choose a regulatory domain.',
+      'Enter a task title.',
+      'Choose a task owner.',
+      'Enter a real due date (YYYY-MM-DD).',
+      'Finding summary must not be empty.',
+      'Choose a location for the source text B passage.'
+    ]);
+  });
+
+  it('rejects over-long titles/summaries and unavailable locations', () => {
+    const long = buildFollowupPreview(previewInput({ title: 't'.repeat(201), summary: 's'.repeat(201) }) as never);
+    assert.equal(long.ok, false);
+    if (long.ok) return;
+    assert.deepEqual(long.errors, ['Title exceeds 200 characters.', 'Summary exceeds 200 characters.']);
+    const stale = buildFollowupPreview(previewInput({ selectionB: 7 }) as never);
+    assert.equal(stale.ok, false);
+    if (stale.ok) return;
+    assert.deepEqual(stale.errors, ['Selected location for source text B is not available.']);
   });
 });

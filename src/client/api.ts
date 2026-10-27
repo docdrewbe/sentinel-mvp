@@ -4,6 +4,21 @@ function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
 }
 
+/**
+ * Typed API failure. Message is preserved so existing callers keep working;
+ * status and the server diagnostic code let new callers branch (for example
+ * the follow-up 503 carries code 'docaudit.keys.unavailable').
+ */
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.status = status;
+    if (code !== undefined) this.code = code;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -14,8 +29,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     }
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `Request failed (${res.status})`);
+    const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    throw new ApiError(body.error ?? `Request failed (${res.status})`, res.status, body.code);
   }
   return (await res.json()) as T;
 }
@@ -26,6 +41,68 @@ export interface NewTask {
   title: string;
   ownerId: string;
   dueDate: string;
+}
+
+// Document-audit wire shapes (mirror the Phase 2 server contract; the
+// server re-validates everything, so these are display/submit conveniences).
+
+export interface DocAuditOccurrence {
+  start: number;
+  end: number;
+  contextBefore: string;
+  contextAfter: string;
+}
+
+export interface DocAuditPassage {
+  text: string;
+  occurrences: DocAuditOccurrence[];
+  totalOccurrences: number;
+}
+
+export type DocAuditFindingKind = 'difference' | 'missing_in_a' | 'missing_in_b';
+
+export interface DocAuditFinding {
+  id: string;
+  kind: DocAuditFindingKind;
+  summary: string;
+  passageA: DocAuditPassage | null;
+  passageB: DocAuditPassage | null;
+}
+
+export interface DocAuditCompareResult {
+  provider: string;
+  notice?: string;
+  runId: string;
+  missingLabel: string;
+  findings: DocAuditFinding[];
+}
+
+export interface DocAuditPassageSelection {
+  side: 'A' | 'B';
+  text: string;
+  start: number;
+  end: number;
+  occurrenceIndex: number;
+}
+
+export interface DocAuditFollowupPayload {
+  idempotencyKey: string;
+  orgId: string;
+  domainId: string;
+  title: string;
+  ownerId: string;
+  dueDate: string;
+  findingId: string;
+  kind: string;
+  summary: string;
+  textA: string;
+  textB: string;
+  passages: DocAuditPassageSelection[];
+}
+
+export interface DocAuditFollowupResult {
+  task: ComplianceTask;
+  duplicate: boolean;
 }
 
 export const api = {
@@ -59,5 +136,9 @@ export const api = {
   patchObligation: (id: string, patch: object) =>
     req<RecurringObligation>(`/api/obligations/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   generateObligation: (id: string) =>
-    req<{ task: ComplianceTask; obligation: RecurringObligation }>(`/api/obligations/${id}/generate`, { method: 'POST' })
+    req<{ task: ComplianceTask; obligation: RecurringObligation }>(`/api/obligations/${id}/generate`, { method: 'POST' }),
+  docauditCompare: (body: { orgId: string; textA: string; textB: string }) =>
+    req<DocAuditCompareResult>('/api/docaudit/compare', { method: 'POST', body: JSON.stringify(body) }),
+  docauditFollowup: (body: DocAuditFollowupPayload) =>
+    req<DocAuditFollowupResult>('/api/docaudit/followups', { method: 'POST', body: JSON.stringify(body) })
 };

@@ -236,3 +236,61 @@ footer {
   font-size: 12px;
   text-align: center;
 }
+
+/* WM2 client: document-audit review panel. */
+
+.doca-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+.doca-grid textarea { width: 100%; }
+.doca-count { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+
+.doca-notice {
+  border: 2px solid var(--amber-ink);
+  background: var(--amber-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 0 10px;
+}
+.doca-notice p { margin: 4px 0 0; font-size: 12px; }
+
+.doca-pending {
+  border: 2px solid var(--amber-ink);
+  background: var(--amber-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+
+.doca-finding {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: var(--card);
+}
+.doca-finding h4 { margin: 0 0 8px; }
+.doca-finding textarea { width: 100%; }
+
+.doca-quote {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: #f4f8f7;
+}
+.doca-passage fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
+.doca-passage legend { font-weight: 600; }
+.doca-option { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
+.doca-context { color: var(--muted); font-size: 12px; }
+
+.doca-preview {
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.doca-preview h5 { margin: 0 0 8px; font-size: 14px; }
+.doca-errors { color: var(--red); margin: 8px 0; padding-left: 20px; }
+.doca-created {
+  background: #ddefe2;
+  border-radius: 8px;
+  padding: 8px 12px;
+}

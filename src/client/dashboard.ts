@@ -1,7 +1,8 @@
 // Pure dashboard helpers: org visibility/switching and resilient panel loads.
 // Kept free of React so the rules are unit-testable without a DOM.
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
-import { addDaysISO } from '../shared/scheduling.js';
+import { addDaysISO, isValidIsoDate } from '../shared/scheduling.js';
+import type { DocAuditFinding, DocAuditFollowupPayload, DocAuditPassage } from './api.js';
 import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
 import { capaGateMissing, capaNoEligibleReviewer, capaReviewIneligible, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
@@ -475,4 +476,203 @@ export function settlePanels(
   if (obligations.status === 'fulfilled') values.obligations = obligations.value;
   else errors.obligations = reasonMessage(obligations.reason);
   return { values, errors };
+}
+
+// ---------------------------------------------------------------------------
+// WM2 client: document-audit review helpers. Pure; unit-tested without a DOM.
+// ---------------------------------------------------------------------------
+
+/**
+ * Client mirrors of src/server/docaudit.ts caps. Equality with the server
+ * constants is pinned by dashboard.test.ts; the server re-validates, so
+ * these only drive counters, maxlengths, and client-side messages.
+ */
+export const DOCAUDIT_TEXT_MAX = 4000;
+export const DOCAUDIT_SUMMARY_MAX = 200;
+export const DOCAUDIT_TASK_TITLE_MAX = 200;
+/** Mirrors FOLLOWUPS_UNAVAILABLE_CODE; pinned equal by unit test. */
+export const DOCAUDIT_KEYS_UNAVAILABLE_CODE = 'docaudit.keys.unavailable';
+
+/** Fixed synthetic demo texts for the clearly labeled sample buttons. */
+export const DOCAUDIT_SAMPLE_A =
+  'North Pine site stores fuel in locked cabinets. Nightly counts are logged by hand. ' +
+  'The closing checklist is filed at the nurse station.';
+export const DOCAUDIT_SAMPLE_B =
+  'North Pine site stores fuel in locked cabinets. Nightly counts are logged by scanner. ' +
+  'The opening checklist is filed at the nurse station.';
+
+/** Preview disclosure, pinned verbatim by unit test. */
+export const FOLLOWUP_EVIDENCE_NOTE =
+  'Saved passages are review source material. They do not count as completion evidence.';
+
+export function findingKindLabel(kind: string): string {
+  if (kind === 'difference') return 'Difference';
+  if (kind === 'missing_in_a') return 'Only in second text';
+  if (kind === 'missing_in_b') return 'Only in first text';
+  return kind;
+}
+
+export function occurrenceLabel(index: number, total: number, start: number, end: number): string {
+  return `Location ${index + 1} of ${total} — characters ${start}–${end}`;
+}
+
+export function occurrencesTruncated(passage: Pick<DocAuditPassage, 'occurrences' | 'totalOccurrences'>): boolean {
+  return passage.totalOccurrences > passage.occurrences.length;
+}
+
+/** Same rule as applySettled's guard, for single-shot docaudit responses. */
+export function shouldApplyDocAuditResponse(
+  sentKey: string,
+  sentSeq: number,
+  currentKey: string,
+  currentSeq: number
+): boolean {
+  return sentKey === currentKey && sentSeq === currentSeq;
+}
+
+export interface FollowupKeyBinding {
+  contentJson: string;
+  key: string;
+}
+
+/**
+ * Idempotency-key binding: a byte-identical payload reuses the prior key;
+ * anything else returns null so the caller mints a fresh key. Pure — the
+ * caller owns randomness (crypto.randomUUID). contentJson must exclude the
+ * key itself (see buildFollowupPreview).
+ */
+export function resolveFollowupKey(
+  contentJson: string,
+  prior: FollowupKeyBinding | null
+): string | null {
+  if (prior && prior.contentJson === contentJson) return prior.key;
+  return null;
+}
+
+export type DocAuditVerdict = 'accepted' | 'dismissed';
+
+/** Reasons creation is blocked; empty means the finding may proceed. */
+export function findingBlockers(args: {
+  verdict: DocAuditVerdict | undefined;
+  finding: Pick<DocAuditFinding, 'passageA' | 'passageB'>;
+  selectionA: number | undefined;
+  selectionB: number | undefined;
+  completed: boolean;
+}): string[] {
+  if (args.completed) return ['A follow-up task was already created for this finding.'];
+  const blockers: string[] = [];
+  if (args.verdict === undefined) blockers.push('Accept this finding to proceed.');
+  else if (args.verdict === 'dismissed') blockers.push('This finding was dismissed.');
+  if (args.finding.passageA && args.selectionA === undefined) {
+    blockers.push('Choose a location for the source text A passage.');
+  }
+  if (args.finding.passageB && args.selectionB === undefined) {
+    blockers.push('Choose a location for the source text B passage.');
+  }
+  return blockers;
+}
+
+export interface FollowupPreviewInput {
+  orgId: string;
+  orgName: string;
+  domainId: string;
+  domainName: string;
+  title: string;
+  ownerId: string;
+  ownerName: string;
+  dueDate: string;
+  finding: DocAuditFinding;
+  summary: string;
+  selectionA: number | undefined;
+  selectionB: number | undefined;
+  textA: string;
+  textB: string;
+}
+
+export interface FollowupPreviewRow {
+  label: string;
+  value: string;
+}
+
+export type FollowupPreview =
+  | {
+      ok: true;
+      content: Omit<DocAuditFollowupPayload, 'idempotencyKey'>;
+      /** Canonical JSON of the saved content, key excluded, for key binding. */
+      contentJson: string;
+      rows: FollowupPreviewRow[];
+    }
+  | { ok: false; errors: string[] };
+
+/**
+ * Builds the exact follow-up content plus one preview row per saved field.
+ * Selections resolve against the occurrence lists the server returned; the
+ * server re-verifies every offset. contentJson excludes the idempotency
+ * key so byte-identical retries rebind to the same key.
+ */
+export function buildFollowupPreview(input: FollowupPreviewInput): FollowupPreview {
+  const errors: string[] = [];
+  if (!input.domainId) errors.push('Choose a regulatory domain.');
+  if (!input.title.trim()) errors.push('Enter a task title.');
+  else if (input.title.trim().length > DOCAUDIT_TASK_TITLE_MAX) errors.push('Title exceeds 200 characters.');
+  if (!input.ownerId) errors.push('Choose a task owner.');
+  if (!isValidIsoDate(input.dueDate)) errors.push('Enter a real due date (YYYY-MM-DD).');
+  if (!input.summary.trim()) errors.push('Finding summary must not be empty.');
+  else if (input.summary.trim().length > DOCAUDIT_SUMMARY_MAX) errors.push('Summary exceeds 200 characters.');
+  const sides: Array<{ side: 'A' | 'B'; passage: DocAuditFinding['passageA']; selected: number | undefined }> = [
+    { side: 'A', passage: input.finding.passageA, selected: input.selectionA },
+    { side: 'B', passage: input.finding.passageB, selected: input.selectionB }
+  ];
+  const passages: DocAuditFollowupPayload['passages'] = [];
+  for (const { side, passage, selected } of sides) {
+    if (!passage) continue;
+    if (selected === undefined) {
+      errors.push(`Choose a location for the source text ${side} passage.`);
+      continue;
+    }
+    const occurrence = passage.occurrences[selected];
+    if (!occurrence) {
+      errors.push(`Selected location for source text ${side} is not available.`);
+      continue;
+    }
+    passages.push({
+      side,
+      text: passage.text,
+      start: occurrence.start,
+      end: occurrence.end,
+      occurrenceIndex: selected
+    });
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  const content: Omit<DocAuditFollowupPayload, 'idempotencyKey'> = {
+    orgId: input.orgId,
+    domainId: input.domainId,
+    title: input.title.trim(),
+    ownerId: input.ownerId,
+    dueDate: input.dueDate,
+    findingId: input.finding.id,
+    kind: input.finding.kind,
+    summary: input.summary.trim(),
+    textA: input.textA,
+    textB: input.textB,
+    passages
+  };
+  return {
+    ok: true,
+    content,
+    contentJson: JSON.stringify(content),
+    rows: [
+      { label: 'Organization', value: input.orgName },
+      { label: 'Regulatory domain', value: input.domainName },
+      { label: 'Title', value: content.title },
+      { label: 'Owner', value: input.ownerName },
+      { label: 'Due date', value: content.dueDate },
+      { label: 'Finding', value: `${content.findingId} — ${findingKindLabel(content.kind)}` },
+      { label: 'Summary', value: content.summary },
+      ...passages.map((p, i) => ({
+        label: `Passage ${i + 1} (source text ${p.side})`,
+        value: `“${p.text}” at characters ${p.start}–${p.end} (location ${p.occurrenceIndex + 1})`
+      }))
+    ]
+  };
 }
