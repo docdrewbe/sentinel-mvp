@@ -21,7 +21,6 @@ import type {
   ComplianceTask,
   ControlType,
   DemoUser,
-  DocAuditIdempotencyRecord,
   EscalationRule,
   EvidenceRef,
   EvidenceRequirement,
@@ -51,11 +50,13 @@ export interface DbShape {
   obligations: RecurringObligation[];
   audit: AuditEvent[];
   /**
-   * Phase 2: follow-up idempotency records. Additive only — version stays
-   * 1 because loadDb already tolerant-reads missing collections, so no
-   * migration contract requires a bump.
+   * Phase 2: follow-up idempotency records. Typed as unknown because
+   * WM2-1/WM2-2 preserve the stored value verbatim: only a validated array
+   * is ever used (see docauditKeysHealth), and whatever was stored —
+   * valid, missing, or corrupt — round-trips through unrelated writes
+   * untouched. Additive only — version stays 1.
    */
-  docauditKeys: DocAuditIdempotencyRecord[];
+  docauditKeys: unknown;
 }
 
 export class ValidationError extends Error {}
@@ -89,17 +90,33 @@ export function monotonicNow(): string {
   return bumped;
 }
 
+/**
+ * WM2-1 legacy probe: true when any task carries follow-up source
+ * material. Defensive against corrupt task entries (never throws), since
+ * loadDb must not crash on malformed data.
+ */
+function hasFollowupTasks(tasks: unknown): boolean {
+  if (!Array.isArray(tasks)) return false;
+  return tasks.some(
+    (t: unknown) =>
+      typeof t === 'object' && t !== null && (t as Record<string, unknown>).docauditSource !== undefined
+  );
+}
+
 export function loadDb(): DbShape {
   const file = dataFilePath();
   if (!existsSync(file)) return emptyDb();
   // Tolerant read: databases written before templates existed gain defaults.
   const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<DbShape>;
   const db: DbShape = { ...emptyDb(), ...raw };
-  // Phase 2: pre-follow-up databases have no docauditKeys collection; an
-  // explicit non-array (corrupt or hand-edited) also degrades to empty
-  // rather than crashing the server. Records are append-only metadata, so
-  // defaulting here loses nothing the old database ever held.
-  if (!Array.isArray(db.docauditKeys)) db.docauditKeys = [];
+  // WM2-1: a legacy database — collection absent AND no follow-up tasks —
+  // defaults to []. Every other unusual state keeps its stored value
+  // verbatim (including absence, as undefined): nothing here repairs,
+  // discards, or guesses, so unrelated writes preserve the original data
+  // byte-for-byte and the follow-ups endpoint judges health per request.
+  if (!('docauditKeys' in raw)) {
+    db.docauditKeys = hasFollowupTasks(db.tasks) ? undefined : [];
+  }
   backfillAuditOrgIds(db);
   // CAL3: organizations stored before time zones keep the pre-CAL3
   // behavior by defaulting to UTC.

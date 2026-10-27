@@ -13,7 +13,8 @@
 // proof of noncompliance. Model output never executes actions.
 import { createHash } from 'node:crypto';
 import { ValidationError } from './store.js';
-import type { DocAuditSavedPassage } from '../shared/types.js';
+import type { DbShape } from './store.js';
+import type { DocAuditIdempotencyRecord, DocAuditSavedPassage } from '../shared/types.js';
 
 export const DOCAUDIT_MAX_TEXT_CHARS = 4000;
 export const DOCAUDIT_MAX_SUMMARY_CHARS = 200;
@@ -29,6 +30,10 @@ export const DOCAUDIT_MAX_KEY_CHARS = 128;
 export const DOCAUDIT_MAX_FINDING_ID_CHARS = 64;
 /** Fixed 409 message: same idempotency key reused with different content. */
 export const IDEMPOTENCY_CONFLICT = 'Idempotency key already used with different content.';
+/** Fixed 503 message: stored idempotency data is missing or corrupt. */
+export const FOLLOWUPS_UNAVAILABLE = 'Document-audit follow-ups are unavailable.';
+/** Fixed diagnostic code accompanying the 503 above. */
+export const FOLLOWUPS_UNAVAILABLE_CODE = 'docaudit.keys.unavailable';
 
 /** Exact label for a missing side. Rendered by reviewers, never a verdict. */
 export const NO_MATCHING_PASSAGE = 'No matching passage identified';
@@ -351,6 +356,57 @@ export function validateFollowupInput(body: unknown): ValidatedFollowup {
     passages
   };
   return { key, ...canonical, contentHash: followupContentHash(canonical) };
+}
+
+function isIdempotencyRecord(value: unknown): value is DocAuditIdempotencyRecord {
+  if (!isRecord(value)) return false;
+  for (const field of ['key', 'actorId', 'orgId', 'taskId', 'contentHash', 'createdAt'] as const) {
+    const entry = value[field];
+    if (typeof entry !== 'string' || !entry.trim()) return false;
+  }
+  return true;
+}
+
+export type DocAuditKeysHealth = { ok: true; keys: DocAuditIdempotencyRecord[] } | { ok: false };
+
+/**
+ * WM2-1/WM2-2 stored-data integrity gate for the follow-ups endpoint. Never
+ * throws, never mutates, never repairs: it answers only whether the stored
+ * idempotency data is safe to use. Healthy means the collection is an
+ * array, every entry is well-formed, no (actor, org, key) scope repeats,
+ * every record resolves to a follow-up task in the record's own org, and
+ * every follow-up task is covered by a record. Anything else — missing or
+ * wrong-type collections where follow-ups exist, null or malformed
+ * entries, duplicate/conflicting keys, broken task references, orphaned
+ * follow-up tasks — is unsafe, and the endpoint answers 503 while the
+ * stored data stays untouched. On success `keys` is the live stored
+ * array (validated element-by-element above), so appends persist.
+ */
+export function docauditKeysHealth(db: DbShape): DocAuditKeysHealth {
+  const stored: unknown = db.docauditKeys;
+  if (!Array.isArray(stored)) return { ok: false };
+  const taskList: unknown[] = Array.isArray(db.tasks) ? db.tasks : [];
+  const byId = new Map<unknown, Record<string, unknown>>();
+  for (const t of taskList) {
+    if (typeof t !== 'object' || t === null) continue;
+    const rec = t as Record<string, unknown>;
+    if (!byId.has(rec.id)) byId.set(rec.id, rec);
+  }
+  const seenScopes = new Set<string>();
+  const referenced = new Set<unknown>();
+  for (const entry of stored) {
+    if (!isIdempotencyRecord(entry)) return { ok: false };
+    const scope = JSON.stringify([entry.actorId, entry.orgId, entry.key]);
+    if (seenScopes.has(scope)) return { ok: false };
+    seenScopes.add(scope);
+    const task = byId.get(entry.taskId);
+    if (!task || task.orgId !== entry.orgId || task.docauditSource === undefined) return { ok: false };
+    referenced.add(entry.taskId);
+  }
+  for (const task of byId.values()) {
+    if (task.docauditSource !== undefined && !referenced.has(task.id)) return { ok: false };
+  }
+  return { ok: true, keys: stored as DocAuditIdempotencyRecord[] };
 }
 
 export type MockDocAuditMode = 'ok' | 'malformed' | 'timeout' | 'adversarial';

@@ -31,12 +31,15 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import {
+  FOLLOWUPS_UNAVAILABLE,
+  FOLLOWUPS_UNAVAILABLE_CODE,
   IDEMPOTENCY_CONFLICT,
   NO_MATCHING_PASSAGE,
   PROVIDER_NOT_CONFIGURED,
   ProviderError,
   checkDocAuditThrottle,
   currentTimeoutMs,
+  docauditKeysHealth,
   resolveProvider,
   validateCompareInput,
   validateFollowupInput,
@@ -337,6 +340,11 @@ export function createApp(db: DbShape): express.Express {
   // retry returns the original task with no new audit event, while the
   // same key with different content answers 409. Authorization runs
   // before the idempotency lookup on every call, retries included.
+  //
+  // WM2-1/WM2-2: creation and replay are disabled with a fixed 503 while
+  // the stored idempotency data is missing or corrupt. The gate runs
+  // after authorization but before body validation, writes nothing, and
+  // leaves every other endpoint available.
   app.post('/api/docaudit/followups', (req: AuthRequest, res) => {
     const user = req.user as DemoUser;
     if (
@@ -373,28 +381,36 @@ export function createApp(db: DbShape): express.Express {
       res.status(400).json({ error: 'Unknown organization.' });
       return;
     }
+    // WM2-1/WM2-2 integrity gate: unsafe stored idempotency data disables
+    // creation and replay without writing anything.
+    const keysHealth = docauditKeysHealth(db);
+    if (!keysHealth.ok) {
+      res.status(503).json({ error: FOLLOWUPS_UNAVAILABLE, code: FOLLOWUPS_UNAVAILABLE_CODE });
+      return;
+    }
+    const keys = keysHealth.keys;
     try {
       const clean = validateFollowupInput(req.body);
       const scopeMatch = (r: { key: string; actorId: string; orgId: string }): boolean =>
         r.key === clean.key && r.actorId === user.id && r.orgId === clean.orgId;
       // Fast path: a recorded retry answers without writing. The lookup
       // inside mutateDb below is authoritative against races.
-      const recorded = db.docauditKeys.find(scopeMatch);
+      const recorded = keys.find(scopeMatch);
       if (recorded) {
         if (recorded.contentHash !== clean.contentHash) {
           res.status(409).json({ error: IDEMPOTENCY_CONFLICT });
           return;
         }
         const original = db.tasks.find((t) => t.id === recorded.taskId);
-        // Fail closed on a corrupt record (atomic writes make this
-        // unreachable short of hand-edited data): never invent a task.
+        // Fail closed (the health gate above makes this unreachable short
+        // of a future refactor that skips it): never invent a task.
         if (!original) throw new Error('Follow-up record without task.');
         res.json({ task: presentTask(original), duplicate: true });
         return;
       }
       let replayed = false;
       const task = mutateDb(db, () => {
-        const raced = db.docauditKeys.find(scopeMatch);
+        const raced = keys.find(scopeMatch);
         if (raced) {
           if (raced.contentHash !== clean.contentHash) throw new ConflictError(IDEMPOTENCY_CONFLICT);
           const original = db.tasks.find((t) => t.id === raced.taskId);
@@ -417,7 +433,7 @@ export function createApp(db: DbShape): express.Express {
           createdBy: user.id,
           createdAt: created.createdAt
         };
-        db.docauditKeys.push({
+        keys.push({
           key: clean.key,
           actorId: user.id,
           orgId: clean.orgId,

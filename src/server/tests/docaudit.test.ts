@@ -7,6 +7,8 @@ import {
   DOCAUDIT_MAX_SUMMARY_CHARS,
   DOCAUDIT_MAX_TEXT_CHARS,
   DOCAUDIT_THROTTLE_MAX,
+  FOLLOWUPS_UNAVAILABLE,
+  FOLLOWUPS_UNAVAILABLE_CODE,
   IDEMPOTENCY_CONFLICT,
   MOCK_NOTICE,
   NO_MATCHING_PASSAGE,
@@ -17,6 +19,7 @@ import {
   checkDocAuditThrottle,
   createMockProvider,
   currentTimeoutMs,
+  docauditKeysHealth,
   findOccurrences,
   followupContentHash,
   resolveProvider,
@@ -25,6 +28,7 @@ import {
   validateProviderOutput
 } from '../docaudit.js';
 import { ValidationError } from '../store.js';
+import type { DbShape } from '../store.js';
 
 const TEXT_A = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by hand.';
 const TEXT_B = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by scanner.';
@@ -360,5 +364,85 @@ describe('follow-up validation (Phase 2)', () => {
 
   it('pins the fixed 409 conflict message', () => {
     assert.equal(IDEMPOTENCY_CONFLICT, 'Idempotency key already used with different content.');
+  });
+});
+
+describe('follow-up storage health (WM2-1/WM2-2)', () => {
+  const TASK = {
+    id: 'task-followup-1',
+    orgId: 'org-cah',
+    docauditSource: { findingId: 'f1', kind: 'difference', summary: 's', passages: [] }
+  };
+  const RECORD = {
+    key: 'k1',
+    actorId: 'u-nurse-mgr',
+    orgId: 'org-cah',
+    taskId: 'task-followup-1',
+    contentHash: 'a'.repeat(64),
+    createdAt: '2027-01-01T00:00:00.000Z'
+  };
+  function fakeDb(over: { docauditKeys?: unknown; tasks?: unknown }): DbShape {
+    return {
+      version: 1,
+      orgs: [],
+      domains: [],
+      users: [],
+      tasks: [],
+      templates: [],
+      capas: [],
+      obligations: [],
+      audit: [],
+      docauditKeys: [],
+      ...over
+    } as unknown as DbShape;
+  }
+
+  it('accepts healthy stores and returns the live array', () => {
+    const db = fakeDb({ docauditKeys: [{ ...RECORD }], tasks: [{ ...TASK }] });
+    const health = docauditKeysHealth(db);
+    assert.equal(health.ok, true);
+    if (health.ok) assert.equal(health.keys, db.docauditKeys);
+    assert.equal(docauditKeysHealth(fakeDb({})).ok, true);
+  });
+
+  it('rejects missing and wrong-type collections', () => {
+    for (const keys of [undefined, null, 42, 'keys', { k: 1 }, true]) {
+      assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: keys, tasks: [{ ...TASK }] })).ok, false);
+    }
+    // Corrupt task lists fail closed rather than throwing.
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD }], tasks: 42 })).ok, false);
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD }], tasks: [null] })).ok, false);
+  });
+
+  it('rejects null, malformed, and duplicate entries', () => {
+    const tasks = [{ ...TASK }];
+    for (const entry of [null, {}, { key: 'k1' }, { ...RECORD, taskId: 42 }, { ...RECORD, key: '' }, 'x']) {
+      assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [entry], tasks })).ok, false);
+    }
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD }, { ...RECORD }], tasks })).ok, false);
+    assert.equal(
+      docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD }, { ...RECORD, contentHash: 'b'.repeat(64) }], tasks })).ok,
+      false
+    );
+    // Distinct scopes stay healthy.
+    const other = { ...RECORD, key: 'k2', taskId: 'task-followup-2' };
+    const task2 = { ...TASK, id: 'task-followup-2' };
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD }, other], tasks: [{ ...TASK }, task2] })).ok, true);
+  });
+
+  it('rejects broken references, org mismatches, and orphaned tasks', () => {
+    const tasks = [{ ...TASK }];
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD, taskId: 'task-nope' }], tasks })).ok, false);
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD, orgId: 'org-clinic' }], tasks })).ok, false);
+    assert.equal(
+      docauditKeysHealth(fakeDb({ docauditKeys: [{ ...RECORD }], tasks: [{ id: 'task-followup-1', orgId: 'org-cah' }] })).ok,
+      false
+    );
+    assert.equal(docauditKeysHealth(fakeDb({ docauditKeys: [], tasks })).ok, false);
+  });
+
+  it('pins the fixed 503 message and diagnostic code', () => {
+    assert.equal(FOLLOWUPS_UNAVAILABLE, 'Document-audit follow-ups are unavailable.');
+    assert.equal(FOLLOWUPS_UNAVAILABLE_CODE, 'docaudit.keys.unavailable');
   });
 });

@@ -9,6 +9,7 @@ import http, { type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DocAuditIdempotencyRecord } from '../../shared/types.js';
 
 const workdir = mkdtempSync(join(tmpdir(), 'sentinel-api-'));
 process.env.SENTINEL_DATA_FILE = join(workdir, 'sentinel.json');
@@ -55,6 +56,11 @@ async function call(
   });
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, json };
+}
+
+/** Narrow the verbatim stored collection in tests with known-healthy data. */
+function keysOf(db: { docauditKeys: unknown }): DocAuditIdempotencyRecord[] {
+  return db.docauditKeys as DocAuditIdempotencyRecord[];
 }
 
 /** Disk state must always equal memory state, with a valid audit chain. */
@@ -7105,12 +7111,12 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
       );
       assert.equal(TEXT_A.slice(task.docauditSource.passages[0].start, task.docauditSource.passages[0].end), 'logged by hand');
       // Idempotency record is scoped to the actor and org.
-      assert.equal(db.docauditKeys.length, 1);
-      assert.equal(db.docauditKeys[0].key, 'phase2-followup-001');
-      assert.equal(db.docauditKeys[0].actorId, 'u-nurse-mgr');
-      assert.equal(db.docauditKeys[0].orgId, 'org-cah');
-      assert.equal(db.docauditKeys[0].taskId, task.id);
-      assert.match(db.docauditKeys[0].contentHash, /^[0-9a-f]{64}$/);
+      assert.equal(keysOf(db).length, 1);
+      assert.equal(keysOf(db)[0].key, 'phase2-followup-001');
+      assert.equal(keysOf(db)[0].actorId, 'u-nurse-mgr');
+      assert.equal(keysOf(db)[0].orgId, 'org-cah');
+      assert.equal(keysOf(db)[0].taskId, task.id);
+      assert.match(keysOf(db)[0].contentHash, /^[0-9a-f]{64}$/);
       // Two audit events, both metadata-only: no passage text, no summary.
       const after = await auditEvents(base);
       assert.equal(after.length, audits.length + 2);
@@ -7186,7 +7192,7 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
       assert.equal(clinic.status, 201);
       assert.equal((clinic.json as unknown as FollowupJson).task.orgId, 'org-clinic');
       assert.equal(db.tasks.length, tasksBefore + 3);
-      assert.equal(db.docauditKeys.filter((r) => r.key === sharedKey).length, 3);
+      assert.equal(keysOf(db).filter((r) => r.key === sharedKey).length, 3);
       // Each scope replays only its own record.
       const replay = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody({ idempotencyKey: sharedKey }));
       assert.equal(replay.status, 200);
@@ -7301,7 +7307,7 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
       assert.equal(duplicates, 7);
       assert.equal(ids.size, 1);
       assert.equal(db.tasks.length, tasksBefore + 1);
-      assert.equal(db.docauditKeys.filter((r) => r.key === 'phase2-race-key').length, 1);
+      assert.equal(keysOf(db).filter((r) => r.key === 'phase2-race-key').length, 1);
       assert.equal((await auditEvents(base)).length, audits + 2);
       assertDiskMatchesMemory(db);
     } finally {
@@ -7320,7 +7326,7 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
     const db2 = store.loadDb();
     const restarted = await listenOn(db2);
     try {
-      assert.equal(db2.docauditKeys.length, 1);
+      assert.equal(keysOf(db2).length, 1);
       const replay = await call(restarted.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
       assert.equal(replay.status, 200);
       const replayBody = replay.json as unknown as FollowupJson;
@@ -7362,7 +7368,7 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
       assert.equal(failed.status, 500);
       assert.deepEqual(failed.json, { error: 'Internal error.' });
       assert.equal(db.tasks.length, tasksBefore);
-      assert.equal(db.docauditKeys.length, 0);
+      assert.equal(keysOf(db).length, 0);
       assert.equal((await auditEvents(base)).length, audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assert.deepEqual(tempFiles(), []);
@@ -7471,13 +7477,21 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
     try {
       const created = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
       assert.equal(created.status, 201);
-      const taskId = (created.json as unknown as FollowupJson).task.id;
+      const audits = (await auditEvents(base)).length;
+      const diskBefore = readFileSync(dataFile, 'utf8');
       // Simulate hand-edited data: the task is gone but the record remains.
+      // WM2-2 surfaces this as a fixed 503, never a 500 or a guess.
+      const taskId = (created.json as unknown as FollowupJson).task.id;
       db.tasks = db.tasks.filter((t) => t.id !== taskId);
       const replay = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
-      assert.equal(replay.status, 500);
-      assert.deepEqual(replay.json, { error: 'Internal error.' });
-      assert.equal(logged.length, 1);
+      assert.equal(replay.status, 503);
+      assert.deepEqual(replay.json, {
+        error: 'Document-audit follow-ups are unavailable.',
+        code: 'docaudit.keys.unavailable'
+      });
+      assert.equal((await auditEvents(base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.equal(logged.length, 0);
     } finally {
       console.error = original;
       await close();
@@ -7505,11 +7519,13 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
       } finally {
         await revived.close();
       }
-      // An explicit non-array also degrades to empty instead of crashing.
+      // WM2-1: an explicit non-array is preserved verbatim instead of
+      // crashing or being silently replaced; the WM2-2 suite below pins
+      // the 503 it produces.
       const corrupt = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
       corrupt.docauditKeys = 42;
       writeFileSync(dataFile, JSON.stringify(corrupt), 'utf8');
-      assert.deepEqual(store.loadDb().docauditKeys, []);
+      assert.equal(store.loadDb().docauditKeys, 42);
     } finally {
       try {
         await close();
@@ -7539,10 +7555,332 @@ describe('Document audit follow-ups (Phase 2, server)', () => {
       assert.equal(second.status, 201);
       assert.notEqual(String(second.json.id), String(first.json.id));
       assert.equal(db.tasks.length, tasksBefore + 2);
-      assert.equal(db.docauditKeys.length, 0);
+      assert.equal(keysOf(db).length, 0);
       assertDiskMatchesMemory(db);
     } finally {
       await close();
+    }
+  });
+
+  it('WM2-1: a missing collection with follow-up tasks disables follow-ups and stays missing', async () => {
+    const seeded = await startServer();
+    const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(created.status, 201);
+    await seeded.close();
+    // Simulate record loss: the follow-up task survives, the collection does not.
+    const file = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+    delete file.docauditKeys;
+    writeFileSync(dataFile, JSON.stringify(file, null, 2), 'utf8');
+    const db = store.loadDb();
+    assert.equal(db.docauditKeys, undefined);
+    const server = await listenOn(db);
+    try {
+      const audits = (await auditEvents(server.base)).length;
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      for (const body of [followupBody(), followupBody({ summary: 'Changed wording, same key.' })]) {
+        const res = await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', body);
+        assert.equal(res.status, 503);
+        assert.deepEqual(res.json, {
+          error: 'Document-audit follow-ups are unavailable.',
+          code: 'docaudit.keys.unavailable'
+        });
+      }
+      assert.equal((await auditEvents(server.base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      // An unrelated successful write preserves the absence byte-for-byte.
+      const other = await call(server.base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'Unrelated task during outage',
+        ownerId: 'u-staff',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(other.status, 201);
+      assert.ok(!('docauditKeys' in (JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>)));
+      assert.equal(db.docauditKeys, undefined);
+      assert.equal(
+        (await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody())).status,
+        503
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('WM2-1: wrong-type collections disable follow-ups and survive unrelated writes', async () => {
+    for (const [name, value] of [
+      ['number', 42],
+      ['null', null],
+      ['string', 'keys'],
+      ['object', { stolen: true }],
+      ['boolean', true]
+    ] as const) {
+      const seeded = await startServer();
+      const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(created.status, 201, name);
+      await seeded.close();
+      const file = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+      file.docauditKeys = value;
+      writeFileSync(dataFile, JSON.stringify(file), 'utf8');
+      const db = store.loadDb();
+      assert.deepEqual(db.docauditKeys, value, name);
+      const server = await listenOn(db);
+      try {
+        const audits = (await auditEvents(server.base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+        assert.equal(res.status, 503, name);
+        assert.deepEqual(res.json, {
+          error: 'Document-audit follow-ups are unavailable.',
+          code: 'docaudit.keys.unavailable'
+        });
+        assert.equal((await auditEvents(server.base)).length, audits, name);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore, name);
+        const other = await call(server.base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          domainId: 'dom-osha-h',
+          title: `Unrelated task during ${name} outage`,
+          ownerId: 'u-staff',
+          dueDate: '2026-12-01'
+        });
+        assert.equal(other.status, 201, name);
+        assert.deepEqual((JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>).docauditKeys, value, name);
+        assert.deepEqual(db.docauditKeys, value, name);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('WM2-2: null and malformed entries disable follow-ups; extra fields are tolerated', async () => {
+    const seeded = await startServer();
+    const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(created.status, 201);
+    const pristine = JSON.parse(readFileSync(dataFile, 'utf8')) as {
+      docauditKeys: Array<Record<string, unknown>>;
+    };
+    const record = pristine.docauditKeys[0];
+    await seeded.close();
+    const badEntries: Array<[string, unknown]> = [
+      ['null entry', null],
+      ['empty object', {}],
+      ['missing fields', { key: 'phase2-followup-001' }],
+      ['non-string taskId', { ...record, taskId: 42 }],
+      ['blank key', { ...record, key: '   ' }],
+      ['string entry', 'not-a-record']
+    ];
+    for (const [name, entry] of badEntries) {
+      const file = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+      file.docauditKeys = [entry];
+      writeFileSync(dataFile, JSON.stringify(file), 'utf8');
+      const db = store.loadDb();
+      const server = await listenOn(db);
+      try {
+        const audits = (await auditEvents(server.base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+        assert.equal(res.status, 503, name);
+        assert.deepEqual(res.json, {
+          error: 'Document-audit follow-ups are unavailable.',
+          code: 'docaudit.keys.unavailable'
+        });
+        assert.equal((await auditEvents(server.base)).length, audits, name);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore, name);
+      } finally {
+        await server.close();
+      }
+    }
+    // Positive control: unknown extra fields do not affect health.
+    const withExtra = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+    withExtra.docauditKeys = [{ ...record, operatorNote: 'tolerated' }];
+    writeFileSync(dataFile, JSON.stringify(withExtra), 'utf8');
+    const db = store.loadDb();
+    const server = await listenOn(db);
+    try {
+      const replay = await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(replay.status, 200);
+      assert.equal((replay.json as unknown as FollowupJson).duplicate, true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('WM2-2: duplicate and conflicting keys disable follow-ups without guessing', async () => {
+    const seeded = await startServer();
+    const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(created.status, 201);
+    const pristine = JSON.parse(readFileSync(dataFile, 'utf8')) as {
+      docauditKeys: Array<Record<string, unknown>>;
+    };
+    const record = pristine.docauditKeys[0];
+    await seeded.close();
+    const cases: Array<[string, unknown[]]> = [
+      ['identical duplicate', [record, { ...record }]],
+      ['conflicting duplicate', [record, { ...record, contentHash: '0'.repeat(64) }]]
+    ];
+    for (const [name, keys] of cases) {
+      const file = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+      file.docauditKeys = keys;
+      writeFileSync(dataFile, JSON.stringify(file), 'utf8');
+      const db = store.loadDb();
+      const server = await listenOn(db);
+      try {
+        const audits = (await auditEvents(server.base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+        assert.equal(res.status, 503, name);
+        assert.equal((await auditEvents(server.base)).length, audits, name);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore, name);
+        // Neither entry is discarded or repaired by the refusal.
+        assert.deepEqual(keysOf(db).length, 2, name);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('WM2-2: broken task references and orphaned follow-up tasks disable follow-ups', async () => {
+    const seeded = await startServer();
+    const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(created.status, 201);
+    const taskId = (created.json as unknown as FollowupJson).task.id;
+    const pristine = readFileSync(dataFile, 'utf8');
+    await seeded.close();
+    const mutate = (fn: (file: Record<string, unknown>) => void): void => {
+      const file = JSON.parse(pristine) as Record<string, unknown>;
+      fn(file);
+      writeFileSync(dataFile, JSON.stringify(file), 'utf8');
+    };
+    const cases: Array<[string, (file: Record<string, unknown>) => void]> = [
+      ['dangling taskId', (file) => {
+        ((file.docauditKeys as Array<Record<string, unknown>>)[0].taskId as string) = 'task-nope';
+      }],
+      ['record org mismatch', (file) => {
+        ((file.docauditKeys as Array<Record<string, unknown>>)[0].orgId as string) = 'org-clinic';
+      }],
+      ['stripped source material', (file) => {
+        const task = (file.tasks as Array<Record<string, unknown>>).find((t) => t.id === taskId);
+        delete task?.docauditSource;
+      }],
+      ['emptied collection', (file) => {
+        file.docauditKeys = [];
+      }]
+    ];
+    for (const [name, fn] of cases) {
+      mutate(fn);
+      const db = store.loadDb();
+      const server = await listenOn(db);
+      try {
+        const audits = (await auditEvents(server.base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+        assert.equal(res.status, 503, name);
+        assert.deepEqual(res.json, {
+          error: 'Document-audit follow-ups are unavailable.',
+          code: 'docaudit.keys.unavailable'
+        });
+        assert.equal((await auditEvents(server.base)).length, audits, name);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore, name);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('WM2-2: unrelated features stay available while follow-ups are disabled', async () => {
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    process.env.DOCAUDIT_PROVIDER = 'mock';
+    docaudit.__setMockDocAuditMode('ok');
+    docaudit.__setDocAuditTimeoutMs(null);
+    docaudit.__resetDocAuditThrottle();
+    const seeded = await startServer();
+    const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(created.status, 201);
+    await seeded.close();
+    const file = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+    file.docauditKeys = [null];
+    writeFileSync(dataFile, JSON.stringify(file), 'utf8');
+    const db = store.loadDb();
+    const server = await listenOn(db);
+    try {
+      assert.equal((await call(server.base, 'GET', '/api/tasks?orgId=org-cah', 'u-nurse-mgr')).status, 200);
+      assert.equal((await call(server.base, 'GET', '/api/audit?limit=5', 'u-officer')).status, 200);
+      assert.equal(
+        (await call(server.base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', { orgId: 'org-cah', textA: TEXT_A, textB: TEXT_B })).status,
+        200
+      );
+      const other = await call(server.base, 'POST', '/api/tasks', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'Unrelated task during outage',
+        ownerId: 'u-staff',
+        dueDate: '2026-12-01'
+      });
+      assert.equal(other.status, 201);
+      const patched = await call(server.base, 'PATCH', `/api/tasks/${String(other.json.id)}`, 'u-nurse-mgr', {
+        status: 'in_progress'
+      });
+      assert.equal(patched.status, 200);
+      // The corrupt collection round-tripped through those writes untouched.
+      assert.deepEqual((JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>).docauditKeys, [null]);
+      assert.deepEqual(db.docauditKeys, [null]);
+      // Follow-up creation and replay stay disabled throughout.
+      for (const body of [followupBody({ idempotencyKey: 'phase2-fresh-during-outage' }), followupBody()]) {
+        assert.equal((await call(server.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', body)).status, 503);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      docaudit.__setMockDocAuditMode('ok');
+      docaudit.__setDocAuditTimeoutMs(null);
+      docaudit.__resetDocAuditThrottle();
+      await server.close();
+    }
+  });
+
+  it('WM2-2: the 503 path leaks no content to responses, logs, or storage', async () => {
+    const CANARY = 'WM22-CANARY-v8k3n7';
+    const seeded = await startServer();
+    const created = await call(seeded.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(created.status, 201);
+    await seeded.close();
+    const file = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+    // Broken reference carrying a canary, plus a canary smuggled as an extra field.
+    (file.docauditKeys as Array<Record<string, unknown>>)[0].taskId = `missing-${CANARY}`;
+    (file.docauditKeys as Array<Record<string, unknown>>)[0].smuggled = CANARY;
+    writeFileSync(dataFile, JSON.stringify(file), 'utf8');
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    const db = store.loadDb();
+    const server = await listenOn(db);
+    const assertNoLeak = (text: string): void => {
+      for (const len of [8, 16, CANARY.length]) {
+        assert.ok(!text.includes(CANARY.slice(0, len)), `leaked canary prefix len ${len}`);
+      }
+    };
+    try {
+      const audits = (await auditEvents(server.base)).length;
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const res = await call(
+        server.base,
+        'POST',
+        '/api/docaudit/followups',
+        'u-nurse-mgr',
+        followupBody({ summary: `Summary carrying ${CANARY} too.` })
+      );
+      assert.equal(res.status, 503);
+      assertNoLeak(JSON.stringify(res.json));
+      assert.equal((await auditEvents(server.base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.equal(logged.length, 0);
+      // The canary-bearing stored data is preserved exactly, not scrubbed.
+      assert.ok(readFileSync(dataFile, 'utf8').includes(CANARY));
+    } finally {
+      console.error = original;
+      await server.close();
     }
   });
 });
