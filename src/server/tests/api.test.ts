@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, renameSync as realRenameSync, statSync } from 'node:fs';
-import type { Server } from 'node:http';
+import http, { type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -103,7 +103,7 @@ describe('D1 atomic persistence (HTTP)', () => {
     }
   });
 
-  it('rolls back memory and disk when persistence fails, and logs the error', async () => {
+  it('rolls back memory and disk when persistence fails, and logs only the route pattern', async () => {
     const { db, base, close } = await startServer();
     // D5c: seeded legacy tasks need a recorded submission first.
     assert.equal(
@@ -139,11 +139,9 @@ describe('D1 atomic persistence (HTTP)', () => {
       // Disk untouched, no orphan temp file.
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       assert.deepEqual(tempFiles(), []);
-      // Failure was logged with route context.
-      assert.ok(
-        logged.some((args) => String(args[0]).includes('PATCH /api/tasks/task-med-storage')),
-        `expected route context in logs, got: ${JSON.stringify(logged)}`
-      );
+      // WM1-2: failure was logged with the server route pattern only —
+      // no raw URL, method echo, message, or stack.
+      assert.deepEqual(logged, [['[sentinel] error.route.unexpected route=/api/tasks/:id']]);
     } finally {
       console.error = origError;
       store.__setRenameImpl(null);
@@ -7117,6 +7115,236 @@ describe('WM1-1: malformed and oversized bodies', () => {
         assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 200);
       }
       assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 429);
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      docaudit.__resetDocAuditThrottle();
+      await close();
+    }
+  });
+});
+
+describe('WM1-2: URL/charset/encoding failures and safe logging', () => {
+  const PATH_CANARY = 'WM12-PATH-CANARY-a1b2c3';
+  const QUERY_CANARY = 'WM12-QUERY-CANARY-d4e5f6';
+  const BODY_CANARY = 'WM12-BODY-CANARY-g7h8i9';
+
+  function rawRequest(
+    base: string,
+    method: string,
+    rawPath: string,
+    headers: Record<string, string>,
+    body?: string | Buffer
+  ): Promise<{ status: number; text: string }> {
+    return new Promise((resolve, reject) => {
+      const u = new URL(base);
+      const req = http.request(
+        { host: u.hostname, port: Number(u.port), path: rawPath, method, headers },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, text: data }));
+        }
+      );
+      req.on('error', reject);
+      if (body !== undefined) req.write(body);
+      req.end();
+    });
+  }
+
+  function assertNoLeak(text: string, canary: string): void {
+    for (const len of [8, 16, 24, canary.length]) {
+      assert.ok(!text.includes(canary.slice(0, len)), `leaked canary prefix len ${len}`);
+    }
+  }
+
+  async function auditCount(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  it('rejects malformed path encoding with a fixed 400 and silent logs', async () => {
+    const { db, base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const res = await rawRequest(
+        base,
+        'GET',
+        `/api/tasks/${PATH_CANARY}-%E0%A4%A?probe=${QUERY_CANARY}`,
+        { 'x-demo-user-id': 'u-admin' }
+      );
+      assert.equal(res.status, 400);
+      assert.deepEqual(JSON.parse(res.text), { error: 'Malformed request URL.' });
+      assertNoLeak(res.text, PATH_CANARY);
+      assertNoLeak(res.text, QUERY_CANARY);
+      assert.equal(errors.length, 0);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('tolerates query floods without error or leak (parser truncates)', async () => {
+    const { db, base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      // 1001 tiny params stay under Node's own URL ceiling while exceeding
+      // the query parser's 1000-parameter limit, plus deep nesting; the
+      // parser truncates silently, so this stays a normal request.
+      const params = [`probe=${QUERY_CANARY}`, 'd[a][b][c][d][e][f][g]=x']
+        .concat(Array.from({ length: 1000 }, (_, i) => `p${i}=0`))
+        .join('&');
+      const res = await rawRequest(base, 'GET', `/api/tasks?${params}`, { 'x-demo-user-id': 'u-admin' });
+      assert.equal(res.status, 200);
+      assertNoLeak(res.text, QUERY_CANARY);
+      assert.equal(errors.length, 0);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('rejects unsupported charset and content encoding with a fixed 415', async () => {
+    const { db, base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const body = JSON.stringify({ orgId: 'org-cah', textA: 'a', textB: 'b' });
+      const charset = await rawRequest(base, 'POST', '/api/docaudit/compare', {
+        'content-type': `application/json; charset=x-${BODY_CANARY}`,
+        'x-demo-user-id': 'u-nurse-mgr'
+      }, body);
+      assert.equal(charset.status, 415);
+      assert.deepEqual(JSON.parse(charset.text), { error: 'Unsupported charset or content encoding.' });
+      const encoding = await rawRequest(base, 'POST', '/api/docaudit/compare', {
+        'content-type': 'application/json',
+        'content-encoding': `x-${BODY_CANARY}`,
+        'x-demo-user-id': 'u-nurse-mgr'
+      }, body);
+      assert.equal(encoding.status, 415);
+      assert.deepEqual(JSON.parse(encoding.text), { error: 'Unsupported charset or content encoding.' });
+      assertNoLeak(charset.text, BODY_CANARY);
+      assertNoLeak(encoding.text, BODY_CANARY);
+      assert.equal(errors.length, 0);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('rejects corrupt compressed bodies with a fixed 400', async () => {
+    const { db, base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const res = await rawRequest(base, 'POST', '/api/docaudit/compare', {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+        'x-demo-user-id': 'u-nurse-mgr'
+      }, Buffer.from(`not-gzip-bytes-${BODY_CANARY}-trailing`));
+      assert.equal(res.status, 400);
+      assert.deepEqual(JSON.parse(res.text), { error: 'Malformed request body.' });
+      assertNoLeak(res.text, BODY_CANARY);
+      assert.equal(errors.length, 0);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('logs route failures with the server pattern only', async () => {
+    const { db, base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await call(base, 'GET', '/api/obligations?orgId=org-cah', 'u-nurse-mgr');
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(
+          base,
+          'PATCH',
+          `/api/obligations/obl-access-review?probe=${QUERY_CANARY}`,
+          'u-nurse-mgr',
+          { nextDueDate: '2027-08-15', reason: 'WM1-2 probe (simulated).' }
+        );
+        assert.equal(res.status, 500);
+        assert.deepEqual(res.json, { error: 'Internal error.' });
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(errors, [['[sentinel] error.route.unexpected route=/api/obligations/:id']]);
+      assertNoLeak(JSON.stringify(errors), QUERY_CANARY);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      const after = await call(base, 'GET', '/api/obligations?orgId=org-cah', 'u-nurse-mgr');
+      assert.deepEqual(after.json, before.json);
+      assertDiskMatchesMemory(db);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('serves valid requests normally after encoding failures', async () => {
+    const { base, close } = await startServer();
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    process.env.DOCAUDIT_PROVIDER = 'mock';
+    docaudit.__resetDocAuditThrottle();
+    try {
+      await rawRequest(base, 'GET', '/api/tasks/%E0%A4%A', { 'x-demo-user-id': 'u-admin' });
+      const tasks = await call(base, 'GET', '/api/tasks?orgId=org-cah', 'u-admin');
+      assert.equal(tasks.status, 200);
+      const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        textA: 'Alpha site stores fuel in locked cabinets.',
+        textB: 'Alpha site stores fuel in locked cabinets.'
+      });
+      assert.equal(res.status, 200);
     } finally {
       if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
       else process.env.DOCAUDIT_PROVIDER = prev;

@@ -56,6 +56,26 @@ export interface AuthRequest extends Request {
   task?: ComplianceTask;
 }
 
+const MALFORMED_JSON_BODY = 'Malformed JSON body.';
+const MALFORMED_REQUEST_BODY = 'Malformed request body.';
+const MALFORMED_REQUEST_URL = 'Malformed request URL.';
+const REQUEST_BODY_TOO_LARGE = 'Request body too large.';
+const UNSUPPORTED_MEDIA_ENCODING = 'Unsupported charset or content encoding.';
+
+/**
+ * WM1-2: fixed-shape fallback log context. Only the server-defined route
+ * pattern ever appears; raw URLs, request content, error messages, and
+ * stacks stay out. Callers pass the request; missing or non-string
+ * patterns degrade to 'unknown' rather than any supplied value.
+ */
+export function errorLogLine(
+  code: 'error.route.unexpected' | 'error.middleware.unexpected',
+  req: { route?: { path?: unknown } }
+): string {
+  const pattern = typeof req.route?.path === 'string' ? req.route.path : 'unknown';
+  return `[sentinel] ${code} route=${pattern}`;
+}
+
 function sendError(req: Request, res: Response, e: unknown): void {
   if (e instanceof ValidationError) {
     res.status(400).json({ error: e.message });
@@ -67,7 +87,7 @@ function sendError(req: Request, res: Response, e: unknown): void {
     res.status(e.status).json({ error: e.message });
     return;
   }
-  console.error(`[sentinel] ${req.method} ${req.path} failed:`, e);
+  console.error(errorLogLine('error.route.unexpected', req));
   res.status(500).json({ error: 'Internal error.' });
 }
 
@@ -1346,27 +1366,50 @@ export function createApp(db: DbShape): express.Express {
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
-  // WM1-1: application-wide error boundary. Body-parser failures answer with
-  // fixed JSON and never reach Express's default handler; nothing
-  // request-supplied (content, parser messages, stacks, paths) is echoed or
-  // logged here. Must stay the last middleware in createApp. Express
-  // recognizes error middleware by its four parameters; _next is unused.
+  // WM1-1/WM1-2: application-wide error boundary. Parser and URL failures
+  // answer with fixed JSON and never reach Express's default handler;
+  // nothing request-supplied (content, parser messages, stacks, paths) is
+  // echoed or logged here. Must stay the last middleware in createApp.
+  // Express recognizes error middleware by its four parameters; _next is
+  // unused. Only the body parser produces status-carrying errors in this
+  // chain, so status alone classifies them; stream failures (for example
+  // corrupt gzip) arrive without a type tag, which is why type matching
+  // alone is insufficient.
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     if (res.headersSent) {
       res.end();
       return;
     }
-    const type = err?.type as string | undefined;
-    const status = (err?.status ?? err?.statusCode) as number | undefined;
-    if (type === 'entity.parse.failed' || (status === 400 && err?.name === 'SyntaxError' && 'body' in err)) {
-      res.status(400).json({ error: 'Malformed JSON body.' });
+    const status = Number(err?.status ?? err?.statusCode);
+    // WM1-2: malformed path encoding surfaces as URIError, sometimes
+    // carrying the raw value in its message — hence the fixed response.
+    // Query abuse needs no branch: the query parser silently truncates
+    // over-limit input under default options (verified against the
+    // installed qs), so it never throws here.
+    if (err instanceof URIError) {
+      res.status(400).json({ error: MALFORMED_REQUEST_URL });
       return;
     }
-    if (type === 'entity.too.large' || status === 413) {
-      res.status(413).json({ error: 'Request body too large.' });
+    if (status === 415) {
+      res.status(415).json({ error: UNSUPPORTED_MEDIA_ENCODING });
       return;
     }
-    console.error(`[sentinel] ${req.method} ${req.path} failed in error middleware.`);
+    if (status === 413) {
+      res.status(413).json({ error: REQUEST_BODY_TOO_LARGE });
+      return;
+    }
+    if (status === 400) {
+      // The header steers the branch only and is never echoed or logged.
+      const rawEncoding = req.headers['content-encoding'];
+      const encoding = Array.isArray(rawEncoding) ? rawEncoding.join(',') : (rawEncoding ?? '');
+      if (encoding !== '' && encoding.toLowerCase() !== 'identity') {
+        res.status(400).json({ error: MALFORMED_REQUEST_BODY });
+      } else {
+        res.status(400).json({ error: MALFORMED_JSON_BODY });
+      }
+      return;
+    }
+    console.error(errorLogLine('error.middleware.unexpected', req));
     res.status(500).json({ error: 'Internal error.' });
   });
   return app;
