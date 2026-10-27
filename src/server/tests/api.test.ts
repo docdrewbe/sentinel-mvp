@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, renameSync as realRenameSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, renameSync as realRenameSync, statSync, writeFileSync } from 'node:fs';
 import http, { type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -6614,8 +6614,16 @@ describe('Document audit compare (Phase 1, mocked provider)', () => {
     id: string;
     kind: string;
     summary: string;
-    passageA: { text: string; start: number; end: number; contextBefore: string; contextAfter: string } | null;
-    passageB: { text: string; start: number; end: number; contextBefore: string; contextAfter: string } | null;
+    passageA: {
+      text: string;
+      occurrences: Array<{ start: number; end: number; contextBefore: string; contextAfter: string }>;
+      totalOccurrences: number;
+    } | null;
+    passageB: {
+      text: string;
+      occurrences: Array<{ start: number; end: number; contextBefore: string; contextAfter: string }>;
+      totalOccurrences: number;
+    } | null;
   }
 
   interface CompareJson {
@@ -6758,8 +6766,11 @@ describe('Document audit compare (Phase 1, mocked provider)', () => {
           ] as const) {
             if (!passage) continue;
             assert.ok(source.includes(passage.text));
-            assert.equal(passage.start, source.indexOf(passage.text));
-            assert.equal(passage.end, passage.start + passage.text.length);
+            assert.ok(!('start' in passage));
+            assert.equal(passage.totalOccurrences, passage.occurrences.length);
+            for (const o of passage.occurrences) {
+              assert.equal(source.slice(o.start, o.end), passage.text);
+            }
           }
         }
         const after = await auditEvents(base);
@@ -6937,6 +6948,600 @@ describe('Document audit compare (Phase 1, mocked provider)', () => {
       docaudit.__setMockDocAuditMode('ok');
       docaudit.__setDocAuditTimeoutMs(null);
       docaudit.__resetDocAuditThrottle();
+      await close();
+    }
+  });
+});
+
+describe('Document audit follow-ups (Phase 2, server)', () => {
+  const TEXT_A = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by hand.';
+  const TEXT_B = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by scanner.';
+
+  interface SavedPassageJson {
+    side: string;
+    text: string;
+    start: number;
+    end: number;
+    occurrenceIndex: number;
+    totalOccurrences: number;
+  }
+
+  interface FollowupTaskJson {
+    id: string;
+    orgId: string;
+    domainId: string;
+    title: string;
+    ownerId: string;
+    dueDate: string;
+    status: string;
+    evidence: unknown[];
+    requiredEvidence: number;
+    docauditSource: {
+      findingId: string;
+      kind: string;
+      summary: string;
+      passages: SavedPassageJson[];
+      createdBy: string;
+      createdAt: string;
+    };
+  }
+
+  interface FollowupJson {
+    task: FollowupTaskJson;
+    duplicate: boolean;
+  }
+
+  function selection(source: string, side: 'A' | 'B', phrase: string, occurrenceIndex = 0): Record<string, unknown> {
+    const starts = docaudit.findOccurrences(source, phrase);
+    const start = starts[occurrenceIndex];
+    return { side, text: phrase, start, end: start + phrase.length, occurrenceIndex };
+  }
+
+  function followupBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      idempotencyKey: 'phase2-followup-001',
+      orgId: 'org-cah',
+      domainId: 'dom-hipaa-h',
+      title: 'Recheck nightly fuel counts',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2027-03-01',
+      findingId: 'f1',
+      kind: 'difference',
+      summary: 'Logging method differs between drafts.',
+      textA: TEXT_A,
+      textB: TEXT_B,
+      passages: [selection(TEXT_A, 'A', 'logged by hand'), selection(TEXT_B, 'B', 'logged by scanner')],
+      ...overrides
+    };
+  }
+
+  async function auditEvents(base: string): Promise<Array<Record<string, unknown>>> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return res.json as unknown as Array<Record<string, unknown>>;
+  }
+
+  async function listenOn(db: ReturnType<typeof seedDatabase>): Promise<{
+    base: string;
+    close: () => Promise<void>;
+  }> {
+    const app = createApp(db);
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const port = (server.address() as AddressInfo).port;
+    return {
+      base: `http://127.0.0.1:${port}`,
+      close: () => new Promise((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())))
+    };
+  }
+
+  it('enforces roles and organization scope without needing a provider', async () => {
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    delete process.env.DOCAUDIT_PROVIDER;
+    const { db, base, close } = await startServer();
+    try {
+      const tasksBefore = db.tasks.length;
+      assert.equal((await call(base, 'POST', '/api/docaudit/followups', 'u-staff', followupBody())).status, 403);
+      assert.equal(
+        (await call(base, 'POST', '/api/docaudit/followups', 'u-clinic-mgr', followupBody())).status,
+        403
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody())).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/docaudit/followups', 'u-officer', followupBody({ idempotencyKey: 'phase2-officer-1' }))).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/docaudit/followups', 'u-admin', followupBody({ idempotencyKey: 'phase2-admin-1' }))).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'POST', '/api/docaudit/followups', 'u-admin', followupBody({ orgId: 'org-nope' }))).status,
+        400
+      );
+      // Three authorized creations; every refusal wrote nothing.
+      assert.equal(db.tasks.length, tasksBefore + 3);
+      assertDiskMatchesMemory(db);
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      await close();
+    }
+  });
+
+  it('persists task, summary, passages, idempotency record, and two audits atomically', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = await auditEvents(base);
+      const res = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(res.status, 201);
+      const body = res.json as unknown as FollowupJson;
+      assert.equal(body.duplicate, false);
+      const task = body.task;
+      assert.equal(task.orgId, 'org-cah');
+      assert.equal(task.domainId, 'dom-hipaa-h');
+      assert.equal(task.title, 'Recheck nightly fuel counts');
+      assert.equal(task.ownerId, 'u-nurse-mgr');
+      assert.equal(task.dueDate, '2027-03-01');
+      assert.equal(task.status, 'open');
+      assert.deepEqual(task.evidence, []);
+      assert.equal(task.requiredEvidence, 1);
+      // Exactly what persists beyond ordinary task fields.
+      assert.equal(task.docauditSource.findingId, 'f1');
+      assert.equal(task.docauditSource.kind, 'difference');
+      assert.equal(task.docauditSource.summary, 'Logging method differs between drafts.');
+      assert.equal(task.docauditSource.createdBy, 'u-nurse-mgr');
+      assert.equal(task.docauditSource.passages.length, 2);
+      assert.deepEqual(
+        task.docauditSource.passages.map((p) => [p.side, p.text, p.occurrenceIndex, p.totalOccurrences]),
+        [
+          ['A', 'logged by hand', 0, 1],
+          ['B', 'logged by scanner', 0, 1]
+        ]
+      );
+      assert.equal(TEXT_A.slice(task.docauditSource.passages[0].start, task.docauditSource.passages[0].end), 'logged by hand');
+      // Idempotency record is scoped to the actor and org.
+      assert.equal(db.docauditKeys.length, 1);
+      assert.equal(db.docauditKeys[0].key, 'phase2-followup-001');
+      assert.equal(db.docauditKeys[0].actorId, 'u-nurse-mgr');
+      assert.equal(db.docauditKeys[0].orgId, 'org-cah');
+      assert.equal(db.docauditKeys[0].taskId, task.id);
+      assert.match(db.docauditKeys[0].contentHash, /^[0-9a-f]{64}$/);
+      // Two audit events, both metadata-only: no passage text, no summary.
+      const after = await auditEvents(base);
+      assert.equal(after.length, audits.length + 2);
+      assert.equal(after[after.length - 2].action, 'task.created');
+      assert.equal(after[after.length - 2].recordId, task.id);
+      assert.equal(after[after.length - 1].action, 'docaudit.followup.created');
+      assert.equal(after[after.length - 1].recordType, 'docaudit');
+      assert.equal(after[after.length - 1].recordId, task.id);
+      assert.equal(after[after.length - 1].orgId, 'org-cah');
+      assert.equal(after[after.length - 1].detail, 'difference finding with 2 passages');
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('replays identical authorized retries without a new audit event; changed content is 409', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const first = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(first.status, 201);
+      const taskId = (first.json as unknown as FollowupJson).task.id;
+      const audits = (await auditEvents(base)).length;
+      const diskAfterCreate = readFileSync(dataFile, 'utf8');
+      const replay = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(replay.status, 200);
+      const replayBody = replay.json as unknown as FollowupJson;
+      assert.equal(replayBody.duplicate, true);
+      assert.equal(replayBody.task.id, taskId);
+      assert.equal((await auditEvents(base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskAfterCreate);
+      // Same key, different content: fixed 409, nothing written.
+      const conflict = await call(
+        base,
+        'POST',
+        '/api/docaudit/followups',
+        'u-nurse-mgr',
+        followupBody({ title: 'A different title for the same key' })
+      );
+      assert.equal(conflict.status, 409);
+      assert.deepEqual(conflict.json, { error: 'Idempotency key already used with different content.' });
+      assert.equal((await auditEvents(base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskAfterCreate);
+      assert.equal(db.tasks.filter((t) => t.title.startsWith('Recheck nightly')).length, 1);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('scopes idempotency keys to the actor and organization', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const tasksBefore = db.tasks.length;
+      const sharedKey = 'phase2-shared-key';
+      const mgr = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody({ idempotencyKey: sharedKey }));
+      assert.equal(mgr.status, 201);
+      // Same key string, different actor: an independent record and task.
+      const officer = await call(base, 'POST', '/api/docaudit/followups', 'u-officer', followupBody({ idempotencyKey: sharedKey }));
+      assert.equal(officer.status, 201);
+      assert.notEqual(
+        (officer.json as unknown as FollowupJson).task.id,
+        (mgr.json as unknown as FollowupJson).task.id
+      );
+      // Same actor, different org: independent again (privileged cross-org demo access).
+      const clinicBody = followupBody({
+        idempotencyKey: sharedKey,
+        orgId: 'org-clinic',
+        domainId: 'dom-hipaa-c',
+        ownerId: 'u-clinic-mgr'
+      });
+      const clinic = await call(base, 'POST', '/api/docaudit/followups', 'u-officer', clinicBody);
+      assert.equal(clinic.status, 201);
+      assert.equal((clinic.json as unknown as FollowupJson).task.orgId, 'org-clinic');
+      assert.equal(db.tasks.length, tasksBefore + 3);
+      assert.equal(db.docauditKeys.filter((r) => r.key === sharedKey).length, 3);
+      // Each scope replays only its own record.
+      const replay = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody({ idempotencyKey: sharedKey }));
+      assert.equal(replay.status, 200);
+      assert.equal((replay.json as unknown as FollowupJson).task.id, (mgr.json as unknown as FollowupJson).task.id);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rechecks authorization on retries: unauthorized callers learn nothing', async () => {
+    const { base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(created.status, 201);
+      const audits = (await auditEvents(base)).length;
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      // Staff replays the manager's exact body and key: 403, not 200 or 409.
+      const denied = await call(base, 'POST', '/api/docaudit/followups', 'u-staff', followupBody());
+      assert.equal(denied.status, 403);
+      assert.equal((await auditEvents(base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects invalid selections without writing', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const good = followupBody();
+      const first = (good.passages as Array<Record<string, unknown>>)[0];
+      const cases: Array<[string, Record<string, unknown>]> = [
+        ['tampered offset', { ...good, passages: [{ ...first, start: (first.start as number) + 1 }, (good.passages as unknown[])[1]] }],
+        ['unknown occurrence', { ...good, passages: [{ ...first, occurrenceIndex: 9 }, (good.passages as unknown[])[1]] }],
+        ['non-verbatim text', { ...good, passages: [{ ...first, text: 'logged by carrier pigeon' }, (good.passages as unknown[])[1]] }],
+        ['kind shape', { ...good, kind: 'missing_in_b' }],
+        ['blank key', { ...good, idempotencyKey: '   ' }],
+        ['non-string title', { ...good, title: 42 }],
+        ['unknown domain', { ...good, domainId: 'dom-nope' }],
+        ['bad due date', { ...good, dueDate: '2027-02-30' }]
+      ];
+      for (const [name, body] of cases) {
+        const audits = (await auditEvents(base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const tasksBefore = db.tasks.length;
+        const res = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', body);
+        assert.equal(res.status, 400, name);
+        assert.equal((await auditEvents(base)).length, audits, name);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore, name);
+        assert.equal(db.tasks.length, tasksBefore, name);
+      }
+      assert.equal(
+        (await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', { ...good, title: 42 })).json.error,
+        'title must be text.'
+      );
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('treats saved passages as review material: they never satisfy evidence gates', async () => {
+    const { base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(created.status, 201);
+      const taskId = (created.json as unknown as FollowupJson).task.id;
+      // Two saved passages, zero evidence: submission stays blocked.
+      const blocked = await call(base, 'PATCH', `/api/tasks/${taskId}`, 'u-nurse-mgr', { status: 'submitted' });
+      assert.equal(blocked.status, 400);
+      assert.match(String(blocked.json.error), /requires at least 1 evidence item/);
+      // Genuine evidence unblocks the same task.
+      assert.equal(
+        (await call(base, 'POST', `/api/tasks/${taskId}/evidence`, 'u-nurse-mgr', { label: 'Recount sheet', holder: 'M. Lee' })).status,
+        201
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/tasks/${taskId}`, 'u-nurse-mgr', { status: 'submitted' })).status,
+        200
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it('creates exactly one task under concurrent identical retries', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = (await auditEvents(base)).length;
+      const tasksBefore = db.tasks.length;
+      const body = followupBody({ idempotencyKey: 'phase2-race-key' });
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', body))
+      );
+      const ids = new Set<string>();
+      let created = 0;
+      let duplicates = 0;
+      for (const res of results) {
+        assert.ok(res.status === 200 || res.status === 201);
+        const parsed = res.json as unknown as FollowupJson;
+        ids.add(parsed.task.id);
+        if (res.status === 201) {
+          created += 1;
+          assert.equal(parsed.duplicate, false);
+        } else {
+          duplicates += 1;
+          assert.equal(parsed.duplicate, true);
+        }
+      }
+      assert.equal(created, 1);
+      assert.equal(duplicates, 7);
+      assert.equal(ids.size, 1);
+      assert.equal(db.tasks.length, tasksBefore + 1);
+      assert.equal(db.docauditKeys.filter((r) => r.key === 'phase2-race-key').length, 1);
+      assert.equal((await auditEvents(base)).length, audits + 2);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('replays the original task after a server restart', async () => {
+    const { base, close } = await startServer();
+    const first = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+    assert.equal(first.status, 201);
+    const taskId = (first.json as unknown as FollowupJson).task.id;
+    const audits = (await auditEvents(base)).length;
+    await close();
+    // Restart: fresh process state over the same persisted database.
+    const db2 = store.loadDb();
+    const restarted = await listenOn(db2);
+    try {
+      assert.equal(db2.docauditKeys.length, 1);
+      const replay = await call(restarted.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(replay.status, 200);
+      const replayBody = replay.json as unknown as FollowupJson;
+      assert.equal(replayBody.duplicate, true);
+      assert.equal(replayBody.task.id, taskId);
+      assert.equal((await auditEvents(restarted.base)).length, audits);
+      // Changed content after restart is still a conflict, not a new task.
+      const conflict = await call(
+        restarted.base,
+        'POST',
+        '/api/docaudit/followups',
+        'u-nurse-mgr',
+        followupBody({ summary: 'A rewritten summary for the same key.' })
+      );
+      assert.equal(conflict.status, 409);
+      assert.equal(db2.tasks.filter((t) => t.title === 'Recheck nightly fuel counts').length, 1);
+      const disk = JSON.parse(readFileSync(dataFile, 'utf8')) as ReturnType<typeof seedDatabase>;
+      assert.deepEqual(disk, db2);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('rolls back task, record, and audits when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      const audits = (await auditEvents(base)).length;
+      const tasksBefore = db.tasks.length;
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      store.__setRenameImpl(() => {
+        throw new Error('simulated disk failure');
+      });
+      const failed = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(failed.status, 500);
+      assert.deepEqual(failed.json, { error: 'Internal error.' });
+      assert.equal(db.tasks.length, tasksBefore);
+      assert.equal(db.docauditKeys.length, 0);
+      assert.equal((await auditEvents(base)).length, audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
+      // The failure logged only the route pattern, never request content.
+      assert.equal(logged.length, 1);
+      assert.deepEqual(logged[0], ['[sentinel] error.route.unexpected route=/api/docaudit/followups']);
+    } finally {
+      store.__setRenameImpl(null);
+      console.error = original;
+      await close();
+    }
+    // The same key works once persistence recovers: no partial record lingers.
+    const retry = await startServer();
+    try {
+      const res = await call(retry.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(res.status, 201);
+      assertDiskMatchesMemory(retry.db);
+    } finally {
+      await retry.close();
+    }
+  });
+
+  it('keeps unselected comparison content out of storage, audits, logs, and errors', async () => {
+    const { base, close } = await startServer();
+    const FULL_CANARY = 'PH2-FULL-TEXT-CANARY-k9q2';
+    const SUMMARY_CANARY = 'PH2-SUMMARY-CANARY-m4x8';
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    const assertNoLeak = (text: string, canary: string): void => {
+      for (const len of [8, 16, canary.length]) {
+        assert.ok(!text.includes(canary.slice(0, len)), `leaked canary prefix len ${len}`);
+      }
+    };
+    try {
+      const textA = `Fuel log opening ${FULL_CANARY} continues. Nightly counts are logged by hand.`;
+      const textB = `Fuel log opening continues. Nightly counts are logged by scanner.`;
+      const ok = await call(
+        base,
+        'POST',
+        '/api/docaudit/followups',
+        'u-nurse-mgr',
+        followupBody({
+          textA,
+          textB,
+          passages: [selection(textA, 'A', 'logged by hand'), selection(textB, 'B', 'logged by scanner')]
+        })
+      );
+      assert.equal(ok.status, 201);
+      // Rejected attempts carrying canaries: fixed errors, nothing written.
+      const audits = (await auditEvents(base)).length;
+      const tampered = followupBody({
+        idempotencyKey: 'phase2-leak-400',
+        textA,
+        textB,
+        summary: `Review ${SUMMARY_CANARY} promptly.`,
+        passages: [selection(textA, 'A', 'logged by hand'), { ...selection(textB, 'B', 'logged by scanner'), start: 3 }]
+      });
+      const bad = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', tampered);
+      assert.equal(bad.status, 400);
+      assertNoLeak(JSON.stringify(bad.json), FULL_CANARY);
+      assertNoLeak(JSON.stringify(bad.json), SUMMARY_CANARY);
+      const conflict = await call(
+        base,
+        'POST',
+        '/api/docaudit/followups',
+        'u-nurse-mgr',
+        followupBody({
+          textA,
+          textB,
+          summary: `Changed ${SUMMARY_CANARY} wording.`,
+          passages: [selection(textA, 'A', 'logged by hand'), selection(textB, 'B', 'logged by scanner')]
+        })
+      );
+      assert.equal(conflict.status, 409);
+      assertNoLeak(JSON.stringify(conflict.json), SUMMARY_CANARY);
+      assert.equal((await auditEvents(base)).length, audits);
+      // Storage holds the selected passages (explicit) but no full texts.
+      const disk = readFileSync(dataFile, 'utf8');
+      assert.ok(disk.includes('logged by hand'));
+      assert.ok(!disk.includes(FULL_CANARY));
+      assert.ok(!disk.includes(SUMMARY_CANARY));
+      for (const event of await auditEvents(base)) {
+        assertNoLeak(JSON.stringify(event), FULL_CANARY);
+        assertNoLeak(JSON.stringify(event), SUMMARY_CANARY);
+      }
+      for (const args of logged) {
+        assertNoLeak(JSON.stringify(args), FULL_CANARY);
+        assertNoLeak(JSON.stringify(args), SUMMARY_CANARY);
+      }
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('fails closed when an idempotency record has no task', async () => {
+    const { db, base, close } = await startServer();
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      const created = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(created.status, 201);
+      const taskId = (created.json as unknown as FollowupJson).task.id;
+      // Simulate hand-edited data: the task is gone but the record remains.
+      db.tasks = db.tasks.filter((t) => t.id !== taskId);
+      const replay = await call(base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+      assert.equal(replay.status, 500);
+      assert.deepEqual(replay.json, { error: 'Internal error.' });
+      assert.equal(logged.length, 1);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('loads databases written before follow-ups existed', async () => {
+    const { base, close } = await startServer();
+    try {
+      // Strip the Phase 2 collection to mimic a version-1 file from Phase 1.
+      const oldShape = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+      assert.equal(oldShape.version, 1);
+      delete oldShape.docauditKeys;
+      writeFileSync(dataFile, JSON.stringify(oldShape, null, 2), 'utf8');
+      const db2 = store.loadDb();
+      assert.deepEqual(db2.docauditKeys, []);
+      await close();
+      const revived = await listenOn(db2);
+      try {
+        const res = await call(revived.base, 'POST', '/api/docaudit/followups', 'u-nurse-mgr', followupBody());
+        assert.equal(res.status, 201);
+        assert.equal(db2.docauditKeys.length, 1);
+        const disk = JSON.parse(readFileSync(dataFile, 'utf8')) as ReturnType<typeof seedDatabase>;
+        assert.deepEqual(disk, db2);
+      } finally {
+        await revived.close();
+      }
+      // An explicit non-array also degrades to empty instead of crashing.
+      const corrupt = JSON.parse(readFileSync(dataFile, 'utf8')) as Record<string, unknown>;
+      corrupt.docauditKeys = 42;
+      writeFileSync(dataFile, JSON.stringify(corrupt), 'utf8');
+      assert.deepEqual(store.loadDb().docauditKeys, []);
+    } finally {
+      try {
+        await close();
+      } catch {
+        /* already closed after the tolerant-load check */
+      }
+    }
+  });
+
+  it('leaves ordinary task creation unchanged', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const tasksBefore = db.tasks.length;
+      const body = {
+        orgId: 'org-cah',
+        domainId: 'dom-osha-h',
+        title: 'Ordinary task ignores follow-up fields',
+        ownerId: 'u-staff',
+        dueDate: '2026-12-01',
+        idempotencyKey: 'phase2-ignored-by-ordinary-path'
+      };
+      const first = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', body);
+      assert.equal(first.status, 201);
+      assert.ok(!('docauditSource' in (first.json as Record<string, unknown>)));
+      // No deduplication on the ordinary path: the same body creates again.
+      const second = await call(base, 'POST', '/api/tasks', 'u-nurse-mgr', body);
+      assert.equal(second.status, 201);
+      assert.notEqual(String(second.json.id), String(first.json.id));
+      assert.equal(db.tasks.length, tasksBefore + 2);
+      assert.equal(db.docauditKeys.length, 0);
+      assertDiskMatchesMemory(db);
+    } finally {
       await close();
     }
   });

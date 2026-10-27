@@ -115,6 +115,60 @@ export interface ComplianceTask {
    */
   verifiedBy?: string;
   verifiedAt?: string;
+  /**
+   * Phase 2: reviewer-confirmed document-audit source material attached by
+   * the dedicated follow-up endpoint. Review context only — it is NOT proof
+   * that corrective work was completed and NEVER counts toward the evidence
+   * required for submission or verification (those count `evidence` only).
+   * Immutable after creation: no update path accepts it.
+   */
+  docauditSource?: DocAuditSource;
+}
+
+/** One reviewer-selected passage with its verified source location. */
+export interface DocAuditSavedPassage {
+  /** Which compared text the passage was quoted from. */
+  side: 'A' | 'B';
+  /** Exact verified quotation (UTF-16 offsets, native String semantics). */
+  text: string;
+  start: number;
+  end: number;
+  /** Reviewer-chosen occurrence among all matches in the source. */
+  occurrenceIndex: number;
+  /** Total matches in the source at save time. */
+  totalOccurrences: number;
+}
+
+/**
+ * Exactly what a document-audit follow-up persists beyond ordinary task
+ * fields: the reviewer-confirmed finding summary plus the selected passages
+ * with source locations. The later client preview must disclose this whole
+ * record — summary included — before the reviewer confirms creation.
+ */
+export interface DocAuditSource {
+  /** Reviewer-supplied finding label (e.g. 'f1' from a compare response). */
+  findingId: string;
+  kind: 'difference' | 'missing_in_a' | 'missing_in_b';
+  /** Reviewer-confirmed summary. Persisted; shown in the creation preview. */
+  summary: string;
+  passages: DocAuditSavedPassage[];
+  createdBy: string;
+  createdAt: string;
+}
+
+/**
+ * Idempotency record for document-audit follow-ups. Scoped to the actor
+ * and organization that created it: the same key string from a different
+ * actor or org is an independent record. Survives server restarts.
+ */
+export interface DocAuditIdempotencyRecord {
+  key: string;
+  actorId: string;
+  orgId: string;
+  taskId: string;
+  /** SHA-256 over the canonical persisted payload (excludes the key). */
+  contentHash: string;
+  createdAt: string;
 }
 
 /** D5a: one recorded submission: who submitted whose work, and when. */

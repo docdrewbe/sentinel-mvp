@@ -6,6 +6,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import cors from 'cors';
 import { randomUUID } from 'node:crypto';
 import {
+  ConflictError,
   ValidationError,
   addEvidence,
   appendAudit,
@@ -30,6 +31,7 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import {
+  IDEMPOTENCY_CONFLICT,
   NO_MATCHING_PASSAGE,
   PROVIDER_NOT_CONFIGURED,
   ProviderError,
@@ -37,6 +39,7 @@ import {
   currentTimeoutMs,
   resolveProvider,
   validateCompareInput,
+  validateFollowupInput,
   validateProviderOutput
 } from './docaudit.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
@@ -79,6 +82,11 @@ export function errorLogLine(
 function sendError(req: Request, res: Response, e: unknown): void {
   if (e instanceof ValidationError) {
     res.status(400).json({ error: e.message });
+    return;
+  }
+  // Idempotency conflicts carry a fixed message (never request content).
+  if (e instanceof ConflictError) {
+    res.status(409).json({ error: e.message });
     return;
   }
   // Provider failures carry fixed messages only (never comparison content),
@@ -312,6 +320,130 @@ export function createApp(db: DbShape): express.Express {
         missingLabel: NO_MATCHING_PASSAGE,
         findings
       });
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // Phase 2: document-audit follow-up. Creates a task carrying the
+  // reviewer-confirmed finding summary and selected passages with source
+  // locations — review source material, not completion proof (it never
+  // counts toward submission/verification evidence). Needs no provider:
+  // passages are re-verified against the resubmitted texts, which stay
+  // request-scoped and are never persisted or logged. Ordinary
+  // POST /api/tasks is untouched by this endpoint.
+  //
+  // Idempotency is scoped to (actor, org, key): an identical authorized
+  // retry returns the original task with no new audit event, while the
+  // same key with different content answers 409. Authorization runs
+  // before the idempotency lookup on every call, retries included.
+  app.post('/api/docaudit/followups', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    if (
+      rejectBadText(res, req.body, [
+        'orgId',
+        'domainId',
+        'title',
+        'ownerId',
+        'dueDate',
+        'findingId',
+        'kind',
+        'summary',
+        'idempotencyKey',
+        'textA',
+        'textB'
+      ])
+    ) {
+      return;
+    }
+    const input = req.body as { orgId: string };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'docaudit.followup');
+      return;
+    }
+    if (!can(user, 'docaudit.followup', { orgId: input.orgId, ownerId: '' })) {
+      forbidden(res, user, 'docaudit.followup');
+      return;
+    }
+    if (!can(user, 'task.create')) {
+      forbidden(res, user, 'task.create');
+      return;
+    }
+    if (!db.orgs.some((o) => o.id === input.orgId)) {
+      res.status(400).json({ error: 'Unknown organization.' });
+      return;
+    }
+    try {
+      const clean = validateFollowupInput(req.body);
+      const scopeMatch = (r: { key: string; actorId: string; orgId: string }): boolean =>
+        r.key === clean.key && r.actorId === user.id && r.orgId === clean.orgId;
+      // Fast path: a recorded retry answers without writing. The lookup
+      // inside mutateDb below is authoritative against races.
+      const recorded = db.docauditKeys.find(scopeMatch);
+      if (recorded) {
+        if (recorded.contentHash !== clean.contentHash) {
+          res.status(409).json({ error: IDEMPOTENCY_CONFLICT });
+          return;
+        }
+        const original = db.tasks.find((t) => t.id === recorded.taskId);
+        // Fail closed on a corrupt record (atomic writes make this
+        // unreachable short of hand-edited data): never invent a task.
+        if (!original) throw new Error('Follow-up record without task.');
+        res.json({ task: presentTask(original), duplicate: true });
+        return;
+      }
+      let replayed = false;
+      const task = mutateDb(db, () => {
+        const raced = db.docauditKeys.find(scopeMatch);
+        if (raced) {
+          if (raced.contentHash !== clean.contentHash) throw new ConflictError(IDEMPOTENCY_CONFLICT);
+          const original = db.tasks.find((t) => t.id === raced.taskId);
+          if (!original) throw new Error('Follow-up record without task.');
+          replayed = true;
+          return original;
+        }
+        const created = createTask(db, {
+          orgId: clean.orgId,
+          domainId: clean.domainId,
+          title: clean.title,
+          ownerId: clean.ownerId,
+          dueDate: clean.dueDate
+        });
+        created.docauditSource = {
+          findingId: clean.findingId,
+          kind: clean.kind,
+          summary: clean.summary,
+          passages: clean.passages,
+          createdBy: user.id,
+          createdAt: created.createdAt
+        };
+        db.docauditKeys.push({
+          key: clean.key,
+          actorId: user.id,
+          orgId: clean.orgId,
+          taskId: created.id,
+          contentHash: clean.contentHash,
+          createdAt: created.createdAt
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'task.created',
+          recordType: 'task',
+          recordId: created.id,
+          orgId: created.orgId,
+          detail: created.title
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'docaudit.followup.created',
+          recordType: 'docaudit',
+          recordId: created.id,
+          orgId: created.orgId,
+          detail: `${clean.kind} finding with ${clean.passages.length} passage${clean.passages.length === 1 ? '' : 's'}`
+        });
+        return created;
+      });
+      res.status(replayed ? 200 : 201).json({ task: presentTask(task), duplicate: replayed });
     } catch (e) {
       sendError(req, res, e);
     }

@@ -21,6 +21,7 @@ import type {
   ComplianceTask,
   ControlType,
   DemoUser,
+  DocAuditIdempotencyRecord,
   EscalationRule,
   EvidenceRef,
   EvidenceRequirement,
@@ -49,16 +50,25 @@ export interface DbShape {
   capas: CapaRecord[];
   obligations: RecurringObligation[];
   audit: AuditEvent[];
+  /**
+   * Phase 2: follow-up idempotency records. Additive only — version stays
+   * 1 because loadDb already tolerant-reads missing collections, so no
+   * migration contract requires a bump.
+   */
+  docauditKeys: DocAuditIdempotencyRecord[];
 }
 
 export class ValidationError extends Error {}
+
+/** Same-key reuse with different content answers 409, never 500. */
+export class ConflictError extends Error {}
 
 export function dataFilePath(): string {
   return process.env.SENTINEL_DATA_FILE ?? join(process.cwd(), 'data', 'sentinel.json');
 }
 
 export function emptyDb(): DbShape {
-  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], audit: [] };
+  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], audit: [], docauditKeys: [] };
 }
 
 let lastStamp = '';
@@ -85,6 +95,11 @@ export function loadDb(): DbShape {
   // Tolerant read: databases written before templates existed gain defaults.
   const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<DbShape>;
   const db: DbShape = { ...emptyDb(), ...raw };
+  // Phase 2: pre-follow-up databases have no docauditKeys collection; an
+  // explicit non-array (corrupt or hand-edited) also degrades to empty
+  // rather than crashing the server. Records are append-only metadata, so
+  // defaulting here loses nothing the old database ever held.
+  if (!Array.isArray(db.docauditKeys)) db.docauditKeys = [];
   backfillAuditOrgIds(db);
   // CAL3: organizations stored before time zones keep the pre-CAL3
   // behavior by defaulting to UTC.

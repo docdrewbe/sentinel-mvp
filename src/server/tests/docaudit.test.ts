@@ -2,10 +2,12 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DOCAUDIT_MAX_FINDINGS,
+  DOCAUDIT_MAX_OCCURRENCES,
   DOCAUDIT_MAX_PASSAGE_CHARS,
   DOCAUDIT_MAX_SUMMARY_CHARS,
   DOCAUDIT_MAX_TEXT_CHARS,
   DOCAUDIT_THROTTLE_MAX,
+  IDEMPOTENCY_CONFLICT,
   MOCK_NOTICE,
   NO_MATCHING_PASSAGE,
   ProviderError,
@@ -15,8 +17,11 @@ import {
   checkDocAuditThrottle,
   createMockProvider,
   currentTimeoutMs,
+  findOccurrences,
+  followupContentHash,
   resolveProvider,
   validateCompareInput,
+  validateFollowupInput,
   validateProviderOutput
 } from '../docaudit.js';
 import { ValidationError } from '../store.js';
@@ -79,9 +84,10 @@ describe('provider output validation (Phase 1)', () => {
     assert.equal(findings.length, 2);
     assert.equal(findings[0].id, 'f1');
     assert.equal(findings[1].id, 'f2');
-    assert.equal(findings[0].passageA?.start, TEXT_A.indexOf('logged by hand'));
-    assert.equal(findings[0].passageA?.end, TEXT_A.indexOf('logged by hand') + 'logged by hand'.length);
-    assert.ok((findings[0].passageA?.contextBefore.length ?? 0) > 0);
+    const first = findings[0].passageA?.occurrences[0];
+    assert.equal(first?.start, TEXT_A.indexOf('logged by hand'));
+    assert.equal(first?.end, TEXT_A.indexOf('logged by hand') + 'logged by hand'.length);
+    assert.ok((first?.contextBefore.length ?? 0) > 0);
     assert.equal(findings[1].passageB, null);
   });
 
@@ -197,5 +203,162 @@ describe('comparison throttle and timeout (Phase 1)', () => {
     assert.equal(currentTimeoutMs(), 30000);
     __setDocAuditTimeoutMs(25);
     assert.equal(currentTimeoutMs(), 25);
+  });
+});
+
+describe('passage occurrence enumeration (Phase 2)', () => {
+  it('enumerates every location without a single selected offset', () => {
+    const source = 'Seal valve A. Seal valve A. Seal valve B.';
+    const [finding] = validateProviderOutput(
+      {
+        findings: [
+          { kind: 'missing_in_b', summary: 'Repeated seal step.', passageA: 'Seal valve A.', passageB: null }
+        ]
+      },
+      source,
+      TEXT_B
+    );
+    const passage = finding.passageA;
+    assert.ok(passage);
+    // No silent first selection: no top-level start/end at all.
+    assert.ok(!('start' in passage));
+    assert.ok(!('end' in passage));
+    assert.equal(passage.totalOccurrences, 2);
+    assert.deepEqual(
+      passage.occurrences.map((o) => o.start),
+      [0, 14]
+    );
+    for (const o of passage.occurrences) {
+      assert.equal(source.slice(o.start, o.end), 'Seal valve A.');
+    }
+  });
+
+  it('finds overlapping matches', () => {
+    assert.deepEqual(findOccurrences('aaaa', 'aa'), [0, 1, 2]);
+    assert.deepEqual(findOccurrences('abababa', 'aba'), [0, 2, 4]);
+    assert.deepEqual(findOccurrences('abc', 'z'), []);
+  });
+
+  it('uses UTF-16 offsets that round-trip non-BMP characters', () => {
+    // A@0, 🔬@1-2, B@3, 🔬@4-5, C@6: surrogate pairs occupy two units each.
+    assert.deepEqual(findOccurrences('A🔬B🔬C', '🔬'), [1, 4]);
+    assert.deepEqual(findOccurrences('🔬🔬🔬', '🔬🔬'), [0, 2]);
+    const [finding] = validateProviderOutput(
+      {
+        findings: [
+          { kind: 'missing_in_b', summary: 'Scope calibration mark.', passageA: '🔬', passageB: null }
+        ]
+      },
+      'A🔬B🔬C',
+      TEXT_B
+    );
+    assert.equal(finding.passageA?.totalOccurrences, 2);
+    for (const o of finding.passageA?.occurrences ?? []) {
+      assert.equal('A🔬B🔬C'.slice(o.start, o.end), '🔬');
+    }
+  });
+
+  it('caps the listing while reporting the exact total', () => {
+    assert.equal(DOCAUDIT_MAX_OCCURRENCES, 20);
+    const source = `${'log '.repeat(30)}end`;
+    const [finding] = validateProviderOutput(
+      { findings: [{ kind: 'missing_in_b', summary: 'Frequent word.', passageA: 'log', passageB: null }] },
+      source,
+      TEXT_B
+    );
+    assert.equal(finding.passageA?.totalOccurrences, 30);
+    assert.equal(finding.passageA?.occurrences.length, 20);
+    assert.deepEqual(
+      (finding.passageA?.occurrences ?? []).map((o) => o.start),
+      findOccurrences(source, 'log').slice(0, 20)
+    );
+  });
+});
+
+describe('follow-up validation (Phase 2)', () => {
+  const TEXT_B2 = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by scanner. Scanner recalibrated.';
+  function validFollowup(): Record<string, unknown> {
+    return {
+      idempotencyKey: 'phase2-key-001',
+      orgId: 'org-cah',
+      domainId: 'dom-hipaa-h',
+      title: 'Recheck nightly fuel counts',
+      ownerId: 'u-nurse-mgr',
+      dueDate: '2027-03-01',
+      findingId: 'f1',
+      kind: 'difference',
+      summary: 'Logging method differs between drafts.',
+      textA: TEXT_A,
+      textB: TEXT_B2,
+      passages: [
+        { side: 'A', text: 'logged by hand', start: TEXT_A.indexOf('logged by hand'), end: TEXT_A.indexOf('logged by hand') + 'logged by hand'.length, occurrenceIndex: 0 },
+        { side: 'B', text: 'logged by scanner', start: TEXT_B2.indexOf('logged by scanner'), end: TEXT_B2.indexOf('logged by scanner') + 'logged by scanner'.length, occurrenceIndex: 0 }
+      ]
+    };
+  }
+
+  it('accepts a verified selection and hashes the canonical payload', () => {
+    const clean = validateFollowupInput(validFollowup());
+    assert.equal(clean.key, 'phase2-key-001');
+    assert.equal(clean.passages.length, 2);
+    assert.equal(clean.passages[0].totalOccurrences, 1);
+    assert.match(clean.contentHash, /^[0-9a-f]{64}$/);
+    // The hash covers content, not the key: same payload, new key, same hash.
+    const rekeyed = validateFollowupInput({ ...validFollowup(), idempotencyKey: 'phase2-key-002' });
+    assert.equal(rekeyed.contentHash, clean.contentHash);
+    assert.equal(
+      followupContentHash({ ...clean, passages: clean.passages }),
+      clean.contentHash
+    );
+  });
+
+  it('accepts a non-first occurrence selected by the reviewer', () => {
+    const textA = 'Seal valve A. Seal valve A. Seal valve B.';
+    const starts = findOccurrences(textA, 'Seal valve A.');
+    const clean = validateFollowupInput({
+      ...validFollowup(),
+      kind: 'missing_in_b',
+      textA,
+      passages: [
+        { side: 'A', text: 'Seal valve A.', start: starts[1], end: starts[1] + 'Seal valve A.'.length, occurrenceIndex: 1 }
+      ]
+    });
+    assert.equal(clean.passages[0].occurrenceIndex, 1);
+    assert.equal(clean.passages[0].start, starts[1]);
+    assert.equal(clean.passages[0].totalOccurrences, 2);
+  });
+
+  it('rejects tampered offsets, unknown locations, and non-verbatim text', () => {
+    const good = validFollowup();
+    const first = (good.passages as Array<Record<string, unknown>>)[0];
+    assert.throws(
+      () => validateFollowupInput({ ...good, passages: [{ ...first, start: (first.start as number) + 1 }, (good.passages as unknown[])[1]] }),
+      (e: unknown) => e instanceof ValidationError && (e as Error).message === 'Finding passage 1 does not match the selected location.'
+    );
+    assert.throws(
+      () => validateFollowupInput({ ...good, passages: [{ ...first, occurrenceIndex: 7 }, (good.passages as unknown[])[1]] }),
+      (e: unknown) => e instanceof ValidationError && (e as Error).message === 'Finding passage 1 selects an unknown passage location.'
+    );
+    assert.throws(
+      () => validateFollowupInput({ ...good, passages: [{ ...first, text: 'logged by carrier pigeon' }, (good.passages as unknown[])[1]] }),
+      (e: unknown) => e instanceof ValidationError && !(e as Error).message.includes('pigeon')
+    );
+  });
+
+  it('enforces kind shape and required fields with fixed messages', () => {
+    const good = validFollowup();
+    assert.throws(() => validateFollowupInput({ ...good, kind: 'verdict' }), ValidationError);
+    assert.throws(
+      () => validateFollowupInput({ ...good, kind: 'missing_in_b' }),
+      (e: unknown) => e instanceof ValidationError && (e as Error).message === 'This finding kind needs exactly the first-text passage.'
+    );
+    assert.throws(() => validateFollowupInput({ ...good, idempotencyKey: '   ' }), ValidationError);
+    assert.throws(() => validateFollowupInput({ ...good, summary: '  ' }), ValidationError);
+    assert.throws(() => validateFollowupInput({ ...good, passages: [] }), ValidationError);
+    assert.throws(() => validateFollowupInput('not-an-object'), ValidationError);
+  });
+
+  it('pins the fixed 409 conflict message', () => {
+    assert.equal(IDEMPOTENCY_CONFLICT, 'Idempotency key already used with different content.');
   });
 });

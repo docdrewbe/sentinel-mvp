@@ -1,14 +1,19 @@
-// Working Memory document-audit comparison contract (Phase 1).
+// Working Memory document-audit comparison contract (Phases 1-2).
 //
-// Compares two pasted texts through a provider seam. Pasted inputs, source
-// context, and model summaries are response-only: they must never reach
-// persistent storage, logs, or audit metadata. Only a later explicit
-// task-creation action (Phase 2) may persist reviewer-selected passages.
+// Compares two pasted texts through a provider seam. Pasted inputs and
+// source context are response-only: they must never reach persistent
+// storage, logs, or audit metadata. Only the explicit follow-up action
+// below persists anything: reviewer-confirmed task fields plus the
+// reviewer-confirmed finding summary and selected passages with source
+// locations. Saved passages are review source material, not proof that
+// corrective work was completed.
 //
 // Exact quotation matching proves a passage is verbatim; it does not prove a
 // finding is correct. Missing passages are reported as unidentified, never as
 // proof of noncompliance. Model output never executes actions.
+import { createHash } from 'node:crypto';
 import { ValidationError } from './store.js';
+import type { DocAuditSavedPassage } from '../shared/types.js';
 
 export const DOCAUDIT_MAX_TEXT_CHARS = 4000;
 export const DOCAUDIT_MAX_SUMMARY_CHARS = 200;
@@ -18,6 +23,12 @@ export const DOCAUDIT_CONTEXT_CHARS = 200;
 export const DOCAUDIT_TIMEOUT_MS = 30000;
 export const DOCAUDIT_THROTTLE_MAX = 10;
 export const DOCAUDIT_THROTTLE_WINDOW_MS = 3600000;
+/** Occurrence locations listed per passage in compare responses. */
+export const DOCAUDIT_MAX_OCCURRENCES = 20;
+export const DOCAUDIT_MAX_KEY_CHARS = 128;
+export const DOCAUDIT_MAX_FINDING_ID_CHARS = 64;
+/** Fixed 409 message: same idempotency key reused with different content. */
+export const IDEMPOTENCY_CONFLICT = 'Idempotency key already used with different content.';
 
 /** Exact label for a missing side. Rendered by reviewers, never a verdict. */
 export const NO_MATCHING_PASSAGE = 'No matching passage identified';
@@ -40,12 +51,26 @@ export interface DocAuditCompareInput {
   textB: string;
 }
 
-export interface VerifiedPassage {
-  text: string;
+/** One verified location of a quotation within its source text. */
+export interface PassageOccurrence {
   start: number;
   end: number;
   contextBefore: string;
   contextAfter: string;
+}
+
+/**
+ * Phase 2: a quotation plus EVERY verified location, in source order. There
+ * is deliberately no single start/end: when a passage repeats, the response
+ * never silently selects the first occurrence — the reviewer picks one and
+ * the follow-up endpoint validates that choice server-side.
+ */
+export interface VerifiedPassage {
+  text: string;
+  /** First DOCAUDIT_MAX_OCCURRENCES locations (see totalOccurrences). */
+  occurrences: PassageOccurrence[];
+  /** Exact match count in the source, even past the listing cap. */
+  totalOccurrences: number;
 }
 
 export interface VerifiedFinding {
@@ -87,6 +112,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Every start offset of `text` in `source`, in order, including overlapping
+ * matches (the search advances one code unit per hit, so 'aa' in 'aaaa'
+ * yields 0, 1, 2). Offsets are UTF-16 code units — native String semantics
+ * shared by verification, persistence, and follow-up validation, so
+ * non-BMP characters round-trip exactly.
+ */
+export function findOccurrences(source: string, text: string): number[] {
+  const starts: number[] = [];
+  let from = 0;
+  for (;;) {
+    const at = source.indexOf(text, from);
+    if (at < 0) return starts;
+    starts.push(at);
+    from = at + 1;
+  }
+}
+
+function occurrenceAt(source: string, text: string, start: number): PassageOccurrence {
+  return {
+    start,
+    end: start + text.length,
+    contextBefore: source.slice(Math.max(0, start - DOCAUDIT_CONTEXT_CHARS), start),
+    contextAfter: source.slice(start + text.length, start + text.length + DOCAUDIT_CONTEXT_CHARS)
+  };
+}
+
 function verifyPassage(
   value: unknown,
   source: string,
@@ -100,14 +152,12 @@ function verifyPassage(
   if (typeof value !== 'string' || !value.trim()) fail();
   const text = value as string;
   if (text.length > DOCAUDIT_MAX_PASSAGE_CHARS) fail();
-  const start = source.indexOf(text);
-  if (start < 0) fail();
+  const starts = findOccurrences(source, text);
+  if (starts.length === 0) fail();
   return {
     text,
-    start,
-    end: start + text.length,
-    contextBefore: source.slice(Math.max(0, start - DOCAUDIT_CONTEXT_CHARS), start),
-    contextAfter: source.slice(start + text.length, start + text.length + DOCAUDIT_CONTEXT_CHARS)
+    occurrences: starts.slice(0, DOCAUDIT_MAX_OCCURRENCES).map((start) => occurrenceAt(source, text, start)),
+    totalOccurrences: starts.length
   };
 }
 
@@ -142,6 +192,165 @@ export function validateProviderOutput(raw: unknown, textA: string, textB: strin
     if (kind === 'missing_in_b' && (!passageA || passageB)) malformed();
     return { id: `f${index + 1}`, kind, summary: summary as string, passageA, passageB };
   });
+}
+
+export type DocAuditFindingKind = 'difference' | 'missing_in_a' | 'missing_in_b';
+
+export interface ValidatedFollowup {
+  key: string;
+  orgId: string;
+  domainId: string;
+  title: string;
+  ownerId: string;
+  dueDate: string;
+  findingId: string;
+  kind: DocAuditFindingKind;
+  summary: string;
+  passages: DocAuditSavedPassage[];
+  /** Canonical hash of the persisted payload; the idempotency key is excluded. */
+  contentHash: string;
+}
+
+/** SHA-256 over the canonical persisted payload (key excluded by design). */
+export function followupContentHash(payload: {
+  orgId: string;
+  domainId: string;
+  title: string;
+  ownerId: string;
+  dueDate: string;
+  findingId: string;
+  kind: string;
+  summary: string;
+  passages: DocAuditSavedPassage[];
+}): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        payload.orgId,
+        payload.domainId,
+        payload.title,
+        payload.ownerId,
+        payload.dueDate,
+        payload.findingId,
+        payload.kind,
+        payload.summary,
+        payload.passages.map((p) => [p.side, p.text, p.start, p.end, p.occurrenceIndex])
+      ])
+    )
+    .digest('hex');
+}
+
+function isFollowupKind(value: unknown): value is DocAuditFindingKind {
+  return value === 'difference' || value === 'missing_in_a' || value === 'missing_in_b';
+}
+
+function cappedText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string' || !value.trim() || value.length > max) return null;
+  return value;
+}
+
+/**
+ * Phase 2 follow-up validation. Confirms the task fields are well-formed
+ * (existence is rechecked by createTask inside the atomic write), enforces
+ * kind shape (difference needs sides A+B; missing kinds need exactly the
+ * present side), and re-verifies every selected passage against the
+ * resubmitted sources: verbatim, with the claimed offsets matching the
+ * reviewer-chosen occurrence. Fixed messages only — selections never echo.
+ * The resubmitted texts are verification material, not persisted content.
+ */
+export function validateFollowupInput(body: unknown): ValidatedFollowup {
+  if (!isRecord(body)) throw new ValidationError('Follow-up body must be an object.');
+  const key = cappedText(body.idempotencyKey, DOCAUDIT_MAX_KEY_CHARS);
+  if (!key) throw new ValidationError('idempotencyKey is required.');
+  const orgId = body.orgId;
+  if (typeof orgId !== 'string' || !orgId.trim()) throw new ValidationError('orgId is required.');
+  const domainId = cappedText(body.domainId, 128);
+  if (!domainId) throw new ValidationError('domainId is required.');
+  const title = cappedText(body.title, 200);
+  if (!title) throw new ValidationError('Title is required.');
+  const ownerId = cappedText(body.ownerId, 128);
+  if (!ownerId) throw new ValidationError('ownerId is required.');
+  const dueDate = body.dueDate;
+  if (typeof dueDate !== 'string' || !dueDate.trim()) throw new ValidationError('dueDate is required.');
+  const findingId = cappedText(body.findingId, DOCAUDIT_MAX_FINDING_ID_CHARS);
+  if (!findingId) throw new ValidationError('findingId is required.');
+  if (!isFollowupKind(body.kind)) throw new ValidationError('Unknown finding kind.');
+  const kind = body.kind;
+  const summary = cappedText(body.summary, DOCAUDIT_MAX_SUMMARY_CHARS);
+  if (!summary) throw new ValidationError('Finding summary is required.');
+  for (const field of ['textA', 'textB'] as const) {
+    const value: unknown = body[field];
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new ValidationError(`${field} must be non-empty text.`);
+    }
+    if (value.length > DOCAUDIT_MAX_TEXT_CHARS) {
+      throw new ValidationError(`${field} exceeds ${DOCAUDIT_MAX_TEXT_CHARS} characters.`);
+    }
+  }
+  const textA = body.textA as string;
+  const textB = body.textB as string;
+  const rawPassages: unknown = body.passages;
+  if (!Array.isArray(rawPassages) || rawPassages.length < 1 || rawPassages.length > 2) {
+    throw new ValidationError('One finding carries one or two selected passages.');
+  }
+  const passages = rawPassages.map((entry: unknown, i: number): DocAuditSavedPassage => {
+    const label = `Finding passage ${i + 1}`;
+    if (!isRecord(entry)) throw new ValidationError(`${label} is not a verified quotation.`);
+    const side: unknown = entry.side;
+    if (side !== 'A' && side !== 'B') throw new ValidationError(`${label} is not a verified quotation.`);
+    const text: unknown = entry.text;
+    if (typeof text !== 'string' || !text.trim() || text.length > DOCAUDIT_MAX_PASSAGE_CHARS) {
+      throw new ValidationError(`${label} is not a verified quotation.`);
+    }
+    const start: unknown = entry.start;
+    const end: unknown = entry.end;
+    const occurrenceIndex: unknown = entry.occurrenceIndex;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || !Number.isInteger(occurrenceIndex)) {
+      throw new ValidationError(`${label} is not a verified quotation.`);
+    }
+    const source = side === 'A' ? textA : textB;
+    const starts = findOccurrences(source, text);
+    if (starts.length === 0) throw new ValidationError(`${label} is not a verified quotation.`);
+    const chosen = occurrenceIndex as number;
+    // Validated against the FULL enumeration, not the capped compare
+    // listing: any genuine occurrence is selectable.
+    if (chosen < 0 || chosen >= starts.length) {
+      throw new ValidationError(`${label} selects an unknown passage location.`);
+    }
+    if ((start as number) !== starts[chosen] || (end as number) !== starts[chosen] + text.length) {
+      throw new ValidationError(`${label} does not match the selected location.`);
+    }
+    return {
+      side,
+      text,
+      start: start as number,
+      end: end as number,
+      occurrenceIndex: chosen,
+      totalOccurrences: starts.length
+    };
+  });
+  const sides = passages.map((p) => p.side).sort().join('');
+  if (kind === 'difference' && sides !== 'AB') {
+    throw new ValidationError('A difference finding needs passages from both texts.');
+  }
+  if (kind === 'missing_in_a' && sides !== 'B') {
+    throw new ValidationError('This finding kind needs exactly the second-text passage.');
+  }
+  if (kind === 'missing_in_b' && sides !== 'A') {
+    throw new ValidationError('This finding kind needs exactly the first-text passage.');
+  }
+  const canonical = {
+    orgId,
+    domainId,
+    title: title.trim(),
+    ownerId,
+    dueDate,
+    findingId: findingId.trim(),
+    kind,
+    summary: summary.trim(),
+    passages
+  };
+  return { key, ...canonical, contentHash: followupContentHash(canonical) };
 }
 
 export type MockDocAuditMode = 'ok' | 'malformed' | 'timeout' | 'adversarial';

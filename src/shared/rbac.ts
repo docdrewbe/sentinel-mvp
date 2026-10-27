@@ -22,7 +22,8 @@ export type Action =
   | 'capa.evidence.add'
   | 'capa.review.request'
   | 'obligation.manage'
-  | 'docaudit.run';
+  | 'docaudit.run'
+  | 'docaudit.followup';
 
 /**
  * DEMO PRIVILEGE (explicit): administrators and compliance officers have

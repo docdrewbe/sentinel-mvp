@@ -131,6 +131,20 @@ describe('document audit permissions (Phase 1)', () => {
     assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'docaudit.run', foreign), false);
     assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'docaudit.run', foreign), true);
   });
+
+  it('follow-ups match the compare matrix: managers and above, staff never (Phase 2)', () => {
+    const s = scope();
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'docaudit.followup', s), true);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'docaudit.followup', s), true);
+    assert.equal(can(user({ role: 'administrator', id: 'u-admin' }), 'docaudit.followup', s), true);
+    assert.equal(can(user({ role: 'staff' }), 'docaudit.followup', s), false);
+  });
+
+  it('managers cannot create follow-ups for other organizations (Phase 2)', () => {
+    const foreign = scope({ orgId: 'org-clinic' });
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'docaudit.followup', foreign), false);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'docaudit.followup', foreign), true);
+  });
 });
 
 describe('organization visibility (F3)', () => {
