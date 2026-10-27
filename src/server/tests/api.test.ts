@@ -6943,3 +6943,185 @@ describe('Document audit compare (Phase 1, mocked provider)', () => {
     }
   });
 });
+
+describe('WM1-1: malformed and oversized bodies', () => {
+  const JSON_CANARY = 'WM11-JSON-CANARY-q7w2e9';
+  const SIZE_CANARY = 'WM11-SIZE-CANARY-p4m8x1';
+
+  async function rawPost(
+    base: string,
+    path: string,
+    userId: string,
+    raw: string
+  ): Promise<{ status: number; text: string }> {
+    const res = await fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-demo-user-id': userId },
+      body: raw
+    });
+    return { status: res.status, text: await res.text() };
+  }
+
+  function assertNoLeak(text: string, canary: string): void {
+    for (const len of [8, 16, 24, canary.length]) {
+      assert.ok(!text.includes(canary.slice(0, len)), `leaked canary prefix len ${len}`);
+    }
+  }
+
+  async function auditCount(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  it('rejects malformed JSON with a fixed 400 and no content echo', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      // Truncated mid-canary: parser errors that echo excerpts would leak here.
+      const truncated = `{"orgId": "org-cah", "textA": "${JSON_CANARY.slice(0, 12)}`;
+      for (const raw of [truncated, '{oops]']) {
+        const res = await rawPost(base, '/api/docaudit/compare', 'u-nurse-mgr', raw);
+        assert.equal(res.status, 400);
+        assert.deepEqual(JSON.parse(res.text), { error: 'Malformed JSON body.' });
+        assertNoLeak(res.text, JSON_CANARY);
+      }
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('applies the same fixed 400 on other routes', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const res = await rawPost(base, '/api/tasks', 'u-nurse-mgr', `{"orgId": "${JSON_CANARY}`);
+      assert.equal(res.status, 400);
+      assert.deepEqual(JSON.parse(res.text), { error: 'Malformed JSON body.' });
+      assertNoLeak(res.text, JSON_CANARY);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects oversized valid JSON with a fixed 413 and no content echo', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const audits = await auditCount(base);
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const raw = JSON.stringify({
+        orgId: 'org-cah',
+        textA: `${SIZE_CANARY}-head-${'P'.repeat(112 * 1024)}`,
+        textB: 'x'
+      });
+      assert.ok(raw.length > 102400);
+      const res = await rawPost(base, '/api/docaudit/compare', 'u-nurse-mgr', raw);
+      assert.equal(res.status, 413);
+      assert.deepEqual(JSON.parse(res.text), { error: 'Request body too large.' });
+      assertNoLeak(res.text, SIZE_CANARY);
+      assert.equal(await auditCount(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('passes bodies within the limit through to route validation', async () => {
+    const { base, close } = await startServer();
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    process.env.DOCAUDIT_PROVIDER = 'mock';
+    try {
+      const raw = JSON.stringify({ orgId: 'org-cah', textA: 'x'.repeat(100000), textB: 'y' });
+      assert.ok(raw.length < 102400);
+      const res = await rawPost(base, '/api/docaudit/compare', 'u-nurse-mgr', raw);
+      assert.equal(res.status, 400);
+      // Route-level cap error, proving the parser let the body through.
+      assert.deepEqual(JSON.parse(res.text), { error: 'textA exceeds 4000 characters.' });
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      await close();
+    }
+  });
+
+  it('never logs parser failures', async () => {
+    const { base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      await rawPost(base, '/api/docaudit/compare', 'u-nurse-mgr', `{"textA": "${JSON_CANARY}`);
+      await rawPost(
+        base,
+        '/api/docaudit/compare',
+        'u-nurse-mgr',
+        JSON.stringify({ orgId: 'org-cah', textA: `${SIZE_CANARY}-${'Q'.repeat(112 * 1024)}`, textB: 'x' })
+      );
+      await rawPost(base, '/api/tasks', 'u-nurse-mgr', '{broken');
+      assert.equal(errors.length, 0);
+      assertNoLeak(JSON.stringify(errors), JSON_CANARY);
+      assertNoLeak(JSON.stringify(errors), SIZE_CANARY);
+    } finally {
+      console.error = original;
+      await close();
+    }
+  });
+
+  it('serves valid requests normally after parser failures', async () => {
+    const { base, close } = await startServer();
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    process.env.DOCAUDIT_PROVIDER = 'mock';
+    docaudit.__resetDocAuditThrottle();
+    try {
+      assert.equal((await rawPost(base, '/api/docaudit/compare', 'u-nurse-mgr', '{broken')).status, 400);
+      const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        textA: 'Alpha site stores fuel in locked cabinets.',
+        textB: 'Alpha site stores fuel in locked cabinets.'
+      });
+      assert.equal(res.status, 200);
+      const health = await fetch(`${base}/api/health`);
+      assert.equal(health.status, 200);
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      docaudit.__resetDocAuditThrottle();
+      await close();
+    }
+  });
+
+  it('refused provider-off requests do not consume quota', async () => {
+    const { base, close } = await startServer();
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    docaudit.__resetDocAuditThrottle();
+    try {
+      const body = { orgId: 'org-cah', textA: 'Alpha text here.', textB: 'Beta text here.' };
+      delete process.env.DOCAUDIT_PROVIDER;
+      for (let i = 0; i < 11; i++) {
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 503);
+      }
+      process.env.DOCAUDIT_PROVIDER = 'mock';
+      // Full budget intact: 10 allowed, 11th throttled.
+      for (let i = 0; i < 10; i++) {
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 200);
+      }
+      assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 429);
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      docaudit.__resetDocAuditThrottle();
+      await close();
+    }
+  });
+});

@@ -86,7 +86,9 @@ function rejectBadText(res: Response, body: unknown, fields: string[]): boolean 
 export function createApp(db: DbShape): express.Express {
   const app = express();
   app.use(cors());
-  app.use(express.json());
+  // WM1-1: explicit body limit (the previous effective default), so the 413
+  // path below is a defined contract rather than an accident of defaults.
+  app.use(express.json({ limit: '100kb' }));
 
   // Public demo endpoints (org/user pickers need these before login).
   app.get('/api/health', (_req, res) => {
@@ -247,13 +249,15 @@ export function createApp(db: DbShape): express.Express {
     }
     try {
       const clean = validateCompareInput(input);
-      if (!checkDocAuditThrottle(user.id)) {
-        res.status(429).json({ error: 'Comparison limit reached. Try again later.' });
-        return;
-      }
+      // WM1-1: availability before quota — refused requests must not consume
+      // throttle budget. Auth and authorization checks above stay first.
       const provider = resolveProvider();
       if (!provider) {
         res.status(503).json({ error: PROVIDER_NOT_CONFIGURED });
+        return;
+      }
+      if (!checkDocAuditThrottle(user.id)) {
+        res.status(429).json({ error: 'Comparison limit reached. Try again later.' });
         return;
       }
       const signal = AbortSignal.timeout(currentTimeoutMs());
@@ -1341,5 +1345,29 @@ export function createApp(db: DbShape): express.Express {
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
+
+  // WM1-1: application-wide error boundary. Body-parser failures answer with
+  // fixed JSON and never reach Express's default handler; nothing
+  // request-supplied (content, parser messages, stacks, paths) is echoed or
+  // logged here. Must stay the last middleware in createApp. Express
+  // recognizes error middleware by its four parameters; _next is unused.
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    const type = err?.type as string | undefined;
+    const status = (err?.status ?? err?.statusCode) as number | undefined;
+    if (type === 'entity.parse.failed' || (status === 400 && err?.name === 'SyntaxError' && 'body' in err)) {
+      res.status(400).json({ error: 'Malformed JSON body.' });
+      return;
+    }
+    if (type === 'entity.too.large' || status === 413) {
+      res.status(413).json({ error: 'Request body too large.' });
+      return;
+    }
+    console.error(`[sentinel] ${req.method} ${req.path} failed in error middleware.`);
+    res.status(500).json({ error: 'Internal error.' });
+  });
   return app;
 }
