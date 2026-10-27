@@ -1089,6 +1089,12 @@ function ObligationRow({ obligation: o, template, ready, today, userName, canGen
         <div className="trail-detail">
           {template?.regulatoryRefs.map((r) => `${r.source} — ${r.citation}`).join(' · ') || 'No source refs'}
         </div>
+        {(o.scheduleHistory ?? []).map((h) => (
+          <div key={h.seq} className="trail-detail">
+            #{h.seq} {h.change}: {h.oldValue || 'none'} → {h.newValue || 'none'} — {h.reason}{' '}
+            ({userName.get(h.byUserId) ?? h.byUserId})
+          </div>
+        ))}
       </td>
       <td>{template ? RECURRENCE_LABELS[template.recurrence.frequency] : '—'}</td>
       <td>

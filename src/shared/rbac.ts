@@ -20,7 +20,8 @@ export type Action =
   | 'capa.update'
   | 'capa.close'
   | 'capa.evidence.add'
-  | 'capa.review.request';
+  | 'capa.review.request'
+  | 'obligation.manage';
 
 /**
  * DEMO PRIVILEGE (explicit): administrators and compliance officers have
@@ -41,6 +42,8 @@ export function can(user: DemoUser, action: Action, record?: OwnedRecord): boole
   if (record && record.orgId !== user.orgId) return false;
   if (user.role === 'department_manager') {
     // Managers can do everything except final verification/closure and template design.
+    // Obligation schedules (obligation.manage) stay with managers and above: staff
+    // never postpone, deactivate, or reassign schedules, even their own.
     return action !== 'task.verify' && action !== 'template.manage' && action !== 'capa.close';
   }
   if (user.role === 'staff') {

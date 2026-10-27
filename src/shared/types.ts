@@ -399,6 +399,19 @@ export interface RecurringObligation {
   active: boolean;
   /** Recurrence periods already generated (period keys), append-only. */
   generatedPeriods: string[];
+  /** Append-only schedule-change history (server-maintained). */
+  scheduleHistory?: ScheduleHistoryEntry[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** One recorded schedule change: what moved, old → new, who, when, why. */
+export interface ScheduleHistoryEntry {
+  seq: number;
+  change: 'target' | 'assignee' | 'active';
+  oldValue: string;
+  newValue: string;
+  byUserId: string;
+  at: string;
+  reason: string;
 }

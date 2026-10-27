@@ -399,6 +399,7 @@ export function seedDatabase(): DbShape {
       assigneeId: 'u-officer',
       active: true,
       generatedPeriods: [],
+      scheduleHistory: [],
       createdAt: t,
       updatedAt: t
     },
@@ -411,6 +412,7 @@ export function seedDatabase(): DbShape {
       assigneeId: 'u-nurse-mgr',
       active: true,
       generatedPeriods: [],
+      scheduleHistory: [],
       createdAt: t,
       updatedAt: t
     }

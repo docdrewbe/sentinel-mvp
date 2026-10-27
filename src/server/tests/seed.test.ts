@@ -176,6 +176,7 @@ describe('synthetic demo data', () => {
       assert.equal(o.anchorDay, Number(o.nextDueDate.slice(8, 10)));
       assert.equal(o.active, true);
       assert.deepEqual(o.generatedPeriods, []);
+      assert.deepEqual(o.scheduleHistory, []);
     }
   });
 

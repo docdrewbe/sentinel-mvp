@@ -1028,9 +1028,10 @@ export function createApp(db: DbShape): express.Express {
 
   // ---------------------------------------------------------------------------
   // Recurring obligations (calendar slice 1): template cadences bound to
-  // organization-selected target dates. Reads are tenant-scoped; writes
-  // reuse the task.create/task.update matrix; generation is atomic with
-  // its audit events. Target dates are illustrative, never legal mandates.
+  // organization-selected target dates. Reads are tenant-scoped; creation
+  // and generation reuse task.create, schedule edits need
+  // obligation.manage plus a reason (CAL4); generation is atomic with its
+  // audit events. Target dates are illustrative, never legal mandates.
   // ---------------------------------------------------------------------------
   app.get('/api/obligations', (req: AuthRequest, res) => {
     const scope = readScope(req, res);
@@ -1096,18 +1097,28 @@ export function createApp(db: DbShape): express.Express {
       orgForbidden(req, res);
       return;
     }
-    // Scheduling follows the task matrix: managers run their own org's
-    // schedules, and assigned staff may adjust their own targets.
-    if (!can(user, 'task.update', { orgId: obligation.orgId, ownerId: obligation.assigneeId ?? '' })) {
-      forbidden(res, user, 'task.update');
+    // CAL4: schedule changes need manager/officer/admin authority — staff
+    // cannot postpone, deactivate, or reassign, even as the assignee.
+    if (!can(user, 'obligation.manage', { orgId: obligation.orgId, ownerId: '' })) {
+      forbidden(res, user, 'obligation.manage');
       return;
     }
-    if (rejectBadText(res, req.body, ['nextDueDate', 'assigneeId'])) return;
-    const patch = req.body as { nextDueDate?: string; assigneeId?: string; active?: boolean };
+    if (rejectBadText(res, req.body, ['nextDueDate', 'assigneeId', 'reason'])) return;
+    const patch = req.body as { nextDueDate?: string; assigneeId?: string; active?: boolean; reason?: string };
     if (patch.active !== undefined && typeof patch.active !== 'boolean') {
       res.status(400).json({ error: 'active must be true or false.' });
       return;
     }
+    const touchesSchedule =
+      patch.nextDueDate !== undefined || patch.assigneeId !== undefined || patch.active !== undefined;
+    const reason = (patch.reason ?? '').trim();
+    if (touchesSchedule && !reason) {
+      res.status(400).json({ error: 'A reason is required to change the schedule.' });
+      return;
+    }
+    const oldTarget = obligation.nextDueDate;
+    const oldAssignee = obligation.assigneeId ?? '';
+    const oldActive = obligation.active;
     try {
       const updated = mutateDb(db, () => {
         const next = updateObligation(db, obligation.id, {
@@ -1115,8 +1126,33 @@ export function createApp(db: DbShape): express.Express {
           ...(patch.assigneeId !== undefined ? { assigneeId: patch.assigneeId } : {}),
           ...(patch.active !== undefined ? { active: patch.active } : {})
         });
-        const fields = ['nextDueDate', 'assigneeId', 'active'].filter(
-          (f) => (patch as Record<string, unknown>)[f] !== undefined
+        // One history entry per field that actually changed, atomically
+        // with the update and its audit event.
+        const changes: Array<{ change: 'target' | 'assignee' | 'active'; oldValue: string; newValue: string }> = [];
+        if (next.nextDueDate !== oldTarget) {
+          changes.push({ change: 'target', oldValue: oldTarget, newValue: next.nextDueDate });
+        }
+        if ((next.assigneeId ?? '') !== oldAssignee) {
+          changes.push({ change: 'assignee', oldValue: oldAssignee, newValue: next.assigneeId ?? '' });
+        }
+        if (next.active !== oldActive) {
+          changes.push({ change: 'active', oldValue: String(oldActive), newValue: String(next.active) });
+        }
+        const history = next.scheduleHistory ?? [];
+        if (changes.length > 0) {
+          const at = monotonicNow();
+          next.scheduleHistory = [
+            ...history,
+            ...changes.map((c, i) => ({ seq: history.length + i + 1, ...c, byUserId: user.id, at, reason }))
+          ];
+        }
+        const show = (v: string): string => (v === '' ? 'none' : v);
+        const parts = changes.map((c) =>
+          c.change === 'target'
+            ? `target ${c.oldValue} -> ${c.newValue}`
+            : c.change === 'assignee'
+              ? `assignee ${show(c.oldValue)} -> ${show(c.newValue)}`
+              : `active ${c.oldValue} -> ${c.newValue}`
         );
         appendAudit(db, {
           actorId: user.id,
@@ -1124,7 +1160,10 @@ export function createApp(db: DbShape): express.Express {
           recordType: 'obligation',
           recordId: obligation.id,
           orgId: obligation.orgId,
-          detail: `Target ${next.nextDueDate} (illustrative)${fields.length > 0 ? ` (fields: ${fields.join(', ')})` : ''}`
+          detail:
+            parts.length > 0
+              ? `${parts.join('; ')} (reason: ${reason})`
+              : `No changes (reason: ${reason || 'n/a'})`
         });
         return next;
       });

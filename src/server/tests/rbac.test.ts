@@ -89,6 +89,28 @@ describe('CAPA permissions (simulated)', () => {
   });
 });
 
+describe('obligation schedule permissions (CAL4)', () => {
+  const sched = (over: { orgId?: string; ownerId?: string } = {}) => ({
+    orgId: 'org-cah',
+    ownerId: '',
+    ...over
+  });
+
+  it('managers, officers, and admins manage schedules; staff never', () => {
+    const s = sched();
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'obligation.manage', s), true);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'obligation.manage', s), true);
+    assert.equal(can(user({ role: 'administrator', id: 'u-admin' }), 'obligation.manage', s), true);
+    assert.equal(can(user({ role: 'staff' }), 'obligation.manage', s), false);
+  });
+
+  it('managers cannot manage other organizations schedules', () => {
+    const foreign = sched({ orgId: 'org-clinic' });
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'obligation.manage', foreign), false);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'obligation.manage', foreign), true);
+  });
+});
+
 describe('organization visibility (F3)', () => {
   const all = ['org-cah', 'org-clinic', 'org-canna'];
 

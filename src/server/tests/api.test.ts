@@ -5310,37 +5310,67 @@ describe('Calendar slice 1: obligations (HTTP)', () => {
     }
   });
 
-  it('updates schedules with assignee-scoped staff access', async () => {
+  it('updates schedules with manager authority and reasons (CAL4)', async () => {
     const { db, base, close } = await startServer();
     try {
       const id = await makeObligation(base, 'u-nurse-mgr', { assigneeId: 'u-staff' });
       const moved = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
-        nextDueDate: '2026-12-31'
+        nextDueDate: '2026-12-31',
+        reason: 'Year-end blackout (simulated).'
       });
       assert.equal(moved.status, 200);
       const reset = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
       assert.equal(reset.nextDueDate, '2026-12-31');
       assert.equal(reset.anchorDay, 31);
-      // Assigned staff may adjust their own target; others may not.
+      // CAL4: even the assigned staffer cannot adjust the schedule.
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-staff', { nextDueDate: '2026-12-20' })).status,
-        200
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-staff', {
+            nextDueDate: '2026-12-20',
+            reason: 'Trying anyway (simulated).'
+          })
+        ).status,
+        403
       );
-      assert.equal((await call(base, 'PATCH', `/api/obligations/${id}`, 'u-clinic-mgr', { active: false })).status, 403);
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-clinic-mgr', {
+            active: false,
+            reason: 'Trying anyway (simulated).'
+          })
+        ).status,
+        403
+      );
       const diskBefore = readFileSync(dataFile, 'utf8');
       const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
       const audits = await auditTotal(base);
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2026-13-45' })).status,
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            nextDueDate: '2026-13-45',
+            reason: 'Bad date probe (simulated).'
+          })
+        ).status,
         400
       );
-      const badActive = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { active: 'yes' });
+      const badActive = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        active: 'yes',
+        reason: 'Bad type probe (simulated).'
+      });
       assert.equal(badActive.status, 400);
       assert.equal(badActive.json.error, 'active must be true or false.');
       assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
       assert.equal(await auditTotal(base), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
-      assert.equal((await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { active: false })).status, 200);
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            active: false,
+            reason: 'Paused for winter (simulated).'
+          })
+        ).status,
+        200
+      );
       assert.equal((await obligationById(base, 'u-nurse-mgr', 'org-cah', id)).active, false);
       assert.ok((await recordAudits(base, id)).some((e) => e.action === 'obligation.updated'));
       assertDiskMatchesMemory(db);
@@ -5396,7 +5426,8 @@ describe('Calendar slice 1: obligations (HTTP)', () => {
       const before = await obligationById(base, 'u-nurse-mgr', 'org-cah', id);
       const audits = await auditTotal(base);
       const rewind = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
-        nextDueDate: '2026-11-15'
+        nextDueDate: '2026-11-15',
+        reason: 'Rewind probe (simulated).'
       });
       assert.equal(rewind.status, 400);
       assert.equal(rewind.json.error, 'An instance for 2026-11 already exists.');
@@ -5500,7 +5531,15 @@ describe('Calendar slice 1: obligations (HTTP)', () => {
       assert.deepEqual(await obligationById(base, 'u-nurse-mgr', 'org-cah', id), before);
       assert.equal(await auditTotal(base), audits);
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
-      assert.equal((await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { active: false })).status, 200);
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            active: false,
+            reason: 'Paused (simulated).'
+          })
+        ).status,
+        200
+      );
       const inactive = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
       assert.equal(inactive.status, 400);
       assert.equal(inactive.json.error, 'Obligation is inactive.');
@@ -5704,7 +5743,10 @@ describe('CAL1 strict dates (HTTP)', () => {
         });
         assert.equal(post.status, 400);
         assert.equal(post.json.error, MESSAGE);
-        const patch = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate });
+        const patch = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+          nextDueDate,
+          reason: 'CAL1 probe (simulated).'
+        });
         assert.equal(patch.status, 400);
         assert.equal(patch.json.error, MESSAGE);
       }
@@ -5785,7 +5827,8 @@ describe('CAL1 strict dates (HTTP)', () => {
       });
       try {
         const res = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
-          nextDueDate: '2026-12-15'
+          nextDueDate: '2026-12-15',
+          reason: 'CAL1 rollback probe (simulated).'
         });
         assert.equal(res.status, 500);
       } finally {
@@ -5870,7 +5913,8 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       const audits = await auditTotal(base);
       // The report's reproduction: shift within June after generating June.
       const shift = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
-        nextDueDate: '2027-06-28'
+        nextDueDate: '2027-06-28',
+        reason: 'CAL2 probe (simulated).'
       });
       assert.equal(shift.status, 400);
       assert.equal(shift.json.error, 'An instance for 2027-06 already exists.');
@@ -5880,7 +5924,12 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
       // Forward movement still works and mints only the new period.
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-08-02' })).status,
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            nextDueDate: '2027-08-02',
+            reason: 'CAL2 probe (simulated).'
+          })
+        ).status,
         200
       );
       const second = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
@@ -5897,7 +5946,12 @@ describe('CAL2 recurrence periods (HTTP)', () => {
     try {
       const id = await makeObligation(base, 'u-nurse-mgr');
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-07-20' })).status,
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            nextDueDate: '2027-07-20',
+            reason: 'CAL2 probe (simulated).'
+          })
+        ).status,
         200
       );
       const generated = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
@@ -5919,11 +5973,21 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       const id = await makeObligation(base, 'u-nurse-mgr', { templateId, nextDueDate: '2027-06-15' });
       assert.equal((await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr')).status, 201);
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-06-17' })).status,
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            nextDueDate: '2027-06-17',
+            reason: 'CAL2 probe (simulated).'
+          })
+        ).status,
         400
       );
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', { nextDueDate: '2027-06-21' })).status,
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+            nextDueDate: '2027-06-21',
+            reason: 'CAL2 probe (simulated).'
+          })
+        ).status,
         200
       );
       const second = await call(base, 'POST', `/api/obligations/${id}/generate`, 'u-nurse-mgr');
@@ -5933,12 +5997,18 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       const edge = await makeObligation(base, 'u-nurse-mgr', { templateId, nextDueDate: '2026-12-31' });
       assert.equal((await call(base, 'POST', `/api/obligations/${edge}/generate`, 'u-nurse-mgr')).status, 201);
       const sameWeek = await call(base, 'PATCH', `/api/obligations/${edge}`, 'u-nurse-mgr', {
-        nextDueDate: '2027-01-01'
+        nextDueDate: '2027-01-01',
+        reason: 'CAL2 probe (simulated).'
       });
       assert.equal(sameWeek.status, 400);
       assert.equal(sameWeek.json.error, 'An instance for 2026-W53 already exists.');
       assert.equal(
-        (await call(base, 'PATCH', `/api/obligations/${edge}`, 'u-nurse-mgr', { nextDueDate: '2027-01-04' })).status,
+        (
+          await call(base, 'PATCH', `/api/obligations/${edge}`, 'u-nurse-mgr', {
+            nextDueDate: '2027-01-04',
+            reason: 'CAL2 probe (simulated).'
+          })
+        ).status,
         200
       );
       assertDiskMatchesMemory(db);
@@ -5956,7 +6026,8 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       });
       assert.equal((await call(base, 'POST', `/api/obligations/${quarterly}/generate`, 'u-nurse-mgr')).status, 201);
       const sameQuarter = await call(base, 'PATCH', `/api/obligations/${quarterly}`, 'u-nurse-mgr', {
-        nextDueDate: '2026-02-15'
+        nextDueDate: '2026-02-15',
+        reason: 'CAL2 probe (simulated).'
       });
       assert.equal(sameQuarter.status, 400);
       assert.equal(sameQuarter.json.error, 'An instance for 2026-Q1 already exists.');
@@ -5967,7 +6038,8 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       });
       assert.equal((await call(base, 'POST', `/api/obligations/${annual}/generate`, 'u-nurse-mgr')).status, 201);
       const sameYear = await call(base, 'PATCH', `/api/obligations/${annual}`, 'u-nurse-mgr', {
-        nextDueDate: '2026-12-01'
+        nextDueDate: '2026-12-01',
+        reason: 'CAL2 probe (simulated).'
       });
       assert.equal(sameYear.status, 400);
       assert.equal(sameYear.json.error, 'An instance for 2026 already exists.');
@@ -6050,7 +6122,8 @@ describe('CAL2 recurrence periods (HTTP)', () => {
       const audits = await auditTotal(base);
       const diskBefore = readFileSync(dataFile, 'utf8');
       const shift = await call(base, 'PATCH', '/api/obligations/obl-legacy-date', 'u-nurse-mgr', {
-        nextDueDate: '2027-06-20'
+        nextDueDate: '2027-06-20',
+        reason: 'CAL2 probe (simulated).'
       });
       assert.equal(shift.status, 400);
       assert.equal(shift.json.error, 'An instance for 2027-06 already exists.');
@@ -6088,6 +6161,296 @@ describe('CAL3 organization-local dates (HTTP)', () => {
       });
       assert.equal(instantiated.status, 201);
       assert.match(String(instantiated.json.dueDate), /^\d{4}-\d{2}-\d{2}$/);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('CAL4 schedule-change authorization (HTTP)', () => {
+  const REASON_REQUIRED = 'A reason is required to change the schedule.';
+
+  interface HistoryJson {
+    seq: number;
+    change: string;
+    oldValue: string;
+    newValue: string;
+    byUserId: string;
+    at: string;
+    reason: string;
+  }
+
+  async function fetchObligation(base: string, id: string): Promise<Record<string, unknown>> {
+    const res = await call(base, 'GET', '/api/obligations?orgId=org-cah', 'u-nurse-mgr');
+    assert.equal(res.status, 200);
+    const found = (res.json as unknown as Array<Record<string, unknown>>).find((o) => o.id === id);
+    assert.ok(found, `obligation ${id} visible`);
+    return found;
+  }
+
+  async function auditTotal(base: string): Promise<number> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as unknown[]).length;
+  }
+
+  async function recordAudits(base: string, recordId: string): Promise<Array<{ action: string; detail: string }>> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return (res.json as unknown as Array<{ action: string; detail: string; recordId: string }>).filter(
+      (e) => e.recordId === recordId
+    );
+  }
+
+  async function makeObligation(base: string, assigneeId: string): Promise<string> {
+    const created = await call(base, 'POST', '/api/obligations', 'u-nurse-mgr', {
+      orgId: 'org-cah',
+      templateId: 'tpl-access-review',
+      nextDueDate: '2027-06-15',
+      assigneeId
+    });
+    assert.equal(created.status, 201);
+    return String(created.json.id);
+  }
+
+  it('bars staff from postponing, deactivating, and reassigning', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-staff');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await fetchObligation(base, id);
+      const audits = await auditTotal(base);
+      for (const body of [
+        { nextDueDate: '2027-07-15', reason: 'Postpone (simulated).' },
+        { active: false, reason: 'Pause (simulated).' },
+        { assigneeId: 'u-nurse-mgr', reason: 'Reassign (simulated).' }
+      ]) {
+        const res = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-staff', body);
+        assert.equal(res.status, 403);
+        assert.match(String(res.json.error), /obligation\.manage/);
+      }
+      assert.deepEqual(await fetchObligation(base, id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('records authorized changes with old, new, actor, and reason', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const postponed = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        nextDueDate: '2027-07-20',
+        reason: 'Surveyor visit moved (simulated).'
+      });
+      assert.equal(postponed.status, 200);
+      const paused = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-officer', {
+        active: false,
+        reason: 'Paused for accreditation (simulated).'
+      });
+      assert.equal(paused.status, 200);
+      const reassigned = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-admin', {
+        assigneeId: 'u-officer2',
+        reason: 'Coverage change (simulated).'
+      });
+      assert.equal(reassigned.status, 200);
+      const history = ((await fetchObligation(base, id)).scheduleHistory ?? []) as HistoryJson[];
+      assert.deepEqual(
+        history.map((h) => [h.seq, h.change, h.oldValue, h.newValue, h.byUserId, h.reason]),
+        [
+          [1, 'target', '2027-06-15', '2027-07-20', 'u-nurse-mgr', 'Surveyor visit moved (simulated).'],
+          [2, 'active', 'true', 'false', 'u-officer', 'Paused for accreditation (simulated).'],
+          [3, 'assignee', 'u-nurse-mgr', 'u-officer2', 'u-admin', 'Coverage change (simulated).']
+        ]
+      );
+      assert.ok(history.every((h) => typeof h.at === 'string' && h.at.length > 0));
+      const details = (await recordAudits(base, id))
+        .filter((e) => e.action === 'obligation.updated')
+        .map((e) => e.detail);
+      assert.equal(details.length, 3);
+      assert.ok(details[0].includes('2027-06-15 -> 2027-07-20'));
+      assert.ok(details[0].includes('Surveyor visit moved (simulated).'));
+      assert.ok(details[1].includes('active true -> false'));
+      assert.ok(details[2].includes('assignee u-nurse-mgr -> u-officer2'));
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rejects missing, blank, and mistyped reasons', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await fetchObligation(base, id);
+      const audits = await auditTotal(base);
+      for (const body of [
+        { nextDueDate: '2027-07-15' },
+        { nextDueDate: '2027-07-15', reason: '   ' },
+        { active: false },
+        { assigneeId: 'u-officer' }
+      ]) {
+        const res = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', body);
+        assert.equal(res.status, 400);
+        assert.equal(res.json.error, REASON_REQUIRED);
+      }
+      const mistyped = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        nextDueDate: '2027-07-15',
+        reason: 42
+      });
+      assert.equal(mistyped.status, 400);
+      assert.equal(mistyped.json.error, 'reason must be text.');
+      assert.deepEqual(await fetchObligation(base, id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps authorization ahead of reason validation across orgs', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await fetchObligation(base, id);
+      const audits = await auditTotal(base);
+      // 403 either way: with a reason, and without one.
+      assert.equal(
+        (
+          await call(base, 'PATCH', `/api/obligations/${id}`, 'u-clinic-mgr', {
+            nextDueDate: '2027-07-15',
+            reason: 'Cross-org probe (simulated).'
+          })
+        ).status,
+        403
+      );
+      assert.equal(
+        (await call(base, 'PATCH', `/api/obligations/${id}`, 'u-clinic-staff', { active: false })).status,
+        403
+      );
+      assert.deepEqual(await fetchObligation(base, id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('allows backdating with a reason and records old and new', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const backdated = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        nextDueDate: '2027-05-20',
+        reason: 'Catch up an unworked period (simulated).'
+      });
+      assert.equal(backdated.status, 200);
+      const history = ((await fetchObligation(base, id)).scheduleHistory ?? []) as HistoryJson[];
+      assert.deepEqual(
+        history.map((h) => [h.seq, h.change, h.oldValue, h.newValue, h.reason]),
+        [[1, 'target', '2027-06-15', '2027-05-20', 'Catch up an unworked period (simulated).']]
+      );
+      const details = (await recordAudits(base, id))
+        .filter((e) => e.action === 'obligation.updated')
+        .map((e) => e.detail);
+      assert.ok(details[0].includes('2027-06-15 -> 2027-05-20'));
+      assert.ok(details[0].includes('Catch up an unworked period (simulated).'));
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('packs multi-field changes into sequenced entries and one audit', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const audits = await auditTotal(base);
+      const res = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-officer', {
+        nextDueDate: '2027-07-20',
+        assigneeId: 'u-officer2',
+        active: false,
+        reason: 'Replan July (simulated).'
+      });
+      assert.equal(res.status, 200);
+      const history = ((await fetchObligation(base, id)).scheduleHistory ?? []) as HistoryJson[];
+      assert.deepEqual(
+        history.map((h) => [h.seq, h.change, h.oldValue, h.newValue]),
+        [
+          [1, 'target', '2027-06-15', '2027-07-20'],
+          [2, 'assignee', 'u-nurse-mgr', 'u-officer2'],
+          [3, 'active', 'true', 'false']
+        ]
+      );
+      const details = (await recordAudits(base, id))
+        .filter((e) => e.action === 'obligation.updated')
+        .map((e) => e.detail);
+      assert.equal(details.length, 1);
+      assert.ok(details[0].includes('2027-06-15 -> 2027-07-20'));
+      assert.ok(details[0].includes('u-nurse-mgr -> u-officer2'));
+      assert.ok(details[0].includes('active true -> false'));
+      assert.equal(await auditTotal(base), audits + 1);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('ignores forged schedule histories', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const created = await call(base, 'POST', '/api/obligations', 'u-nurse-mgr', {
+        orgId: 'org-cah',
+        templateId: 'tpl-access-review',
+        nextDueDate: '2027-06-15',
+        assigneeId: 'u-nurse-mgr',
+        scheduleHistory: [{ seq: 99, change: 'target', oldValue: 'x', newValue: 'y', byUserId: 'u-staff', at: 't', reason: 'forged' }]
+      });
+      assert.equal(created.status, 201);
+      const id = String(created.json.id);
+      assert.equal((await fetchObligation(base, id)).scheduleHistory, undefined);
+      const forged = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+        scheduleHistory: [{ seq: 99, change: 'target', oldValue: 'x', newValue: 'y', byUserId: 'u-staff', at: 't', reason: 'forged' }]
+      });
+      assert.equal(forged.status, 200);
+      assert.equal((await fetchObligation(base, id)).scheduleHistory, undefined);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+
+  it('rolls back schedule changes with their history when persistence fails', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const id = await makeObligation(base, 'u-nurse-mgr');
+      const diskBefore = readFileSync(dataFile, 'utf8');
+      const before = await fetchObligation(base, id);
+      const audits = await auditTotal(base);
+      store.__setRenameImpl(() => {
+        throw eperm();
+      });
+      try {
+        const res = await call(base, 'PATCH', `/api/obligations/${id}`, 'u-nurse-mgr', {
+          nextDueDate: '2027-07-20',
+          reason: 'CAL4 rollback probe (simulated).'
+        });
+        assert.equal(res.status, 500);
+      } finally {
+        store.__setRenameImpl(null);
+      }
+      assert.deepEqual(await fetchObligation(base, id), before);
+      assert.equal(await auditTotal(base), audits);
+      assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      assert.deepEqual(tempFiles(), []);
       assertDiskMatchesMemory(db);
     } finally {
       await close();
