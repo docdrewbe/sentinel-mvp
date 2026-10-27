@@ -5,6 +5,10 @@
 // the compare route answers 503 without consuming throttle budget. Off by
 // default: unset, `off`, or unknown values never reach this module.
 //
+// P3-1: production requests go only to the exact approved origin and API
+// path; loopback stubs are reachable only through an explicit test seam,
+// never through normal configuration.
+//
 // Exactly one HTTPS attempt per comparison: no retries, no redirects
 // (redirect: 'error'), bounded output (max_tokens), a byte-capped streaming
 // response read, and strict JSON parsing with no repair. Token-truncated
@@ -21,6 +25,12 @@ import type { DocAuditProvider } from './docaudit.js';
 
 /** Baseten OpenAI-compatible base URL (https://docs.baseten.co). */
 export const DOCAUDIT_BASETEN_DEFAULT_BASE_URL = 'https://inference.baseten.co/v1';
+/** P3-1: the only production host, matched exactly — never by suffix. */
+export const DOCAUDIT_BASETEN_ALLOWED_HOST = 'inference.baseten.co';
+/** P3-1: the only production API path (trailing slashes normalized away). */
+export const DOCAUDIT_BASETEN_ALLOWED_PATH = '/v1';
+/** Hosts a test-only stub override may point at. Exact matches only. */
+const STUB_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 /** Bounded completion size: findings JSON for at most 20 capped findings. */
 export const DOCAUDIT_BASETEN_MAX_TOKENS = 4000;
 /** Response body cap, enforced incrementally while reading the stream. */
@@ -73,25 +83,92 @@ function blank(value: string | undefined): boolean {
 }
 
 /**
- * Explicit configuration or null. Key and model are always required; the
- * base URL defaults to Baseten's documented endpoint and must be https
- * except for local stub servers (http loopback, used by isolated tests).
+ * Parses a base URL, rejecting embedded credentials, queries, and
+ * fragments outright: the request URL is built by appending a fixed path,
+ * so any of these would corrupt or redirect the request.
+ */
+function cleanUrl(value: string): URL | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+    return null;
+  }
+  return url;
+}
+
+/** Pathname with trailing slashes removed ('/' for the root). */
+function normalizedPath(url: URL): string {
+  return url.pathname.replace(/\/+$/, '') || '/';
+}
+
+/**
+ * P3-1 production pin: https, default port, exact approved host (the URL
+ * parser already lowercases it, so `===` is a complete match — no suffix
+ * games), and exactly the approved API path. Rebuilds the base from the
+ * validated components instead of echoing input. Null before any network
+ * request when anything differs.
+ */
+function productionBaseUrl(rawBase: string): string | null {
+  const url = cleanUrl(rawBase);
+  if (!url) return null;
+  if (url.protocol !== 'https:') return null;
+  if (url.port !== '') return null;
+  if (url.hostname !== DOCAUDIT_BASETEN_ALLOWED_HOST) return null;
+  if (normalizedPath(url) !== DOCAUDIT_BASETEN_ALLOWED_PATH) return null;
+  return `${url.protocol}//${url.hostname}${DOCAUDIT_BASETEN_ALLOWED_PATH}`;
+}
+
+let baseUrlOverride: string | null = null;
+/**
+ * Test seam: point the adapter at a local stub server over real HTTP.
+ * Loopback hosts only — anything else throws, and nothing in normal
+ * production configuration can set or influence this value. Null
+ * restores production configuration. Never driven by user input.
+ */
+export function __setBasetenBaseUrlOverride(url: string | null): void {
+  if (url === null) {
+    baseUrlOverride = null;
+    return;
+  }
+  const parsed = cleanUrl(url);
+  if (!parsed) throw new Error('Stub base URL is not a valid URL.');
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Stub base URL must be http or https.');
+  }
+  if (!STUB_HOSTS.has(parsed.hostname)) throw new Error('Stub base URL must use a loopback host.');
+  const path = normalizedPath(parsed);
+  if (path === '/') throw new Error('Stub base URL needs an API path.');
+  baseUrlOverride = `${parsed.protocol}//${parsed.hostname}${parsed.port === '' ? '' : `:${parsed.port}`}${path}`;
+}
+
+/**
+ * Explicit configuration or null. Key and model are always required. The
+ * base URL defaults to Baseten's documented endpoint and is pinned to
+ * that exact origin and API path — look-alike hosts, ports, paths,
+ * credentials, queries, and fragments all resolve to null before any
+ * network request. A test-only override (never production config) may
+ * redirect to a loopback stub for isolated tests.
  */
 export function resolveBasetenConfig(): BasetenConfig | null {
   const apiKey = process.env.DOCAUDIT_BASETEN_API_KEY;
   const model = process.env.DOCAUDIT_BASETEN_MODEL;
   if (blank(apiKey) || blank(model)) return null;
-  const rawBase = (process.env.DOCAUDIT_BASETEN_BASE_URL ?? '').trim() || DOCAUDIT_BASETEN_DEFAULT_BASE_URL;
-  let url: URL;
-  try {
-    url = new URL(rawBase);
-  } catch {
-    return null;
+  if (baseUrlOverride !== null) {
+    return {
+      baseUrl: baseUrlOverride,
+      apiKey: (apiKey as string).trim(),
+      model: (model as string).trim()
+    };
   }
-  const host = url.hostname.toLowerCase();
-  const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) return null;
-  return { baseUrl: rawBase.replace(/\/+$/, ''), apiKey: (apiKey as string).trim(), model: (model as string).trim() };
+  const rawBase =
+    (process.env.DOCAUDIT_BASETEN_BASE_URL ?? '').trim() || DOCAUDIT_BASETEN_DEFAULT_BASE_URL;
+  const baseUrl = productionBaseUrl(rawBase);
+  if (!baseUrl) return null;
+  return { baseUrl, apiKey: (apiKey as string).trim(), model: (model as string).trim() };
 }
 
 /** True only when selection, key, model, and base URL are all usable. */

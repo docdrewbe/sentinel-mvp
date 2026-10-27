@@ -5,7 +5,7 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
-import type { Server } from 'node:http';
+import http, { type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,7 @@ import {
   DOCAUDIT_BASETEN_MAX_RESPONSE_BYTES,
   DOCAUDIT_BASETEN_MAX_TOKENS,
   DOCAUDIT_BASETEN_TEMPERATURE,
+  __setBasetenBaseUrlOverride,
   __setBasetenFetch,
   createBasetenProvider,
   isBasetenConfigured,
@@ -51,6 +52,7 @@ afterEach(() => {
   delete process.env.DOCAUDIT_BASETEN_MODEL;
   delete process.env.DOCAUDIT_BASETEN_BASE_URL;
   __setBasetenFetch(null);
+  __setBasetenBaseUrlOverride(null);
   __resetDocAuditThrottle();
   __setDocAuditTimeoutMs(null);
 });
@@ -102,19 +104,123 @@ describe('baseten selection and configuration', () => {
     assert.equal(resolveProvider(), null);
   });
 
-  it('rejects unsafe or malformed base URLs', () => {
+  it('pins production to the exact approved origin and path', () => {
     setBasetenEnv();
-    for (const baseUrl of ['ftp://example.com/v1', 'http://example.com/v1', 'not-a-url']) {
+    assert.equal(resolveBasetenConfig()?.baseUrl, DOCAUDIT_BASETEN_DEFAULT_BASE_URL);
+    // Equivalent spellings of the same approved endpoint canonicalize.
+    for (const baseUrl of [
+      'https://inference.baseten.co/v1',
+      'https://inference.baseten.co/v1/',
+      'https://inference.baseten.co:443/v1',
+      'https://INFERENCE.BASETEN.CO/v1'
+    ]) {
       process.env.DOCAUDIT_BASETEN_BASE_URL = baseUrl;
-      assert.equal(resolveBasetenConfig(), null, baseUrl);
+      assert.equal(resolveBasetenConfig()?.baseUrl, DOCAUDIT_BASETEN_DEFAULT_BASE_URL, baseUrl);
     }
   });
 
-  it('falls back to the documented endpoint and allows loopback stubs', () => {
+  it('P3-1: rejects look-alike hosts, ports, paths, credentials, queries, fragments', () => {
     setBasetenEnv();
-    assert.equal(resolveBasetenConfig()?.baseUrl, DOCAUDIT_BASETEN_DEFAULT_BASE_URL);
-    process.env.DOCAUDIT_BASETEN_BASE_URL = 'http://127.0.0.1:9/v1/';
+    const rejected = [
+      'https://inference.baseten.co.evil.com/v1',
+      'https://evil-inference.baseten.co/v1',
+      'https://inference.baseten.com/v1',
+      'https://inferencebaseten.co/v1',
+      'https://inference.baseten.co./v1',
+      'https://user:pass@inference.baseten.co/v1',
+      'https://inference.baseten.co@evil.com/v1',
+      'https://inference.baseten.co:8443/v1',
+      'https://inference.baseten.co:4430/v1',
+      'https://inference.baseten.co/v1/extra',
+      'https://inference.baseten.co/',
+      'https://inference.baseten.co',
+      'https://inference.baseten.co/v1?key=x',
+      'https://inference.baseten.co/v1#frag',
+      'https://inference.baseten.co/%76%31',
+      'https://inference.baseten.co/V1',
+      'http://inference.baseten.co/v1',
+      'ftp://inference.baseten.co/v1',
+      'not-a-url'
+    ];
+    for (const baseUrl of rejected) {
+      process.env.DOCAUDIT_BASETEN_BASE_URL = baseUrl;
+      assert.equal(resolveBasetenConfig(), null, baseUrl);
+      assert.equal(resolveProvider(), null, baseUrl);
+    }
+  });
+
+  it('P3-1: rejects loopback through normal configuration', () => {
+    setBasetenEnv();
+    for (const baseUrl of [
+      'http://127.0.0.1:9/v1',
+      'http://localhost:9/v1',
+      'http://[::1]:9/v1',
+      'https://127.0.0.1/v1'
+    ]) {
+      process.env.DOCAUDIT_BASETEN_BASE_URL = baseUrl;
+      assert.equal(resolveBasetenConfig(), null, baseUrl);
+      assert.equal(resolveProvider(), null, baseUrl);
+    }
+  });
+
+  it('P3-1: rejected addresses make zero requests and never receive the key', async () => {
+    const rejected = [
+      'https://inference.baseten.co.evil.com/v1',
+      'https://user:pass@inference.baseten.co/v1',
+      'https://inference.baseten.co:8443/v1',
+      'https://inference.baseten.co/v1/extra',
+      'https://inference.baseten.co/v1?key=x',
+      'http://127.0.0.1:9/v1',
+      'not-a-url'
+    ];
+    for (const baseUrl of rejected) {
+      setBasetenEnv();
+      process.env.DOCAUDIT_BASETEN_BASE_URL = baseUrl;
+      let calls = 0;
+      let leaked = '';
+      __setBasetenFetch(
+        stubFetch((url: unknown, init: unknown) => {
+          calls++;
+          leaked = JSON.stringify({ url, init });
+          return new Response('{}', { status: 200 });
+        })
+      );
+      await rejectsProvider(
+        createBasetenProvider().compare({ textA: 'a', textB: 'b' }, new AbortController().signal),
+        503,
+        PROVIDER_NOT_CONFIGURED
+      );
+      assert.equal(calls, 0, baseUrl);
+      assert.equal(leaked, '', baseUrl);
+    }
+  });
+
+  it('test-only override enables loopback stubs and rejects everything else', () => {
+    setBasetenEnv();
+    __setBasetenBaseUrlOverride('http://127.0.0.1:9/v1/');
     assert.equal(resolveBasetenConfig()?.baseUrl, 'http://127.0.0.1:9/v1');
+    assert.ok(resolveProvider());
+    __setBasetenBaseUrlOverride('http://localhost:9/stub');
+    assert.equal(resolveBasetenConfig()?.baseUrl, 'http://localhost:9/stub');
+    __setBasetenBaseUrlOverride('http://[::1]:9/v1');
+    assert.equal(resolveBasetenConfig()?.baseUrl, 'http://[::1]:9/v1');
+    // Non-loopback, wrong scheme, credentials, queries, and bare hosts throw.
+    for (const bad of [
+      'https://inference.baseten.co/v1',
+      'http://example.com/v1',
+      'https://127.0.0.1.evil.com/v1',
+      'ftp://127.0.0.1/v1',
+      'http://user@127.0.0.1/v1',
+      'http://127.0.0.1/v1?x=1',
+      'http://127.0.0.1/v1#y',
+      'http://127.0.0.1',
+      'not-a-url'
+    ]) {
+      assert.throws(() => __setBasetenBaseUrlOverride(bad), Error, bad);
+    }
+    // A failed override never sticks: restoring null returns to production.
+    __setBasetenBaseUrlOverride(null);
+    assert.equal(resolveBasetenConfig()?.baseUrl, DOCAUDIT_BASETEN_DEFAULT_BASE_URL);
   });
 
   it('resolves a keyed, model-pinned provider with no fixture notice', () => {
@@ -138,6 +244,54 @@ describe('baseten selection and configuration', () => {
       PROVIDER_NOT_CONFIGURED
     );
     assert.equal(calls, 0);
+  });
+});
+
+describe('baseten loopback stub (real HTTP, test-only override)', () => {
+  it('drives an isolated stub server through the override seam', async () => {
+    setBasetenEnv();
+    __setBasetenFetch(null);
+    const seen: { method?: string; url?: string; auth?: string; body?: string } = {};
+    const stub: Server = http.createServer((req, res) => {
+      let data = '';
+      req.on('data', (chunk) => {
+        data += chunk;
+      });
+      req.on('end', () => {
+        seen.method = req.method;
+        seen.url = req.url;
+        seen.auth = req.headers.authorization;
+        seen.body = data;
+        res.setHeader('content-type', 'application/json');
+        res.end(envelope(JSON.stringify({ findings: [] })));
+      });
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', () => resolve()));
+    try {
+      const port = (stub.address() as AddressInfo).port;
+      __setBasetenBaseUrlOverride(`http://127.0.0.1:${port}/v1`);
+      const raw = await createBasetenProvider().compare(
+        { textA: 'aa', textB: 'bb' },
+        new AbortController().signal
+      );
+      assert.deepEqual(raw, { findings: [] });
+      assert.equal(seen.method, 'POST');
+      assert.equal(seen.url, '/v1/chat/completions');
+      assert.equal(seen.auth, `Bearer ${TEST_KEY}`);
+      const body = JSON.parse(seen.body ?? '') as {
+        model: string;
+        max_tokens: number;
+        messages: Array<{ role: string; content: string }>;
+      };
+      assert.equal(body.model, TEST_MODEL);
+      assert.equal(body.max_tokens, DOCAUDIT_BASETEN_MAX_TOKENS);
+      assert.match(body.messages[1].content, /aa/);
+    } finally {
+      __setBasetenBaseUrlOverride(null);
+      await new Promise<void>((resolve, reject) =>
+        stub.close((e) => (e ? reject(e) : resolve()))
+      );
+    }
   });
 });
 
