@@ -4,10 +4,13 @@ import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, 
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
+import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, isOverdueWork, newObligationBlockReason, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
+// isOverdue flags any past-target date (including submitted awaiting
+// verification) for red styling and due-soon exclusion. The Overdue KPI and
+// filters use isOverdueWork (open/in-progress only) so counts match rows.
 const isOverdue = (t: ComplianceTask, today: string): boolean => t.status !== 'verified' && t.dueDate < today;
 const dueSoon = (t: ComplianceTask, today: string): boolean => {
   if (t.status === 'verified' || isOverdue(t, today)) return false;
@@ -163,7 +166,7 @@ export default function App(): JSX.Element {
 
   const filtered = tasks.filter((t) => {
     if (statusFilter === 'all') return true;
-    if (statusFilter === 'overdue') return isOverdue(t, today);
+    if (statusFilter === 'overdue') return isOverdueWork(t, today);
     if (statusFilter === 'dueSoon') return dueSoon(t, today);
     return t.status === statusFilter;
   });
@@ -172,7 +175,7 @@ export default function App(): JSX.Element {
     open: tasks.filter((t) => t.status === 'open').length,
     inProgress: tasks.filter((t) => t.status === 'in_progress').length,
     dueSoon: tasks.filter((t) => dueSoon(t, today)).length,
-    overdue: tasks.filter((t) => isOverdue(t, today)).length,
+    overdue: tasks.filter((t) => isOverdueWork(t, today)).length,
     verified: tasks.filter((t) => t.status === 'verified').length
   };
 

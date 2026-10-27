@@ -328,6 +328,21 @@ export function calendarBucket(
   return 'upcoming';
 }
 
+/**
+ * M-CAL12: actionable overdue work as of an org-local `today` (YYYY-MM-DD).
+ * Single source for the Overdue KPI card and every Overdue filter, so the
+ * count always matches the listed rows. Submitted work awaiting verification
+ * and verified work are excluded — only open and in-progress tasks past
+ * their due date count. Due-date red styling and `overdueBadgeLabel` still
+ * flag submitted past-due items distinctly, so nothing looks silently on time.
+ */
+export function isOverdueWork(
+  task: Pick<ComplianceTask, 'dueDate' | 'status'>,
+  todayISODate: string
+): boolean {
+  return calendarBucket(task, todayISODate) === 'overdue';
+}
+
 /** Task action label: returning a submitted task to in-progress reads as a send-back. */
 export function startButtonLabel(task: Pick<ComplianceTask, 'status'>): string {
   return task.status === 'submitted' ? 'Send back' : 'Start';
@@ -337,8 +352,9 @@ export function startButtonLabel(task: Pick<ComplianceTask, 'status'>): string {
  * M-CAL4: overdue badge text as of an org-local `today` (YYYY-MM-DD).
  * Submitted work past its target reads as awaiting verification — not
  * "Overdue" — so the calendar never shows the confusing Submitted + Overdue
- * pair. Returns null when not past due or verified. Counts and filters
- * still treat past-due submitted work as overdue; only the wording changes.
+ * pair. Returns null when not past due or verified. The Overdue KPI and
+ * filters exclude submitted work (see `isOverdueWork`); this badge still
+ * flags submitted past-due items so they never look silently on time.
  */
 export function overdueBadgeLabel(
   task: Pick<ComplianceTask, 'dueDate' | 'status'>,

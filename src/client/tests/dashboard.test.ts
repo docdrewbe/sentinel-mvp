@@ -8,6 +8,7 @@ import {
   capaAdvanceBlockReason,
   capaReviewBlockReason,
   initialPanels,
+  isOverdueWork,
   newObligationBlockReason,
   overdueBadgeLabel,
   panelData,
@@ -679,5 +680,31 @@ describe('calendar polish M-CAL3/M-CAL4 (unit)', () => {
     );
     assert.equal(newObligationBlockReason([{ active: true }]), null);
     assert.equal(newObligationBlockReason([{ active: false }, { active: true }]), null);
+  });
+});
+
+describe('overdue KPI consistency (M-CAL12)', () => {
+  it('counts open and in-progress past-due only; submitted and verified excluded', () => {
+    const today = '2026-11-11';
+    const openPast = { dueDate: '2026-11-10', status: 'open' as const };
+    const inProgressPast = { dueDate: '2026-11-10', status: 'in_progress' as const };
+    const submittedPast = { dueDate: '2026-11-10', status: 'submitted' as const };
+    const verifiedPast = { dueDate: '2026-11-10', status: 'verified' as const };
+    const openToday = { dueDate: '2026-11-11', status: 'open' as const };
+    assert.equal(isOverdueWork(openPast, today), true);
+    assert.equal(isOverdueWork(inProgressPast, today), true);
+    assert.equal(isOverdueWork(submittedPast, today), false);
+    assert.equal(isOverdueWork(verifiedPast, today), false);
+    assert.equal(isOverdueWork(openToday, today), false);
+    // The KPI count uses the same bucket as the Overdue filter, so they match.
+    const rows = [openPast, inProgressPast, submittedPast, verifiedPast, openToday];
+    const kpi = rows.filter((t) => isOverdueWork(t, today)).length;
+    const filter = rows.filter((t) => calendarBucket(t, today) === 'overdue').length;
+    assert.equal(kpi, 2);
+    assert.equal(filter, kpi);
+    // Badges still distinguish submitted past-due from actionable overdue.
+    assert.equal(overdueBadgeLabel(submittedPast, today), 'Awaiting verification — past target');
+    assert.equal(overdueBadgeLabel(openPast, today), 'Overdue');
+    assert.equal(overdueBadgeLabel(verifiedPast, today), null);
   });
 });
