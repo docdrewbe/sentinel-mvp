@@ -6066,3 +6066,31 @@ describe('CAL2 recurrence periods (HTTP)', () => {
     }
   });
 });
+
+describe('CAL3 organization-local dates (HTTP)', () => {
+  it('exposes org time zones and instantiates org-local default dues', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      const orgs = await call(base, 'GET', '/api/orgs', 'u-nurse-mgr');
+      assert.equal(orgs.status, 200);
+      const zones = (orgs.json as unknown as Array<{ id: string; timeZone: string }>).map((o) => [
+        o.id,
+        o.timeZone
+      ]);
+      assert.deepEqual(zones, [
+        ['org-cah', 'America/Chicago'],
+        ['org-clinic', 'America/Chicago'],
+        ['org-canna', 'America/Chicago']
+      ]);
+      // The org-local default-due path executes and stays a real date.
+      const instantiated = await call(base, 'POST', '/api/templates/tpl-access-review/instantiate', 'u-nurse-mgr', {
+        ownerId: 'u-nurse-mgr'
+      });
+      assert.equal(instantiated.status, 201);
+      assert.match(String(instantiated.json.dueDate), /^\d{4}-\d{2}-\d{2}$/);
+      assertDiskMatchesMemory(db);
+    } finally {
+      await close();
+    }
+  });
+});

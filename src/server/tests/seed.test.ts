@@ -152,6 +152,14 @@ describe('synthetic demo data', () => {
     assert.equal(capa.effectivenessReviews, undefined);
   });
 
+  it('gives every seeded organization an IANA time zone (CAL3)', () => {
+    const db = seedDatabase();
+    assert.equal(db.orgs.length, 3);
+    for (const org of db.orgs) {
+      assert.equal(org.timeZone, 'America/Chicago');
+    }
+  });
+
   it('seeds synthetic hospital obligations with valid references', () => {
     const db = seedDatabase();
     assert.equal(db.obligations.length, 2);

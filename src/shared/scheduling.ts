@@ -116,6 +116,34 @@ export function addDaysISO(fromISODate: string, days: number): string | null {
   return fromSerial(toSerial(parsed.y, parsed.m, parsed.d) + days);
 }
 
+/** True when `zone` is a usable IANA time zone name. */
+export function isValidTimeZone(zone: string): boolean {
+  if (!zone) return false;
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * CAL3: today's org-local civil date (YYYY-MM-DD) in `timeZone`.
+ * `Date.toISOString().slice(0, 10)` answers in UTC, which is yesterday or
+ * tomorrow for part of every local day — every dashboard "today" and every
+ * server "as of" default must go through here instead. Unknown, missing,
+ * or invalid zones fall back to UTC (the pre-CAL3 behavior).
+ */
+export function orgToday(timeZone: string, now: Date = new Date()): string {
+  const zone = isValidTimeZone(timeZone) ? timeZone : 'UTC';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+}
+
 /** ISO 8601 week label (`2027-W24`) for a civil date, or null when invalid. */
 export function isoWeekLabel(fromISODate: string): string | null {
   const parsed = parseIsoDate(fromISODate);

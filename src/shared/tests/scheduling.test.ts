@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDaysISO, daysInMonth, isValidIsoDate, nextDueDate, nextOccurrence, periodKeyFor } from '../scheduling.js';
+import { addDaysISO, daysInMonth, isValidIsoDate, isValidTimeZone, nextDueDate, nextOccurrence, orgToday, periodKeyFor } from '../scheduling.js';
 
 describe('calendar math (calendar slice 1)', () => {
   it('counts month days with leap years', () => {
@@ -99,6 +99,47 @@ describe('recurrence period keys (CAL2)', () => {
     assert.equal(periodKeyFor('not-a-date', 'monthly'), null);
     assert.equal(periodKeyFor('2027-02-30', 'monthly'), null);
     assert.equal(periodKeyFor('2026-11-15', 'fortnightly' as 'monthly'), null);
+  });
+});
+
+describe('organization-local today (CAL3)', () => {
+  const at = (iso: string): Date => new Date(iso);
+
+  it('maps instants to Chicago civil dates on both sides of midnight', () => {
+    assert.equal(orgToday('America/Chicago', at('2027-03-15T04:30:00Z')), '2027-03-14');
+    assert.equal(orgToday('America/Chicago', at('2027-03-15T06:30:00Z')), '2027-03-15');
+    assert.equal(orgToday('America/Chicago', at('2027-11-08T05:30:00Z')), '2027-11-07');
+    assert.equal(orgToday('America/Chicago', at('2027-11-08T07:30:00Z')), '2027-11-08');
+    assert.equal(orgToday('America/Chicago', at('2027-11-03T04:59:00Z')), '2027-11-02');
+    assert.equal(orgToday('America/Chicago', at('2027-11-03T06:01:00Z')), '2027-11-03');
+  });
+
+  it('stays on civil days across DST transitions', () => {
+    // Spring forward 2027-03-14: 01:30 CST and 03:30 CDT are the same date.
+    assert.equal(orgToday('America/Chicago', at('2027-03-14T07:30:00Z')), '2027-03-14');
+    assert.equal(orgToday('America/Chicago', at('2027-03-14T08:30:00Z')), '2027-03-14');
+    // Fall back 2027-11-07: both 01:30s are the same date.
+    assert.equal(orgToday('America/Chicago', at('2027-11-07T06:30:00Z')), '2027-11-07');
+    assert.equal(orgToday('America/Chicago', at('2027-11-07T07:30:00Z')), '2027-11-07');
+    // Due-soon windows are civil-day windows, not 24-hour spans.
+    assert.equal(addDaysISO('2027-03-07', 7), '2027-03-14');
+    assert.equal(addDaysISO('2027-10-31', 7), '2027-11-07');
+  });
+
+  it('classifies the same instant per organization zone', () => {
+    // 09:30Z is already Mar 15 in Chicago but still Mar 14 in Honolulu.
+    assert.equal(orgToday('America/Chicago', at('2027-03-15T09:30:00Z')), '2027-03-15');
+    assert.equal(orgToday('Pacific/Honolulu', at('2027-03-15T09:30:00Z')), '2027-03-14');
+  });
+
+  it('falls back to UTC for unknown zones', () => {
+    assert.equal(isValidTimeZone('America/Chicago'), true);
+    assert.equal(isValidTimeZone('Pacific/Honolulu'), true);
+    assert.equal(isValidTimeZone('UTC'), true);
+    assert.equal(isValidTimeZone(''), false);
+    assert.equal(isValidTimeZone('Mars/Olympus_Mons'), false);
+    assert.equal(orgToday('Mars/Olympus_Mons', at('2027-03-15T04:30:00Z')), '2027-03-15');
+    assert.equal(orgToday('', at('2027-03-15T04:30:00Z')), '2027-03-15');
   });
 });
 

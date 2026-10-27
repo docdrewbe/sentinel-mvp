@@ -19,6 +19,8 @@ export interface Organization {
   /** Bed count, used by the critical access hospital demo. */
   beds?: number;
   location: string;
+  /** IANA time zone for org-local dates (e.g. America/Chicago). */
+  timeZone: string;
   createdAt: string;
 }
 

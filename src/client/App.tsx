@@ -2,17 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type NewTask } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
-import { isValidIsoDate, nextDueDate, periodKeyFor } from '../shared/scheduling.js';
+import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CAPA_NEXT, applySettled, beginContext, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, initialPanels, panelData, reopenBlockReason, requiredEvidenceFor, resolveOrgId, reviewEvidenceLabels, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, type Panels } from './dashboard.js';
 
-const todayISO = (): string => new Date().toISOString().slice(0, 10);
-const isOverdue = (t: ComplianceTask): boolean => t.status !== 'verified' && t.dueDate < todayISO();
-const dueSoon = (t: ComplianceTask): boolean => {
-  if (t.status === 'verified' || isOverdue(t)) return false;
-  const in7 = new Date();
-  in7.setDate(in7.getDate() + 7);
-  return t.dueDate <= in7.toISOString().slice(0, 10);
+// CAL3: overdue/due-soon compare against the org-local civil day, passed in
+// by the dashboard (orgToday). Pure string comparison — no local time zone.
+const isOverdue = (t: ComplianceTask, today: string): boolean => t.status !== 'verified' && t.dueDate < today;
+const dueSoon = (t: ComplianceTask, today: string): boolean => {
+  if (t.status === 'verified' || isOverdue(t, today)) return false;
+  const edge = addDaysISO(today, 7);
+  return edge !== null && t.dueDate <= edge;
 };
 
 export default function App(): JSX.Element {
@@ -66,7 +66,7 @@ export default function App(): JSX.Element {
   const taskById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
   const templateById = useMemo(() => new Map(templates.map((x) => [x.id, x])), [templates]);
   const orgUsers = useMemo(() => users.filter((u) => !orgId || u.orgId === orgId), [users, orgId]);
-  const today = todayISO();
+  const today = orgToday(org?.timeZone ?? 'UTC');
   const calendarTasks = useMemo(
     () =>
       tasks
@@ -163,16 +163,16 @@ export default function App(): JSX.Element {
 
   const filtered = tasks.filter((t) => {
     if (statusFilter === 'all') return true;
-    if (statusFilter === 'overdue') return isOverdue(t);
-    if (statusFilter === 'dueSoon') return dueSoon(t);
+    if (statusFilter === 'overdue') return isOverdue(t, today);
+    if (statusFilter === 'dueSoon') return dueSoon(t, today);
     return t.status === statusFilter;
   });
 
   const stats = {
     open: tasks.filter((t) => t.status === 'open').length,
     inProgress: tasks.filter((t) => t.status === 'in_progress').length,
-    dueSoon: tasks.filter(dueSoon).length,
-    overdue: tasks.filter(isOverdue).length,
+    dueSoon: tasks.filter((t) => dueSoon(t, today)).length,
+    overdue: tasks.filter((t) => isOverdue(t, today)).length,
     verified: tasks.filter((t) => t.status === 'verified').length
   };
 
@@ -273,6 +273,7 @@ export default function App(): JSX.Element {
               </select>
             </div>
           </div>
+          {org && <p className="trail-detail">Dates in {org.timeZone} (org-local).</p>}
           <PanelNotice panel={panels.tasks} contextKey={contextKey} name="calendar tasks" orgName={org?.name ?? 'this organization'} onRetry={retry} />
           <table>
             <thead>
@@ -287,14 +288,14 @@ export default function App(): JSX.Element {
             <tbody>
               {calendarTasks.map((t) => (
                 <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => setTaskId(t.id)}>
-                  <td className={isOverdue(t) ? 'overdue' : ''}>{t.dueDate}</td>
+                  <td className={isOverdue(t, today) ? 'overdue' : ''}>{t.dueDate}</td>
                   <td className="task-title">{t.title}</td>
                   <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
                   <td>{userName.get(t.ownerId) ?? '—'}</td>
                   <td>
                     <span className={`status status-${t.status}`}>{STATUS_LABELS[t.status]}</span>
-                    {isOverdue(t) && <span className="status status-overdue">Overdue</span>}
-                    {!isOverdue(t) && dueSoon(t) && <span className="status status-submitted">Due soon</span>}
+                    {isOverdue(t, today) && <span className="status status-overdue">Overdue</span>}
+                    {!isOverdue(t, today) && dueSoon(t, today) && <span className="status status-submitted">Due soon</span>}
                   </td>
                 </tr>
               ))}
@@ -319,6 +320,7 @@ export default function App(): JSX.Element {
           {showNewObligation && me && org && (
             <NewObligationForm
               orgId={org.id}
+              timeZone={org.timeZone}
               templates={templates.filter((x) => x.active)}
               users={orgUsers}
               onSubmit={(o) => run(async () => api.createObligation(o)).then(() => setShowNewObligation(false))}
@@ -343,6 +345,7 @@ export default function App(): JSX.Element {
                   obligation={o}
                   template={templateById.get(o.templateId)}
                   ready={obligationsReady && tasksReady && templatesReady}
+                  today={today}
                   userName={userName}
                   canGenerate={!!me && can(me, 'task.create')}
                   onGenerate={() => {
@@ -391,6 +394,7 @@ export default function App(): JSX.Element {
             {showNew && me && org && (
               <NewTaskForm
                 orgId={org.id}
+                timeZone={org.timeZone}
                 domains={domains}
                 users={users.filter((u) => u.orgId === org.id)}
                 onSubmit={(t) => run(async () => api.createTask(t)).then(() => setShowNew(false))}
@@ -412,10 +416,10 @@ export default function App(): JSX.Element {
                     <td className="task-title">{t.title}</td>
                     <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
                     <td>{userName.get(t.ownerId) ?? '—'}</td>
-                    <td className={isOverdue(t) ? 'overdue' : ''}>{t.dueDate}</td>
+                    <td className={isOverdue(t, today) ? 'overdue' : ''}>{t.dueDate}</td>
                     <td>
                       <span className={`status status-${t.status}`}>{STATUS_LABELS[t.status]}</span>
-                      {isOverdue(t) && <span className="status status-overdue">Overdue</span>}
+                      {isOverdue(t, today) && <span className="status status-overdue">Overdue</span>}
                     </td>
                   </tr>
                 ))}
@@ -454,7 +458,7 @@ export default function App(): JSX.Element {
                   {task.verifiedBy && (
                     <div><dt>Verified by</dt><dd>{userName.get(task.verifiedBy) ?? task.verifiedBy}{task.verifiedAt ? ` · ${new Date(task.verifiedAt).toLocaleString()}` : ''}</dd></div>
                   )}
-                  <div><dt>Due</dt><dd className={isOverdue(task) ? 'overdue' : ''}>{task.dueDate}</dd></div>
+                  <div><dt>Due</dt><dd className={isOverdue(task, today) ? 'overdue' : ''}>{task.dueDate}</dd></div>
                   <div><dt>Status</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
                 </dl>
                 <EvidenceRequirement task={task} />
@@ -666,6 +670,7 @@ export default function App(): JSX.Element {
           {instantiateFor && me && org && (
             <InstantiateForm
               template={templates.find((x) => x.id === instantiateFor) as TaskTemplate}
+              timeZone={org.timeZone}
               users={users.filter((u) => u.orgId === org.id)}
               onSubmit={(ownerId, dueDate) =>
                 run(async () => {
@@ -1053,10 +1058,11 @@ function StatusButtons({ me, task, startBlockReason, submitBlockReason, verifyBl
   );
 }
 
-function ObligationRow({ obligation: o, template, ready, userName, canGenerate, onGenerate }: {
+function ObligationRow({ obligation: o, template, ready, today, userName, canGenerate, onGenerate }: {
   obligation: RecurringObligation;
   template: TaskTemplate | undefined;
   ready: boolean;
+  today: string;
   userName: Map<string, string>;
   canGenerate: boolean;
   onGenerate: () => void;
@@ -1074,7 +1080,7 @@ function ObligationRow({ obligation: o, template, ready, userName, canGenerate, 
         : duplicate
           ? 'Instance already exists for this due period.'
           : `Generate the ${o.nextDueDate} instance.`;
-  const targetLate = o.active && o.nextDueDate < todayISO();
+  const targetLate = o.active && o.nextDueDate < today;
   return (
     <tr>
       <td className="task-title">
@@ -1107,14 +1113,15 @@ function ObligationRow({ obligation: o, template, ready, userName, canGenerate, 
   );
 }
 
-function NewObligationForm({ orgId, templates, users, onSubmit }: {
+function NewObligationForm({ orgId, timeZone, templates, users, onSubmit }: {
   orgId: string;
+  timeZone: string;
   templates: TaskTemplate[];
   users: DemoUser[];
   onSubmit: (o: { orgId: string; templateId: string; nextDueDate: string; assigneeId?: string }) => void;
 }): JSX.Element {
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? '');
-  const [nextDueDate, setNextDueDate] = useState(todayISO());
+  const [nextDueDate, setNextDueDate] = useState(orgToday(timeZone));
   const [assigneeId, setAssigneeId] = useState('');
   useEffect(() => {
     setTemplateId(templates[0]?.id ?? '');
@@ -1146,11 +1153,11 @@ function NewObligationForm({ orgId, templates, users, onSubmit }: {
   );
 }
 
-function NewTaskForm({ orgId, domains, users, onSubmit }: { orgId: string; domains: RegulatoryDomain[]; users: DemoUser[]; onSubmit: (t: NewTask) => void }): JSX.Element {
+function NewTaskForm({ orgId, timeZone, domains, users, onSubmit }: { orgId: string; timeZone: string; domains: RegulatoryDomain[]; users: DemoUser[]; onSubmit: (t: NewTask) => void }): JSX.Element {
   const [title, setTitle] = useState('');
   const [domainId, setDomainId] = useState(domains[0]?.id ?? '');
   const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
-  const [dueDate, setDueDate] = useState(todayISO());
+  const [dueDate, setDueDate] = useState(orgToday(timeZone));
   useEffect(() => {
     setDomainId(domains[0]?.id ?? '');
   }, [domains]);
@@ -1240,10 +1247,10 @@ function TransferForm({ evidence, onTransfer }: { evidence: ComplianceTask['evid
   );
 }
 
-function InstantiateForm({ template, users, onSubmit }: { template: TaskTemplate; users: DemoUser[]; onSubmit: (ownerId: string, dueDate: string) => void }): JSX.Element {
+function InstantiateForm({ template, timeZone, users, onSubmit }: { template: TaskTemplate; timeZone: string; users: DemoUser[]; onSubmit: (ownerId: string, dueDate: string) => void }): JSX.Element {
   const defaultDue =
-    nextDueDate(todayISO(), template.recurrence.frequency) ??
-    new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    nextDueDate(orgToday(timeZone), template.recurrence.frequency) ??
+    (addDaysISO(orgToday(timeZone), 30) ?? orgToday(timeZone));
   const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
   const [dueDate, setDueDate] = useState(defaultDue);
   useEffect(() => {
@@ -1251,10 +1258,10 @@ function InstantiateForm({ template, users, onSubmit }: { template: TaskTemplate
   }, [users]);
   useEffect(() => {
     setDueDate(
-      nextDueDate(todayISO(), template.recurrence.frequency) ??
-        new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+      nextDueDate(orgToday(timeZone), template.recurrence.frequency) ??
+        (addDaysISO(orgToday(timeZone), 30) ?? orgToday(timeZone))
     );
-  }, [template]);
+  }, [template, timeZone]);
   return (
     <form
       className="form inline"

@@ -2,6 +2,7 @@
 // Due dates are generated relative to "today" so the demo always shows a
 // mix of upcoming, due-soon, and overdue tasks.
 import { buildAuditEvent, emptyDb, type DbShape } from './store.js';
+import { addDaysISO, orgToday } from '../shared/scheduling.js';
 import type {
   ComplianceTask,
   ControlType,
@@ -16,10 +17,13 @@ import type {
 } from '../shared/types.js';
 import { SYSTEM_AUDIT_ORG } from '../shared/types.js';
 
+// CAL3: seed offsets are org-local civil dates for the synthetic
+// Minnesota organizations (all America/Chicago).
 const dueInDays = (n: number): string => {
-  const d = new Date();
-  d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  const today = orgToday('America/Chicago');
+  const out = addDaysISO(today, n);
+  if (!out) throw new Error('seed date math failed');
+  return out;
 };
 
 const now = (): string => new Date().toISOString();
@@ -186,6 +190,7 @@ export function seedDatabase(): DbShape {
       kind: 'hospital',
       beds: 25,
       location: 'Pine County, MN (simulated)',
+      timeZone: 'America/Chicago',
       createdAt: t
     },
     {
@@ -193,6 +198,7 @@ export function seedDatabase(): DbShape {
       name: 'North Pine Outpatient Clinic',
       kind: 'clinic',
       location: 'Pine County, MN (simulated)',
+      timeZone: 'America/Chicago',
       createdAt: t
     },
     {
@@ -200,6 +206,7 @@ export function seedDatabase(): DbShape {
       name: 'North Star Cannabis Microbusiness',
       kind: 'cannabis_microbusiness',
       location: 'Minnesota (demo config)',
+      timeZone: 'America/Chicago',
       createdAt: t
     }
   ];

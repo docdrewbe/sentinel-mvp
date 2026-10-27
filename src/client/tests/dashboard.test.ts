@@ -26,9 +26,9 @@ import {
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
 
 const orgs: Organization[] = [
-  { id: 'org-cah', name: 'Hospital', kind: 'hospital', beds: 25, location: 'x', createdAt: 't' },
-  { id: 'org-clinic', name: 'Clinic', kind: 'clinic', location: 'x', createdAt: 't' },
-  { id: 'org-canna', name: 'Cannabis', kind: 'cannabis_microbusiness', location: 'x', createdAt: 't' }
+  { id: 'org-cah', name: 'Hospital', kind: 'hospital', beds: 25, location: 'x', timeZone: 'America/Chicago', createdAt: 't' },
+  { id: 'org-clinic', name: 'Clinic', kind: 'clinic', location: 'x', timeZone: 'America/Chicago', createdAt: 't' },
+  { id: 'org-canna', name: 'Cannabis', kind: 'cannabis_microbusiness', location: 'x', timeZone: 'America/Chicago', createdAt: 't' }
 ];
 
 const user = (over: Partial<DemoUser> = {}): DemoUser => ({
@@ -623,6 +623,13 @@ describe('calendar buckets (calendar slice 1)', () => {
     assert.equal(calendarBucket({ dueDate: '2026-11-02', status: 'in_progress' }, today), 'dueSoon');
     assert.equal(calendarBucket({ dueDate: '2026-11-03', status: 'open' }, today), 'upcoming');
     assert.equal(calendarBucket({ dueDate: '2027-01-01', status: 'open' }, today), 'upcoming');
+  });
+
+  it('flips overdue exactly on the org-local midnight boundary (CAL3)', () => {
+    // A task due Nov 2 is still due-soon at 11:59 PM CST Nov 2 and overdue
+    // one minute later; the org-local today string decides.
+    assert.equal(calendarBucket({ dueDate: '2027-11-02', status: 'open' }, '2027-11-02'), 'dueSoon');
+    assert.equal(calendarBucket({ dueDate: '2027-11-02', status: 'open' }, '2027-11-03'), 'overdue');
   });
 });
 

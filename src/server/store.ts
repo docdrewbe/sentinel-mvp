@@ -37,7 +37,7 @@ import { CAPA_CRITERIA_LOCKED_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } fro
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
-import { isValidIsoDate, nextDueDate, nextOccurrence, periodKeyFor } from '../shared/scheduling.js';
+import { addDaysISO, isValidIsoDate, isValidTimeZone, nextDueDate, nextOccurrence, orgToday, periodKeyFor } from '../shared/scheduling.js';
 
 export interface DbShape {
   version: 1;
@@ -86,6 +86,11 @@ export function loadDb(): DbShape {
   const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<DbShape>;
   const db: DbShape = { ...emptyDb(), ...raw };
   backfillAuditOrgIds(db);
+  // CAL3: organizations stored before time zones keep the pre-CAL3
+  // behavior by defaulting to UTC.
+  for (const org of db.orgs) {
+    if (!isValidTimeZone(org.timeZone)) org.timeZone = 'UTC';
+  }
   return db;
 }
 
@@ -884,8 +889,10 @@ export function instantiateTemplate(
   const template = db.templates.find((t) => t.id === templateId);
   if (!template) throw new ValidationError('Template not found.');
   if (!template.active) throw new ValidationError('Template is inactive.');
-  const today = new Date().toISOString().slice(0, 10);
-  const plus30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  // CAL3: default dues are org-local civil dates, never UTC slices.
+  const zone = db.orgs.find((o) => o.id === template.orgId)?.timeZone ?? 'UTC';
+  const today = orgToday(zone);
+  const plus30 = addDaysISO(today, 30) ?? today;
   const dueDate = input.dueDate ?? nextDueDate(today, template.recurrence.frequency) ?? plus30;
   const task = createTask(db, {
     orgId: template.orgId,
