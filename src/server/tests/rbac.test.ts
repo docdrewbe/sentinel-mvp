@@ -111,6 +111,28 @@ describe('obligation schedule permissions (CAL4)', () => {
   });
 });
 
+describe('document audit permissions (Phase 1)', () => {
+  const scope = (over: { orgId?: string; ownerId?: string } = {}) => ({
+    orgId: 'org-cah',
+    ownerId: '',
+    ...over
+  });
+
+  it('managers, officers, and admins run comparisons; staff never', () => {
+    const s = scope();
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'docaudit.run', s), true);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'docaudit.run', s), true);
+    assert.equal(can(user({ role: 'administrator', id: 'u-admin' }), 'docaudit.run', s), true);
+    assert.equal(can(user({ role: 'staff' }), 'docaudit.run', s), false);
+  });
+
+  it('managers cannot compare for other organizations', () => {
+    const foreign = scope({ orgId: 'org-clinic' });
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'docaudit.run', foreign), false);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'docaudit.run', foreign), true);
+  });
+});
+
 describe('organization visibility (F3)', () => {
   const all = ['org-cah', 'org-clinic', 'org-canna'];
 

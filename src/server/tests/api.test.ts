@@ -17,6 +17,7 @@ const dataFile = process.env.SENTINEL_DATA_FILE;
 const { createApp } = await import('../app.js');
 const { seedDatabase } = await import('../seed.js');
 const store = await import('../store.js');
+const docaudit = await import('../docaudit.js');
 
 interface TestServer {
   db: ReturnType<typeof seedDatabase>;
@@ -6602,6 +6603,342 @@ describe('Calendar polish M-CAL2/M-CAL5/M-CAL10 (HTTP)', () => {
       );
       assertDiskMatchesMemory(db);
     } finally {
+      await close();
+    }
+  });
+});
+
+describe('Document audit compare (Phase 1, mocked provider)', () => {
+  const TEXT_A = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by hand.';
+  const TEXT_B = 'Alpha site stores fuel in locked cabinets. Nightly counts are logged by scanner.';
+
+  interface FindingJson {
+    id: string;
+    kind: string;
+    summary: string;
+    passageA: { text: string; start: number; end: number; contextBefore: string; contextAfter: string } | null;
+    passageB: { text: string; start: number; end: number; contextBefore: string; contextAfter: string } | null;
+  }
+
+  interface CompareJson {
+    provider: string;
+    notice?: string;
+    runId: string;
+    missingLabel: string;
+    findings: FindingJson[];
+  }
+
+  async function useMockEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    process.env.DOCAUDIT_PROVIDER = 'mock';
+    docaudit.__setMockDocAuditMode('ok');
+    docaudit.__setDocAuditTimeoutMs(null);
+    docaudit.__resetDocAuditThrottle();
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      docaudit.__setMockDocAuditMode('ok');
+      docaudit.__setDocAuditTimeoutMs(null);
+      docaudit.__resetDocAuditThrottle();
+    }
+  }
+
+  async function auditEvents(base: string): Promise<Array<Record<string, unknown>>> {
+    const res = await call(base, 'GET', '/api/audit?limit=500', 'u-officer');
+    assert.equal(res.status, 200);
+    return res.json as unknown as Array<Record<string, unknown>>;
+  }
+
+  it('is off by default: unset, off, unknown, and baseten all refuse without writing', async () => {
+    const { db, base, close } = await startServer();
+    const prev = process.env.DOCAUDIT_PROVIDER;
+    try {
+      for (const value of [undefined, 'off', 'garbage', 'baseten']) {
+        if (value === undefined) delete process.env.DOCAUDIT_PROVIDER;
+        else process.env.DOCAUDIT_PROVIDER = value;
+        const audits = (await auditEvents(base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: TEXT_A,
+          textB: TEXT_B
+        });
+        assert.equal(res.status, 503);
+        assert.equal(res.json.error, 'Document auditing is not configured.');
+        assert.equal((await auditEvents(base)).length, audits);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+      }
+      assertDiskMatchesMemory(db);
+    } finally {
+      if (prev === undefined) delete process.env.DOCAUDIT_PROVIDER;
+      else process.env.DOCAUDIT_PROVIDER = prev;
+      await close();
+    }
+  });
+
+  it('enforces roles and organization scope', async () => {
+    const { base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        const body = { orgId: 'org-cah', textA: TEXT_A, textB: TEXT_B };
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-staff', body)).status, 403);
+        assert.equal(
+          (await call(base, 'POST', '/api/docaudit/compare', 'u-clinic-mgr', body)).status,
+          403
+        );
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 200);
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-officer', body)).status, 200);
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-admin', body)).status, 200);
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('validates organization and capped non-blank inputs', async () => {
+    const { base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        const badOrg = await call(base, 'POST', '/api/docaudit/compare', 'u-admin', {
+          orgId: 'org-nope',
+          textA: TEXT_A,
+          textB: TEXT_B
+        });
+        assert.equal(badOrg.status, 400);
+        const blank = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: '   ',
+          textB: TEXT_B
+        });
+        assert.equal(blank.status, 400);
+        const big = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: TEXT_A,
+          textB: 'z'.repeat(4001)
+        });
+        assert.equal(big.status, 400);
+        const nonString = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: 42,
+          textB: TEXT_B
+        });
+        assert.equal(nonString.status, 400);
+        assert.equal(nonString.json.error, 'textA must be text.');
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('returns identified fixture findings with verified quotations and metadata-only audit', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        const audits = await auditEvents(base);
+        const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: TEXT_A,
+          textB: TEXT_B
+        });
+        assert.equal(res.status, 200);
+        const body = res.json as unknown as CompareJson;
+        assert.equal(body.provider, 'mock');
+        assert.equal(body.notice, 'Simulated fixture output — not actual document analysis.');
+        assert.equal(body.missingLabel, 'No matching passage identified');
+        assert.match(body.runId, /^[0-9a-f-]{36}$/i);
+        assert.equal(body.findings.length, 3);
+        assert.deepEqual(
+          body.findings.map((f) => f.id),
+          ['f1', 'f2', 'f3']
+        );
+        for (const f of body.findings) {
+          for (const [passage, source] of [
+            [f.passageA, TEXT_A],
+            [f.passageB, TEXT_B]
+          ] as const) {
+            if (!passage) continue;
+            assert.ok(source.includes(passage.text));
+            assert.equal(passage.start, source.indexOf(passage.text));
+            assert.equal(passage.end, passage.start + passage.text.length);
+          }
+        }
+        const after = await auditEvents(base);
+        assert.equal(after.length, audits.length + 1);
+        const event = after[after.length - 1];
+        assert.equal(event.action, 'docaudit.completed');
+        assert.equal(event.recordType, 'docaudit');
+        assert.equal(event.recordId, body.runId);
+        assert.equal(event.orgId, 'org-cah');
+        assert.ok(String(event.detail).includes('via mock'));
+        assert.ok(!String(event.detail).includes('cabinets'));
+        assertDiskMatchesMemory(db);
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('keeps comparison content out of persistent storage', async () => {
+    const { base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        const canaryA = 'CANARY-ALPHA-doc_audit-01';
+        const canaryB = 'CANARY-BETA-doc_audit-02';
+        const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: `Fuel log opening ${canaryA} continues here.`,
+          textB: `Fuel log opening ${canaryB} continues here.`
+        });
+        assert.equal(res.status, 200);
+        const disk = readFileSync(dataFile, 'utf8');
+        assert.ok(!disk.includes(canaryA));
+        assert.ok(!disk.includes(canaryB));
+        // Mock summaries are fixed strings; none of their words may persist either.
+        const body = res.json as unknown as CompareJson;
+        for (const f of body.findings) {
+          assert.ok(!disk.includes(f.summary));
+        }
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('maps malformed provider output to 502 without writing', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        docaudit.__setMockDocAuditMode('malformed');
+        const audits = (await auditEvents(base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: TEXT_A,
+          textB: TEXT_B
+        });
+        assert.equal(res.status, 502);
+        assert.equal((await auditEvents(base)).length, audits);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+        assertDiskMatchesMemory(db);
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('maps provider timeouts to 504 without writing', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        docaudit.__setMockDocAuditMode('timeout');
+        docaudit.__setDocAuditTimeoutMs(30);
+        const audits = (await auditEvents(base)).length;
+        const diskBefore = readFileSync(dataFile, 'utf8');
+        const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: TEXT_A,
+          textB: TEXT_B
+        });
+        assert.equal(res.status, 504);
+        assert.equal(res.json.error, 'Comparison timed out.');
+        assert.equal((await auditEvents(base)).length, audits);
+        assert.equal(readFileSync(dataFile, 'utf8'), diskBefore);
+        assertDiskMatchesMemory(db);
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('treats adversarial provider text as data with a single metadata audit', async () => {
+    const { db, base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        docaudit.__setMockDocAuditMode('adversarial');
+        const audits = await auditEvents(base);
+        const res = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+          orgId: 'org-cah',
+          textA: TEXT_A,
+          textB: TEXT_B
+        });
+        assert.equal(res.status, 200);
+        const body = res.json as unknown as CompareJson;
+        assert.ok(body.findings.some((f) => f.summary.includes('IGNORE PREVIOUS INSTRUCTIONS')));
+        for (const f of body.findings) {
+          if (f.passageA) assert.ok(TEXT_A.includes(f.passageA.text));
+          if (f.passageB) assert.ok(TEXT_B.includes(f.passageB.text));
+        }
+        const after = await auditEvents(base);
+        assert.equal(after.length, audits.length + 1);
+        assert.ok(!String(after[after.length - 1].detail).includes('IGNORE PREVIOUS'));
+        assertDiskMatchesMemory(db);
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('throttles excessive comparisons per user', async () => {
+    const { base, close } = await startServer();
+    try {
+      await useMockEnv(async () => {
+        const body = { orgId: 'org-cah', textA: TEXT_A, textB: TEXT_B };
+        for (let i = 0; i < 10; i++) {
+          assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body)).status, 200);
+        }
+        const limited = await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', body);
+        assert.equal(limited.status, 429);
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-officer', body)).status, 200);
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it('never logs comparison content on failure paths', async () => {
+    const { base, close } = await startServer();
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const canaryBody = {
+        orgId: 'org-cah',
+        textA: 'Log probe CANARY-LOG-doc_audit-03 here.',
+        textB: TEXT_B
+      };
+      delete process.env.DOCAUDIT_PROVIDER;
+      assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', canaryBody)).status, 503);
+      await useMockEnv(async () => {
+        docaudit.__setMockDocAuditMode('malformed');
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', canaryBody)).status, 502);
+        docaudit.__setMockDocAuditMode('timeout');
+        docaudit.__setDocAuditTimeoutMs(30);
+        assert.equal((await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', canaryBody)).status, 504);
+        docaudit.__setMockDocAuditMode('ok');
+        docaudit.__setDocAuditTimeoutMs(null);
+        for (let i = 0; i < 11; i++) {
+          await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', canaryBody);
+        }
+        assert.equal(
+          (await call(base, 'POST', '/api/docaudit/compare', 'u-nurse-mgr', {
+            orgId: 'org-cah',
+            textA: '   ',
+            textB: TEXT_B
+          })).status,
+          400
+        );
+      });
+      assert.equal(errors.length, 0);
+    } finally {
+      console.error = original;
+      delete process.env.DOCAUDIT_PROVIDER;
+      docaudit.__setMockDocAuditMode('ok');
+      docaudit.__setDocAuditTimeoutMs(null);
+      docaudit.__resetDocAuditThrottle();
       await close();
     }
   });

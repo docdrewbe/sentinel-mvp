@@ -4,6 +4,7 @@
 // UI) and SIMULATED authorization. Not production-ready.
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
+import { randomUUID } from 'node:crypto';
 import {
   ValidationError,
   addEvidence,
@@ -28,6 +29,16 @@ import {
   type DbShape
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
+import {
+  NO_MATCHING_PASSAGE,
+  PROVIDER_NOT_CONFIGURED,
+  ProviderError,
+  checkDocAuditThrottle,
+  currentTimeoutMs,
+  resolveProvider,
+  validateCompareInput,
+  validateProviderOutput
+} from './docaudit.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import {
   capaGateMissing,
@@ -48,6 +59,12 @@ export interface AuthRequest extends Request {
 function sendError(req: Request, res: Response, e: unknown): void {
   if (e instanceof ValidationError) {
     res.status(400).json({ error: e.message });
+    return;
+  }
+  // Provider failures carry fixed messages only (never comparison content),
+  // so they answer directly without touching the error log.
+  if (e instanceof ProviderError) {
+    res.status(e.status).json({ error: e.message });
     return;
   }
   console.error(`[sentinel] ${req.method} ${req.path} failed:`, e);
@@ -204,6 +221,73 @@ export function createApp(db: DbShape): express.Express {
         return created;
       });
       res.status(201).json(presentTask(task));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // Phase 1: document-audit comparison. Pasted inputs and provider output are
+  // response-only; only metadata (counts, provider name) reaches the audit
+  // log. Nothing here persists comparison content or logs it.
+  app.post('/api/docaudit/compare', async (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    if (rejectBadText(res, req.body, ['orgId', 'textA', 'textB'])) return;
+    const input = req.body as { orgId: string; textA: string; textB: string };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'docaudit.run');
+      return;
+    }
+    if (!can(user, 'docaudit.run', { orgId: input.orgId, ownerId: '' })) {
+      forbidden(res, user, 'docaudit.run');
+      return;
+    }
+    if (!db.orgs.some((o) => o.id === input.orgId)) {
+      res.status(400).json({ error: 'Unknown organization.' });
+      return;
+    }
+    try {
+      const clean = validateCompareInput(input);
+      if (!checkDocAuditThrottle(user.id)) {
+        res.status(429).json({ error: 'Comparison limit reached. Try again later.' });
+        return;
+      }
+      const provider = resolveProvider();
+      if (!provider) {
+        res.status(503).json({ error: PROVIDER_NOT_CONFIGURED });
+        return;
+      }
+      const signal = AbortSignal.timeout(currentTimeoutMs());
+      let raw: unknown;
+      try {
+        raw = await provider.compare({ textA: clean.textA, textB: clean.textB }, signal);
+      } catch (e) {
+        if (e instanceof ProviderError) throw e;
+        if (signal.aborted) throw new ProviderError(504, 'Comparison timed out.');
+        throw new ProviderError(502, 'Comparison failed.');
+      }
+      const findings = validateProviderOutput(raw, clean.textA, clean.textB);
+      const runId = randomUUID();
+      const byKind = (kind: string): number => findings.filter((f) => f.kind === kind).length;
+      mutateDb(db, () => {
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'docaudit.completed',
+          recordType: 'docaudit',
+          recordId: runId,
+          orgId: input.orgId,
+          detail:
+            `${findings.length} findings ` +
+            `(difference ${byKind('difference')}, missing_in_a ${byKind('missing_in_a')}, ` +
+            `missing_in_b ${byKind('missing_in_b')}) via ${provider.name}`
+        });
+      });
+      res.json({
+        provider: provider.name,
+        ...(provider.notice ? { notice: provider.notice } : {}),
+        runId,
+        missingLabel: NO_MATCHING_PASSAGE,
+        findings
+      });
     } catch (e) {
       sendError(req, res, e);
     }
