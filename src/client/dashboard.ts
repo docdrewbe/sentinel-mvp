@@ -530,6 +530,27 @@ export function shouldApplyDocAuditResponse(
   return sentKey === currentKey && sentSeq === currentSeq;
 }
 
+export type FollowupSettleAction = 'apply' | 'refresh' | 'ignore';
+
+/**
+ * WM2C-1: classifies a settled follow-up response. 'apply' only when the
+ * context and request sequence are both current. 'refresh' when the request
+ * was superseded but the context is unchanged: the caller may reload the
+ * CURRENT context's panels (same org) but must touch no review state and
+ * raise no alerts. 'ignore' when the user or org changed: the caller must
+ * do nothing at all — no refresh, no alerts, no state.
+ */
+export function followupSettleAction(
+  sentKey: string,
+  sentSeq: number,
+  currentKey: string,
+  currentSeq: number
+): FollowupSettleAction {
+  if (sentKey !== currentKey) return 'ignore';
+  if (sentSeq !== currentSeq) return 'refresh';
+  return 'apply';
+}
+
 export interface FollowupKeyBinding {
   contentJson: string;
   key: string;

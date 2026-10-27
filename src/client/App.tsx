@@ -11,7 +11,7 @@ import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, 
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applySettled, beginContext, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type FollowupPreviewRow, type Panels } from './dashboard.js';
+import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applySettled, beginContext, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type FollowupPreviewRow, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -58,6 +58,8 @@ export default function App(): JSX.Element {
   const [docaCompleted, setDocaCompleted] = useState<Record<string, { taskId: string; title: string; duplicate: boolean }>>({});
   const docaSeq = useRef(0);
   const docaBusyRef = useRef(false);
+  /** Which compare send owns the busy flag (-1 = none). */
+  const docaBusySeq = useRef(-1);
 
   const me = users.find((u) => u.id === userId) ?? null;
   const org = orgs.find((o) => o.id === orgId) ?? null;
@@ -131,6 +133,7 @@ export default function App(): JSX.Element {
   /** Synchronous review-state clear for user/org switches; never async. */
   const clearDocAudit = useCallback((): void => {
     docaSeq.current += 1;
+    docaBusySeq.current = -1;
     setDocaTextA('');
     setDocaTextB('');
     setDocaResult(null);
@@ -225,10 +228,11 @@ export default function App(): JSX.Element {
   );
 
   const runCompare = useCallback(async (): Promise<void> => {
-    if (docaBusyRef.current || docaPending) return;
+    if (docaBusyRef.current || docaPending || docaPosting) return;
     docaBusyRef.current = true;
     const key = `${userId}|${orgId}`;
     const seq = ++docaSeq.current;
+    docaBusySeq.current = seq;
     setDocaBusy(true);
     setDocaError('');
     try {
@@ -240,12 +244,15 @@ export default function App(): JSX.Element {
       if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) return;
       setDocaError(e instanceof Error ? e.message : 'Comparison failed.');
     } finally {
-      // Unconditional: single-flight plus invalidation-on-edit means no
-      // second request can be mid-air when this settles.
-      docaBusyRef.current = false;
-      setDocaBusy(false);
+      // Only the owning send clears the flag: text edits invalidate the
+      // response but must not strand the spinner, while a newer send or a
+      // context switch owns the flag afterwards.
+      if (docaBusySeq.current === seq) {
+        docaBusyRef.current = false;
+        setDocaBusy(false);
+      }
     }
-  }, [docaPending, userId, orgId, docaTextA, docaTextB]);
+  }, [docaPending, docaPosting, userId, orgId, docaTextA, docaTextB]);
 
   const sendFollowup = useCallback(
     async (findingId: string, payload: DocAuditFollowupPayload, isRetry: boolean): Promise<void> => {
@@ -257,7 +264,12 @@ export default function App(): JSX.Element {
       setDocaError('');
       try {
         const res = await api.docauditFollowup(payload);
-        if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) {
+        const action = followupSettleAction(key, seq, contextKeyRef.current, docaSeq.current);
+        // Abandoned context: do nothing — no refresh, no alerts, no state.
+        if (action === 'ignore') return;
+        if (action === 'refresh') {
+          // Same context, superseded request: the server may have committed,
+          // so reload the current org's panels — and nothing else.
           refresh(orgId, contextKeyRef.current).catch(() => {});
           return;
         }
@@ -266,9 +278,14 @@ export default function App(): JSX.Element {
           ...prev,
           [findingId]: { taskId: res.task.id, title: res.task.title, duplicate: res.duplicate }
         }));
-        refresh(orgId, contextKey).catch((e: Error) => setDocaError(e.message));
+        refresh(orgId, contextKey).catch((e: Error) => {
+          // Never alert an abandoned context: the current view already loaded.
+          if (contextKeyRef.current === key) setDocaError(e.message);
+        });
       } catch (e) {
-        if (!shouldApplyDocAuditResponse(key, seq, contextKeyRef.current, docaSeq.current)) {
+        const action = followupSettleAction(key, seq, contextKeyRef.current, docaSeq.current);
+        if (action === 'ignore') return;
+        if (action === 'refresh') {
           refresh(orgId, contextKeyRef.current).catch(() => {});
           return;
         }
@@ -298,8 +315,12 @@ export default function App(): JSX.Element {
           setDocaError('Unknown outcome — the task may or may not have been created. Retry with the same key.');
         }
       } finally {
-        setDocaPosting(false);
-        setDocaPending((p) => (p ? { ...p, busy: false } : p));
+        // Only the latest request may clear loading state: a superseded or
+        // abandoned request must not touch the current view's flags.
+        if (docaSeq.current === seq) {
+          setDocaPosting(false);
+          setDocaPending((p) => (p ? { ...p, busy: false } : p));
+        }
       }
     },
     [docaPosting, userId, orgId, contextKey, refresh]

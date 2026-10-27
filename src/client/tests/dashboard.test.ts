@@ -17,6 +17,7 @@ import {
   capaReviewBlockReason,
   findingBlockers,
   findingKindLabel,
+  followupSettleAction,
   initialPanels,
   occurrenceLabel,
   occurrencesTruncated,
@@ -813,6 +814,17 @@ describe('document-audit review helpers (WM2 client)', () => {
     assert.equal(shouldApplyDocAuditResponse('u|o', 2, 'u|o', 3), false);
     assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'u|other', 3), false);
     assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'someone|o', 3), false);
+  });
+
+  it('classifies follow-up settles: apply, same-context refresh, or ignore (WM2C-1)', () => {
+    // Current context and request: apply (state, refresh, alerts allowed).
+    assert.equal(followupSettleAction('u-officer|org-cah', 3, 'u-officer|org-cah', 3), 'apply');
+    // Same context, superseded request: refresh current panels only.
+    assert.equal(followupSettleAction('u-officer|org-cah', 2, 'u-officer|org-cah', 3), 'refresh');
+    // Abandoned context: a late response must never touch the current view.
+    assert.equal(followupSettleAction('u-officer|org-cah', 3, 'u-officer|org-clinic', 3), 'ignore');
+    assert.equal(followupSettleAction('u-officer|org-cah', 3, 'u-nurse-mgr|org-cah', 3), 'ignore');
+    assert.equal(followupSettleAction('u-officer|org-cah', 2, 'u-nurse-mgr|org-clinic', 9), 'ignore');
   });
 
   it('reuses the key only for byte-identical payloads', () => {
