@@ -8,6 +8,7 @@ import {
   DOCAUDIT_TASK_TITLE_MAX,
   DOCAUDIT_TEXT_MAX,
   FOLLOWUP_EVIDENCE_NOTE,
+  applyOneSettled,
   applySettled,
   beginContext,
   buildFollowupPreview,
@@ -26,6 +27,7 @@ import {
   evidenceLockedReason,
   isDueSoonWork,
   isOverdueWork,
+  linkedCapaLine,
   newObligationBlockReason,
   overdueBadgeLabel,
   panelData,
@@ -39,6 +41,7 @@ import {
   startButtonLabel,
   submitBlockReason,
   submitStatusReason,
+  triageUsersFor,
   verifyBlockReason,
   verifyEvidenceReason,
   verifyStatusReason,
@@ -954,5 +957,69 @@ describe('document-audit review helpers (WM2 client)', () => {
     assert.equal(stale.ok, false);
     if (stale.ok) return;
     assert.deepEqual(stale.errors, ['Selected location for source text B is not available.']);
+  });
+});
+
+describe('concern panels (slice 1)', () => {
+  const KEY = 'u-staff|org-cah';
+  const loading = { key: KEY, status: 'loading' as const, data: [] as string[] };
+
+  it('applyOneSettled loads only the current context and latest request', () => {
+    const loaded = applyOneSettled(loading, KEY, 2, KEY, 2, {
+      status: 'fulfilled',
+      value: ['a']
+    });
+    assert.deepEqual(loaded, { key: KEY, status: 'loaded', data: ['a'] });
+    // Stale context or superseded sequence leaves state untouched.
+    assert.equal(applyOneSettled(loading, 'other|org', 2, KEY, 2, { status: 'fulfilled', value: ['x'] }), loading);
+    assert.equal(applyOneSettled(loading, KEY, 1, KEY, 2, { status: 'fulfilled', value: ['x'] }), loading);
+  });
+
+  it('applyOneSettled reports failures without painting stale rows', () => {
+    const failed = applyOneSettled(loading, KEY, 2, KEY, 2, {
+      status: 'rejected',
+      reason: new Error('boom')
+    });
+    assert.deepEqual(failed, { key: KEY, status: 'error', data: [], error: 'boom' });
+  });
+
+  it('triageUsersFor offers managers of the org plus officers and admins', () => {
+    const users = [
+      user({ id: 'u-staff', role: 'staff', orgId: 'org-cah' }),
+      user({ id: 'u-mgr', role: 'department_manager', orgId: 'org-cah' }),
+      user({ id: 'u-foreign-mgr', role: 'department_manager', orgId: 'org-clinic' }),
+      user({ id: 'u-officer', role: 'compliance_officer', orgId: 'org-cah' }),
+      user({ id: 'u-admin', role: 'administrator', orgId: 'org-cah' })
+    ];
+    assert.deepEqual(
+      triageUsersFor(users, 'org-cah').map((u) => u.id),
+      ['u-mgr', 'u-officer', 'u-admin']
+    );
+    assert.deepEqual(
+      triageUsersFor(users, 'org-clinic').map((u) => u.id),
+      ['u-foreign-mgr', 'u-officer', 'u-admin']
+    );
+  });
+
+  it('linkedCapaLine renders the server summary, never inventing status', () => {
+    assert.equal(linkedCapaLine({}), 'None');
+    assert.equal(
+      linkedCapaLine({ capaId: 'capa-temp-log', linkedCapa: { id: 'capa-temp-log', status: 'investigation' } }),
+      'capa-temp-log (Investigation)'
+    );
+    const uuid = '12345678-90ab-cdef-1234-567890abcdef';
+    assert.equal(
+      linkedCapaLine({ capaId: uuid, linkedCapa: { id: uuid, status: 'action_in_progress' } }),
+      '12345678… (Action In Progress)'
+    );
+    // Stale or mismatched links report honestly.
+    assert.equal(
+      linkedCapaLine({ capaId: 'capa-temp-log' }),
+      'capa-temp-log (status unavailable)'
+    );
+    assert.equal(
+      linkedCapaLine({ capaId: 'capa-temp-log', linkedCapa: { id: 'capa-other', status: 'closed' } }),
+      'capa-temp-log (status unavailable)'
+    );
   });
 });

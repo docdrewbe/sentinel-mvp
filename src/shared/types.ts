@@ -366,6 +366,124 @@ export const CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE =
 export const CAPA_CRITERIA_LOCKED_MESSAGE =
   'Effectiveness criteria are locked during effectiveness review.';
 
+/** Staff concern-reporting workflow states (slice 1: strict forward progression). */
+export type ConcernStatus = 'submitted' | 'acknowledged' | 'in_review' | 'closed';
+
+/** Fixed concern categories for the slice-1 short form. */
+export type ConcernCategory =
+  | 'safety'
+  | 'infection_prevention'
+  | 'equipment_facilities'
+  | 'policy_process'
+  | 'other';
+
+/** One reporter-visible progress or closing update (append-only, server-maintained). */
+export interface ConcernUpdate {
+  seq: number;
+  kind: 'progress' | 'closing';
+  message: string;
+  byUserId: string;
+  at: string;
+}
+
+/** One internal triage note (append-only; never shown to unauthorized reporters). */
+export interface ConcernNote {
+  seq: number;
+  text: string;
+  byUserId: string;
+  at: string;
+}
+
+/** One recorded entry into a concern status (server-maintained actor/time). */
+export interface ConcernStatusEntry {
+  status: ConcernStatus;
+  at: string;
+  byUserId: string;
+}
+
+/** One recorded CAPA-link change: the linked id, or null when unlinked. */
+export interface ConcernLinkEntry {
+  seq: number;
+  capaId: string | null;
+  byUserId: string;
+  at: string;
+}
+
+/**
+ * Server-resolved linked-CAPA summary: id and status only. Computed at
+ * response time from an existing same-organization CAPA; never stored and
+ * never carrying investigation fields. Absent when unlinked or unresolvable.
+ */
+export interface ConcernCapaSummary {
+  id: string;
+  status: CapaStatus;
+}
+
+export interface ConcernRecord {
+  id: string;
+  orgId: string;
+  /** Filing user; server-set from simulated auth, never from clients. */
+  reporterId: string;
+  title: string;
+  category: ConcernCategory;
+  description: string;
+  location?: string;
+  status: ConcernStatus;
+  /** Assigned triage handler; assignment grants no additional access. */
+  assigneeId?: string;
+  /** Explicit link to an existing same-org CAPA; concern actions never modify it. */
+  capaId?: string;
+  /**
+   * Response-time summary of the linked CAPA (id + status). The server
+   * recomputes it on every response; it is never persisted on the record.
+   */
+  linkedCapa?: ConcernCapaSummary;
+  /** Reporter-visible follow-up timeline (append-only). */
+  updates: ConcernUpdate[];
+  /**
+   * Internal investigation notes (append-only). Stored on every record; the
+   * API omits this field for readers without triage authority.
+   */
+  internalNotes?: ConcernNote[];
+  statusHistory: ConcernStatusEntry[];
+  linkHistory: ConcernLinkEntry[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const CONCERN_STATUS_LABELS: Record<ConcernStatus, string> = {
+  submitted: 'Submitted',
+  acknowledged: 'Acknowledged',
+  in_review: 'In Review',
+  closed: 'Closed'
+};
+
+export const CONCERN_CATEGORY_LABELS: Record<ConcernCategory, string> = {
+  safety: 'Safety',
+  infection_prevention: 'Infection prevention',
+  equipment_facilities: 'Equipment/facilities',
+  policy_process: 'Policy/process',
+  other: 'Other'
+};
+
+/** Slice-1 input length limits (server-enforced; the form mirrors them). */
+export const CONCERN_TITLE_MAX = 120;
+export const CONCERN_DESCRIPTION_MAX = 2000;
+export const CONCERN_LOCATION_MAX = 200;
+export const CONCERN_MESSAGE_MAX = 1000;
+
+/** Slice-1 reporter notices (exact approved wording). */
+export const CONCERN_IDENTIFIED_NOTICE =
+  'Demo only—use synthetic information. Sign-in is simulated. Reports are identified, not anonymous. Authorized reviewers can see your report.';
+export const CONCERN_REVIEWER_ACCESS_NOTICE =
+  'Reviewers are department managers in your organization, plus compliance officers and administrators, who have cross-organization demo access.';
+export const CONCERN_EMERGENCY_NOTICE =
+  'If there is immediate danger, follow your organization’s emergency procedures. This demo is not monitored for emergencies.';
+export const CONCERN_NO_SENSITIVE_DETAILS_HINT =
+  'Describe the situation only — do not include patient names or other sensitive personal details.';
+export const CONCERN_CLOSED_MEANING_NOTICE =
+  'Closing a concern means the reporting workflow ended. It does not establish that a hazard was fixed, that a CAPA is closed, or that effectiveness was verified.';
+
 export const KIND_LABELS: Record<OrgKind, string> = {
   hospital: 'Hospital',
   clinic: 'Clinic',

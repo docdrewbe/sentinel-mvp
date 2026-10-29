@@ -208,6 +208,12 @@ button.primary:hover { background: var(--accent-dark); }
   margin: 4px 0 8px;
 }
 
+.notice {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
 .req-ok {
   color: var(--green);
   font-size: 12px;

@@ -1,4 +1,4 @@
-import type { AuditEvent, CapaRecord, ComplianceTask, DemoUser, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
+import type { AuditEvent, CapaRecord, ComplianceTask, ConcernRecord, DemoUser, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -140,5 +140,15 @@ export const api = {
   docauditCompare: (body: { orgId: string; textA: string; textB: string }) =>
     req<DocAuditCompareResult>('/api/docaudit/compare', { method: 'POST', body: JSON.stringify(body) }),
   docauditFollowup: (body: DocAuditFollowupPayload) =>
-    req<DocAuditFollowupResult>('/api/docaudit/followups', { method: 'POST', body: JSON.stringify(body) })
+    req<DocAuditFollowupResult>('/api/docaudit/followups', { method: 'POST', body: JSON.stringify(body) }),
+  concerns: (orgId: string) => req<ConcernRecord[]>(`/api/concerns?orgId=${orgId}`),
+  myConcerns: (orgId: string) => req<ConcernRecord[]>(`/api/concerns?orgId=${orgId}&mine=1`),
+  createConcern: (c: { orgId: string; title: string; category: string; description: string; location?: string }) =>
+    req<ConcernRecord>('/api/concerns', { method: 'POST', body: JSON.stringify(c) }),
+  patchConcern: (id: string, patch: object) =>
+    req<ConcernRecord>(`/api/concerns/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  addConcernUpdate: (id: string, u: { message: string }) =>
+    req<ConcernRecord>(`/api/concerns/${id}/updates`, { method: 'POST', body: JSON.stringify(u) }),
+  addConcernNote: (id: string, n: { text: string }) =>
+    req<ConcernRecord>(`/api/concerns/${id}/notes`, { method: 'POST', body: JSON.stringify(n) })
 };

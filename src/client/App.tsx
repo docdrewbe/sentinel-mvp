@@ -7,11 +7,12 @@ import {
   type DocAuditFollowupPayload,
   type NewTask
 } from './api.js';
-import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
+import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONCERN_CATEGORY_LABELS, CONCERN_CLOSED_MEANING_NOTICE, CONCERN_DESCRIPTION_MAX, CONCERN_EMERGENCY_NOTICE, CONCERN_IDENTIFIED_NOTICE, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_NO_SENSITIVE_DETAILS_HINT, CONCERN_REVIEWER_ACCESS_NOTICE, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type ConcernCategory, type ConcernRecord, type ConcernStatus, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
-import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applySettled, beginContext, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isDueSoonWork, isOverdueWork, newObligationBlockReason, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type FollowupPreviewRow, type Panels } from './dashboard.js';
+import { CONCERN_CATEGORIES, nextConcernStatus } from '../shared/concerns.js';
+import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyOneSettled, applySettled, beginContext, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isDueSoonWork, isOverdueWork, linkedCapaLine, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type FollowupPreviewRow, type PanelState, type Panels } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -36,6 +37,12 @@ export default function App(): JSX.Element {
   const [userId, setUserId] = useState(() => localStorage.getItem('sentinel-user') ?? '');
   const [taskId, setTaskId] = useState<string | null>(null);
   const [capaId, setCapaId] = useState<string | null>(null);
+  // Slice-1 concerns: triage queue + personal list, context-keyed like Panels.
+  const [concernQueue, setConcernQueue] = useState<PanelState<ConcernRecord>>({ key: '', status: 'loading', data: [] });
+  const [myConcerns, setMyConcerns] = useState<PanelState<ConcernRecord>>({ key: '', status: 'loading', data: [] });
+  const [concernId, setConcernId] = useState<string | null>(null);
+  const [myConcernId, setMyConcernId] = useState<string | null>(null);
+  const [concernReceipt, setConcernReceipt] = useState<{ key: string; concern: ConcernRecord } | null>(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [controlFilter, setControlFilter] = useState('all');
   const [calDomain, setCalDomain] = useState('all');
@@ -77,8 +84,17 @@ export default function App(): JSX.Element {
   const templatesReady = canAct(panels.templates, contextKey);
   const capasReady = canAct(panels.capas, contextKey);
   const obligationsReady = canAct(panels.obligations, contextKey);
+  const queueRows = panelData(concernQueue, contextKey);
+  const myRows = panelData(myConcerns, contextKey);
+  const queueReady = canAct(concernQueue, contextKey);
+  const myReady = canAct(myConcerns, contextKey);
+  const canTriageHere =
+    me !== null && orgId !== '' && can(me, 'concern.triage', { orgId, ownerId: '' });
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const capa = capas.find((c) => c.id === capaId) ?? null;
+  const queueConcern = queueRows.find((c) => c.id === concernId) ?? null;
+  const myConcern = myRows.find((c) => c.id === myConcernId) ?? null;
+  const receipt = concernReceipt !== null && concernReceipt.key === contextKey ? concernReceipt.concern : null;
   // M-UI1: id of the visible verified-lock explanation; locked detail-panel
   // controls reference it via aria-describedby. Null unless verified.
   const taskLockNoteId = task ? verifiedLockNoteId(task) : null;
@@ -117,16 +133,24 @@ export default function App(): JSX.Element {
   const refresh = useCallback(async (oid: string, key: string) => {
     if (!oid) return;
     const mySeq = ++requestSeq.current;
-    const [t, d, a, tpl, c, o] = await Promise.allSettled([
+    const [t, d, a, tpl, c, o, cq, mc] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
       api.templates(oid),
       api.capas(oid),
-      api.obligations(oid)
+      api.obligations(oid),
+      api.concerns(oid),
+      api.myConcerns(oid)
     ]);
     setPanels((prev) =>
       applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c, o)
+    );
+    setConcernQueue((prev) =>
+      applyOneSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, cq)
+    );
+    setMyConcerns((prev) =>
+      applyOneSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, mc)
     );
   }, []);
 
@@ -188,6 +212,12 @@ export default function App(): JSX.Element {
       setShowNewObligation(false);
       setError('');
       clearDocAudit();
+      // Concern selections, receipt, and rows never survive a user/org switch.
+      setConcernId(null);
+      setMyConcernId(null);
+      setConcernReceipt(null);
+      setConcernQueue({ key: nextKey, status: 'loading', data: [] });
+      setMyConcerns({ key: nextKey, status: 'loading', data: [] });
     }
     refresh(orgId, nextKey).catch((e: Error) => setError(e.message));
   }, [userId, orgId, users, orgs, refresh, clearDocAudit]);
@@ -348,6 +378,8 @@ export default function App(): JSX.Element {
 
   const recordTrail = task ? audit.filter((e) => e.recordId === task.id) : [];
   const capaTrail = capa ? audit.filter((e) => e.recordId === capa.id) : [];
+  const queueConcernTrail = queueConcern ? audit.filter((e) => e.recordId === queueConcern.id) : [];
+  const myConcernTrail = myConcern ? audit.filter((e) => e.recordId === myConcern.id) : [];
 
   return (
     <div className="page">
@@ -788,6 +820,160 @@ export default function App(): JSX.Element {
 
         <section className="panel">
           <div className="panel-head">
+            <h3>Report a concern (synthetic — identified, not anonymous)</h3>
+          </div>
+          <p className="notice">{CONCERN_IDENTIFIED_NOTICE}</p>
+          <p className="notice">{CONCERN_REVIEWER_ACCESS_NOTICE}</p>
+          <div className="panel-alert" role="note">
+            <p>{CONCERN_EMERGENCY_NOTICE}</p>
+          </div>
+          {receipt ? (
+            <ConcernReceipt concern={receipt} onDone={() => setConcernReceipt(null)} />
+          ) : (
+            <ConcernForm
+              key={contextKey}
+              disabled={!me || !orgId}
+              onSubmit={(body) =>
+                run(async () => {
+                  const created = await api.createConcern({ orgId, ...body });
+                  setConcernReceipt({ key: contextKey, concern: created });
+                  setMyConcernId(created.id);
+                })
+              }
+            />
+          )}
+        </section>
+
+        <section className="columns">
+          <div className="tasklist panel">
+            <div className="panel-head">
+              <h3>My reports</h3>
+            </div>
+            <p className="notice">{CONCERN_IDENTIFIED_NOTICE}</p>
+            <PanelNotice panel={myConcerns} contextKey={contextKey} name="reports" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+            <table>
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Category</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {myRows.map((c) => (
+                  <tr key={c.id} className={c.id === myConcernId ? 'selected' : ''} onClick={() => setMyConcernId(c.id)}>
+                    <td className="task-title">{c.title.length > 60 ? `${c.title.slice(0, 60)}…` : c.title}</td>
+                    <td>{CONCERN_CATEGORY_LABELS[c.category]}</td>
+                    <td>
+                      <span className="status">{CONCERN_STATUS_LABELS[c.status]}</span>
+                    </td>
+                  </tr>
+                ))}
+                {myRows.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="empty">You have not filed any concerns in this organization yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="detail panel">
+            <div className="panel-head">
+              <h3>My report detail</h3>
+            </div>
+            {!myConcern && <p className="empty">Select one of your reports to follow its status and updates.</p>}
+            {myConcern && me && (
+              <ConcernDetail
+                key={myConcern.id}
+                concern={myConcern}
+                ready={myReady}
+                triage={false}
+                userName={userName}
+                capas={capas}
+                trail={myConcernTrail}
+                assignees={[]}
+              />
+            )}
+          </div>
+        </section>
+
+        {canTriageHere && (
+          <section className="columns">
+            <div className="tasklist panel">
+              <div className="panel-head">
+                <h3>Concern triage queue</h3>
+              </div>
+              <PanelNotice panel={concernQueue} contextKey={contextKey} name="concerns" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+              <table>
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Reporter</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {queueRows.map((c) => (
+                    <tr key={c.id} className={c.id === concernId ? 'selected' : ''} onClick={() => setConcernId(c.id)}>
+                      <td className="task-title">{c.title.length > 60 ? `${c.title.slice(0, 60)}…` : c.title}</td>
+                      <td>{userName.get(c.reporterId) ?? '—'}</td>
+                      <td>{CONCERN_CATEGORY_LABELS[c.category]}</td>
+                      <td>
+                        <span className="status">{CONCERN_STATUS_LABELS[c.status]}</span>
+                      </td>
+                    </tr>
+                  ))}
+                  {queueRows.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="empty">No concerns for this organization yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="detail panel">
+              <div className="panel-head">
+                <h3>Concern triage detail</h3>
+              </div>
+              {!queueConcern && <p className="empty">Select a concern to acknowledge, assign, link, update, or close it.</p>}
+              {queueConcern && me && (
+                <ConcernDetail
+                  key={queueConcern.id}
+                  concern={queueConcern}
+                  ready={queueReady}
+                  triage
+                  userName={userName}
+                  capas={capas}
+                  trail={queueConcernTrail}
+                  assignees={triageUsersFor(users, orgId)}
+                  onAdvance={(status, closingMessage) =>
+                    run(async () =>
+                      api.patchConcern(
+                        queueConcern.id,
+                        closingMessage !== undefined ? { status, closingMessage } : { status }
+                      )
+                    )
+                  }
+                  onAssign={(assigneeId) =>
+                    run(async () => api.patchConcern(queueConcern.id, { assigneeId }))
+                  }
+                  onLink={(capaId) => run(async () => api.patchConcern(queueConcern.id, { capaId }))}
+                  onUnlink={() => run(async () => api.patchConcern(queueConcern.id, { capaId: null }))}
+                  onUpdate={(message) =>
+                    run(async () => api.addConcernUpdate(queueConcern.id, { message }))
+                  }
+                  onNote={(text) => run(async () => api.addConcernNote(queueConcern.id, { text }))}
+                />
+              )}
+            </div>
+          </section>
+        )}
+
+        <section className="panel">
+          <div className="panel-head">
             <h3>Compliance task templates (synthetic — illustrative references, not legal advice)</h3>
             <div className="panel-actions">
               <select value={controlFilter} onChange={(e) => setControlFilter(e.target.value)} aria-label="Filter by control type" disabled={!templatesReady}>
@@ -941,6 +1127,254 @@ export default function App(): JSX.Element {
         anchored — do not treat as legal evidence of compliance.
       </footer>
     </div>
+  );
+}
+
+function ConcernForm({ disabled, onSubmit }: {
+  disabled: boolean;
+  onSubmit: (body: { title: string; category: ConcernCategory; description: string; location?: string }) => void;
+}): JSX.Element {
+  const [title, setTitle] = useState('');
+  const [category, setCategory] = useState<ConcernCategory>('safety');
+  const [description, setDescription] = useState('');
+  const [location, setLocation] = useState('');
+  const valid = title.trim() !== '' && description.trim() !== '';
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!valid || disabled) return;
+        onSubmit({
+          title: title.trim(),
+          category,
+          description: description.trim(),
+          ...(location.trim() ? { location: location.trim() } : {})
+        });
+        setTitle('');
+        setDescription('');
+        setLocation('');
+      }}
+    >
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Short title" aria-label="Short title" required maxLength={CONCERN_TITLE_MAX} disabled={disabled} />
+      <select value={category} onChange={(e) => setCategory(e.target.value as ConcernCategory)} aria-label="Category" disabled={disabled}>
+        {CONCERN_CATEGORIES.map((c) => (
+          <option key={c} value={c}>{CONCERN_CATEGORY_LABELS[c]}</option>
+        ))}
+      </select>
+      <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" aria-label="Description" required maxLength={CONCERN_DESCRIPTION_MAX} disabled={disabled} rows={3} />
+      <p className="notice">{CONCERN_NO_SENSITIVE_DETAILS_HINT}</p>
+      <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location (optional)" aria-label="Location (optional)" maxLength={CONCERN_LOCATION_MAX} disabled={disabled} />
+      <button className="primary" type="submit" disabled={disabled || !valid}>Submit concern</button>
+    </form>
+  );
+}
+
+function ConcernReceipt({ concern, onDone }: { concern: ConcernRecord; onDone: () => void }): JSX.Element {
+  return (
+    <div>
+      <p className="req-ok">
+        Report received. Reference: <code>{concern.id}</code> · Status: {CONCERN_STATUS_LABELS[concern.status]}
+      </p>
+      <p className="notice">{CONCERN_IDENTIFIED_NOTICE}</p>
+      <p className="notice">{CONCERN_REVIEWER_ACCESS_NOTICE}</p>
+      <p className="notice">
+        Follow its status in My reports below. This demo makes no response-time commitment.
+      </p>
+      <div className="panel-alert" role="note">
+        <p>{CONCERN_EMERGENCY_NOTICE}</p>
+      </div>
+      <p>
+        <button type="button" onClick={onDone}>File another concern</button>
+      </p>
+    </div>
+  );
+}
+
+function ConcernDetail({ concern, ready, triage, userName, capas, trail, assignees, onAdvance, onAssign, onLink, onUnlink, onUpdate, onNote }: {
+  concern: ConcernRecord;
+  ready: boolean;
+  triage: boolean;
+  userName: Map<string, string>;
+  capas: CapaRecord[];
+  trail: AuditEvent[];
+  assignees: DemoUser[];
+  onAdvance?: (status: ConcernStatus, closingMessage?: string) => void;
+  onAssign?: (assigneeId: string) => void;
+  onLink?: (capaId: string) => void;
+  onUnlink?: () => void;
+  onUpdate?: (message: string) => void;
+  onNote?: (text: string) => void;
+}): JSX.Element {
+  const next = nextConcernStatus(concern.status);
+  // Internal notes render only in the triage view; the server also strips
+  // them from every reporter-view response.
+  const notes = triage ? concern.internalNotes : undefined;
+  const [closingMessage, setClosingMessage] = useState('');
+  const [assignee, setAssignee] = useState(concern.assigneeId ?? '');
+  const [linkId, setLinkId] = useState('');
+  const [updateText, setUpdateText] = useState('');
+  const [noteText, setNoteText] = useState('');
+  const showTriage = triage && ready;
+  return (
+    <>
+      <h4>{concern.title}</h4>
+      <p className="notice">{CONCERN_REVIEWER_ACCESS_NOTICE}</p>
+      <p>
+        <span className="status">{CONCERN_STATUS_LABELS[concern.status]}</span>{' '}
+        {CONCERN_CATEGORY_LABELS[concern.category]} · reported by {userName.get(concern.reporterId) ?? concern.reporterId}
+      </p>
+      {concern.location && <p>Location: {concern.location}</p>}
+      <p>{concern.description}</p>
+      <p>Handler: {concern.assigneeId ? (userName.get(concern.assigneeId) ?? concern.assigneeId) : 'Unassigned'}</p>
+      <p>Linked CAPA: {linkedCapaLine(concern)}</p>
+      {concern.status === 'closed' && <p className="notice">{CONCERN_CLOSED_MEANING_NOTICE}</p>}
+      <h5>Follow-up updates (visible to the reporter)</h5>
+      {concern.updates.length === 0 && <p className="empty">No updates yet.</p>}
+      <ol className="trail">
+        {concern.updates.map((u) => (
+          <li key={u.seq}>
+            {u.kind === 'closing' ? 'Closing explanation' : 'Update'} · {userName.get(u.byUserId) ?? u.byUserId} ·{' '}
+            {new Date(u.at).toLocaleString()}
+            <div className="trail-detail">{u.message}</div>
+          </li>
+        ))}
+      </ol>
+      {notes !== undefined && (
+        <>
+          <h5>Internal investigation notes (triage only)</h5>
+          {notes.length === 0 && <p className="empty">No internal notes yet.</p>}
+          <ol className="trail">
+            {notes.map((n) => (
+              <li key={n.seq}>
+                {userName.get(n.byUserId) ?? n.byUserId} · {new Date(n.at).toLocaleString()}
+                <div className="trail-detail">{n.text}</div>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      <h5>Status history</h5>
+      <ol className="trail">
+        {concern.statusHistory.map((s, i) => (
+          <li key={`${s.status}-${i}`}>
+            {CONCERN_STATUS_LABELS[s.status]} · {userName.get(s.byUserId) ?? s.byUserId} ·{' '}
+            {new Date(s.at).toLocaleString()}
+          </li>
+        ))}
+      </ol>
+      {concern.linkHistory.length > 0 && (
+        <>
+          <h5>CAPA link history</h5>
+          <ol className="trail">
+            {concern.linkHistory.map((l) => (
+              <li key={l.seq}>
+                {l.capaId ? `Linked ${shortDisplayId(l.capaId)}` : 'Unlinked'} · {userName.get(l.byUserId) ?? l.byUserId} ·{' '}
+                {new Date(l.at).toLocaleString()}
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      <h5>Record history (append-only)</h5>
+      {trail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
+      <ol className="trail">
+        {trail.map((e) => (
+          <li key={e.id}>
+            <code>#{e.seq}</code> {e.action} · {userName.get(e.actorId) ?? e.actorId} ·{' '}
+            {new Date(e.timestamp).toLocaleString()}
+            <div className="trail-detail">{e.detail}</div>
+          </li>
+        ))}
+      </ol>
+      {triage && !ready && (
+        <p className="panel-error" role="alert">
+          Concern actions unavailable while concern data is loading or failed.
+        </p>
+      )}
+      {showTriage && next !== null && onAdvance && (
+        <>
+          <h5>Advance workflow</h5>
+          {next === 'closed' ? (
+            <form
+              className="form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!closingMessage.trim()) return;
+                onAdvance(next, closingMessage.trim());
+                setClosingMessage('');
+              }}
+            >
+              <p className="notice">{CONCERN_CLOSED_MEANING_NOTICE}</p>
+              <textarea value={closingMessage} onChange={(e) => setClosingMessage(e.target.value)} placeholder="Closing explanation (seen by the reporter)" aria-label="Closing explanation" required maxLength={CONCERN_MESSAGE_MAX} rows={3} />
+              <button className="primary" type="submit" disabled={!closingMessage.trim()}>Close with explanation</button>
+            </form>
+          ) : (
+            <p>
+              <button type="button" onClick={() => onAdvance(next)}>
+                Move to {CONCERN_STATUS_LABELS[next]}
+              </button>
+            </p>
+          )}
+        </>
+      )}
+      {showTriage && concern.status !== 'closed' && (
+        <>
+          {onAssign && (
+            <>
+              <h5>Assign handler</h5>
+              <form className="form inline" onSubmit={(e) => { e.preventDefault(); if (assignee) onAssign(assignee); }}>
+                <select value={assignee} onChange={(e) => setAssignee(e.target.value)} aria-label="Handler">
+                  <option value="">Select handler…</option>
+                  {assignees.map((u) => (
+                    <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
+                  ))}
+                </select>
+                <button type="submit" disabled={!assignee || assignee === concern.assigneeId}>Assign</button>
+              </form>
+            </>
+          )}
+          {(onLink ?? onUnlink) && (
+            <>
+              <h5>Link to CAPA</h5>
+              <form className="form inline" onSubmit={(e) => { e.preventDefault(); if (linkId && onLink) onLink(linkId); }}>
+                <select value={linkId} onChange={(e) => setLinkId(e.target.value)} aria-label="CAPA to link">
+                  <option value="">Select CAPA…</option>
+                  {capas.map((c) => (
+                    <option key={c.id} value={c.id}>{shortDisplayId(c.id)} ({CAPA_STATUS_LABELS[c.status]})</option>
+                  ))}
+                </select>
+                <button type="submit" disabled={!linkId || !onLink}>Link</button>
+                {concern.capaId && onUnlink && (
+                  <button type="button" onClick={onUnlink}>Unlink</button>
+                )}
+              </form>
+            </>
+          )}
+          {onUpdate && (
+            <>
+              <h5>Add reporter-visible update</h5>
+              <form className="form" onSubmit={(e) => { e.preventDefault(); if (!updateText.trim()) return; onUpdate(updateText.trim()); setUpdateText(''); }}>
+                <textarea value={updateText} onChange={(e) => setUpdateText(e.target.value)} placeholder="Update for the reporter" aria-label="Update for the reporter" required maxLength={CONCERN_MESSAGE_MAX} rows={2} />
+                <button type="submit" disabled={!updateText.trim()}>Add update</button>
+              </form>
+            </>
+          )}
+          {onNote && (
+            <>
+              <h5>Add internal note (triage only)</h5>
+              <form className="form" onSubmit={(e) => { e.preventDefault(); if (!noteText.trim()) return; onNote(noteText.trim()); setNoteText(''); }}>
+                <textarea value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder="Internal investigation note" aria-label="Internal investigation note" required maxLength={CONCERN_MESSAGE_MAX} rows={2} />
+                <button type="submit" disabled={!noteText.trim()}>Add note</button>
+              </form>
+            </>
+          )}
+        </>
+      )}
+      {showTriage && concern.status === 'closed' && (
+        <p className="notice">Closed concerns are locked in this slice.</p>
+      )}
+    </>
   );
 }
 

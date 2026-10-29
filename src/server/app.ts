@@ -8,12 +8,16 @@ import { randomUUID } from 'node:crypto';
 import {
   ConflictError,
   ValidationError,
+  addConcernNote,
+  addConcernUpdate,
   addEvidence,
   appendAudit,
   assertLegalCapaTransition,
+  assertLegalConcernTransition,
   capaAddEvidence,
   capaTransferCustody,
   createCapa,
+  createConcern,
   createObligation,
   createTask,
   createTemplate,
@@ -23,6 +27,7 @@ import {
   monotonicNow,
   transferCustody,
   updateCapa,
+  updateConcernTriage,
   updateObligation,
   updateTask,
   updateTemplate,
@@ -54,7 +59,7 @@ import {
   qualifyingEffectivenessEvidence
 } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
-import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser } from '../shared/types.js';
+import type { CapaRecord, CapaStatus, ComplianceTask, ConcernRecord, ConcernStatus, DemoUser } from '../shared/types.js';
 import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
@@ -198,6 +203,37 @@ export function createApp(db: DbShape): express.Express {
     return capaNoEligibleReviewer(capa, privileged)
       ? CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE
       : CAPA_CLOSE_SOD_MESSAGE;
+  };
+
+  /** 404 for both missing and unauthorized concerns: no existence oracle. */
+  const concernNotFound = (res: Response): void => {
+    res.status(404).json({ error: 'Concern not found.' });
+  };
+
+  const canTriageConcern = (user: DemoUser, orgId: string): boolean =>
+    can(user, 'concern.triage', { orgId, ownerId: '' });
+
+  /**
+   * Reporter view strips internal investigation notes. Triage-authorized
+   * readers get the full record; everyone else (and every mine=1 response)
+   * gets the reporter view. The presenter always returns a copy: it attaches
+   * a server-resolved linked-CAPA summary (id + status of an existing
+   * same-org CAPA only; absent or stale links carry no summary, never an
+   * invented status) without persisting anything on the stored record.
+   */
+  const presentConcern = (
+    user: DemoUser,
+    concern: ConcernRecord,
+    reporterView: boolean
+  ): ConcernRecord => {
+    const out: ConcernRecord = { ...concern };
+    if (reporterView || !canTriageConcern(user, concern.orgId)) delete out.internalNotes;
+    const linked = out.capaId
+      ? db.capas.find((c) => c.id === out.capaId && c.orgId === out.orgId)
+      : undefined;
+    if (linked) out.linkedCapa = { id: linked.id, status: linked.status };
+    else delete out.linkedCapa;
+    return out;
   };
 
   app.get('/api/domains', (req: AuthRequest, res) => {
@@ -1177,6 +1213,265 @@ export function createApp(db: DbShape): express.Express {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Staff concerns (slice 1). Reporters see their own reports (reporter view:
+  // no internal notes); triage roles see the org queue with full records.
+  // Unauthorized record access answers 404 so responses never confirm that
+  // an id exists. Audit details carry ids and transitions only — never
+  // titles, descriptions, locations, notes, or update text.
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/concerns', (req: AuthRequest, res) => {
+    const scope = readScope(req, res);
+    if (!scope) return;
+    const user = req.user as DemoUser;
+    const mine = req.query.mine === '1' || req.query.mine === 'true';
+    res.json(
+      db.concerns
+        .filter(
+          (c) =>
+            scope.includes(c.orgId) &&
+            (mine
+              ? c.reporterId === user.id
+              : canTriageConcern(user, c.orgId) || c.reporterId === user.id)
+        )
+        .map((c) => presentConcern(user, c, mine))
+    );
+  });
+
+  app.get('/api/concerns/:id', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const concern = db.concerns.find((c) => c.id === req.params.id);
+    if (!concern) {
+      concernNotFound(res);
+      return;
+    }
+    if (concern.reporterId !== user.id && !canTriageConcern(user, concern.orgId)) {
+      concernNotFound(res);
+      return;
+    }
+    res.json(presentConcern(user, concern, false));
+  });
+
+  app.post('/api/concerns', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const input = req.body as {
+      orgId: string;
+      title: string;
+      category: string;
+      description: string;
+      location?: string;
+    };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'concern.create');
+      return;
+    }
+    if (!can(user, 'concern.create')) {
+      forbidden(res, user, 'concern.create');
+      return;
+    }
+    if (rejectBadText(res, req.body, ['orgId', 'title', 'category', 'description', 'location'])) {
+      return;
+    }
+    try {
+      const created = mutateDb(db, () => {
+        // Reporter identity comes from simulated auth; forged reporterId,
+        // status, or history fields in the body are never read.
+        const concern = createConcern(db, {
+          orgId: String(input.orgId ?? ''),
+          reporterId: user.id,
+          title: String(input.title ?? ''),
+          category: input.category as ConcernRecord['category'],
+          description: String(input.description ?? ''),
+          ...(input.location !== undefined ? { location: String(input.location) } : {})
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'concern.submitted',
+          recordType: 'concern',
+          recordId: concern.id,
+          orgId: concern.orgId,
+          detail: `Concern ${concern.id} submitted`
+        });
+        return concern;
+      });
+      res.status(201).json(presentConcern(user, created, false));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.patch('/api/concerns/:id', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const concern = db.concerns.find((c) => c.id === req.params.id);
+    if (!concern || !canTriageConcern(user, concern.orgId)) {
+      concernNotFound(res);
+      return;
+    }
+    // R-2: closed concerns reject every PATCH with the lock error before
+    // no-op handling, so same-value requests and re-closes never succeed
+    // silently — including a re-close carrying a new closing message.
+    if (concern.status === 'closed') {
+      res.status(400).json({ error: 'Closed concerns are locked.' });
+      return;
+    }
+    const patch = req.body as {
+      status?: string;
+      assigneeId?: string;
+      capaId?: string | null;
+      closingMessage?: string;
+    };
+    try {
+      const statusChanged = patch.status !== undefined && patch.status !== concern.status;
+      if (statusChanged) {
+        // Transition legality reports before any other check, so an illegal
+        // jump never surfaces a lock error. Unknown statuses fall through
+        // to updateConcernTriage.
+        assertLegalConcernTransition(concern.status, patch.status as ConcernStatus);
+      }
+      if (rejectBadText(res, req.body, ['status', 'assigneeId', 'closingMessage'])) {
+        return;
+      }
+      // capaId carries null when unlinking, so it needs its own type check.
+      if (patch.capaId !== undefined && patch.capaId !== null && typeof patch.capaId !== 'string') {
+        res.status(400).json({ error: 'capaId must be text.' });
+        return;
+      }
+      const assigneeChanged =
+        patch.assigneeId !== undefined && patch.assigneeId !== concern.assigneeId;
+      const linkChanged =
+        patch.capaId !== undefined && (patch.capaId ?? undefined) !== concern.capaId;
+      // F-3: the audit trail names fields that actually changed, not merely
+      // fields that were supplied.
+      const editedFields: string[] = [];
+      if (assigneeChanged) editedFields.push('assigneeId');
+      if (linkChanged) editedFields.push('capaId');
+      // A request carrying only ignored or unchanged fields changes nothing,
+      // so return the record without an audit event or a save. Authorization
+      // above still applies: unauthorized no-ops are rejected.
+      if (!statusChanged && !assigneeChanged && !linkChanged) {
+        res.json(presentConcern(user, concern, false));
+        return;
+      }
+      const closing = statusChanged && patch.status === 'closed';
+      if (closing && (typeof patch.closingMessage !== 'string' || !patch.closingMessage.trim())) {
+        res.status(400).json({ error: 'A closing explanation is required to close a concern.' });
+        return;
+      }
+      const oldStatus = concern.status;
+      const updated = mutateDb(db, () => {
+        // The closing explanation lands first so the lock check (which the
+        // transition below engages) never rejects it; both persist in the
+        // same atomic write.
+        if (closing) {
+          addConcernUpdate(
+            db,
+            concern.id,
+            { message: patch.closingMessage as string, kind: 'closing' },
+            user.id
+          );
+        }
+        const next = updateConcernTriage(
+          db,
+          concern.id,
+          {
+            ...(patch.status !== undefined ? { status: patch.status as ConcernStatus } : {}),
+            ...(patch.assigneeId !== undefined ? { assigneeId: patch.assigneeId } : {}),
+            ...(patch.capaId !== undefined ? { capaId: patch.capaId } : {})
+          },
+          user.id
+        );
+        appendAudit(db, {
+          actorId: user.id,
+          action: statusChanged ? `concern.${next.status}` : 'concern.updated',
+          recordType: 'concern',
+          recordId: concern.id,
+          orgId: concern.orgId,
+          detail: statusChanged
+            ? `Concern ${concern.id} [${oldStatus} -> ${next.status}]` +
+              (editedFields.length > 0 ? ` (fields: ${editedFields.join(', ')})` : '')
+            : `Concern ${concern.id} updated (fields: ${editedFields.join(', ')})`
+        });
+        return next;
+      });
+      res.json(presentConcern(user, updated, false));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.post('/api/concerns/:id/updates', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const concern = db.concerns.find((c) => c.id === req.params.id);
+    if (!concern || !canTriageConcern(user, concern.orgId)) {
+      concernNotFound(res);
+      return;
+    }
+    if (rejectBadText(res, req.body, ['message'])) {
+      return;
+    }
+    try {
+      const updated = mutateDb(db, () => {
+        const next = addConcernUpdate(
+          db,
+          concern.id,
+          { message: String((req.body as { message?: unknown }).message ?? ''), kind: 'progress' },
+          user.id
+        );
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'concern.updated',
+          recordType: 'concern',
+          recordId: concern.id,
+          orgId: concern.orgId,
+          detail: `Concern ${concern.id} reporter update #${next.updates[next.updates.length - 1].seq} added`
+        });
+        return next;
+      });
+      res.json(presentConcern(user, updated, false));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.post('/api/concerns/:id/notes', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const concern = db.concerns.find((c) => c.id === req.params.id);
+    if (!concern || !canTriageConcern(user, concern.orgId)) {
+      concernNotFound(res);
+      return;
+    }
+    if (rejectBadText(res, req.body, ['text'])) {
+      return;
+    }
+    try {
+      const updated = mutateDb(db, () => {
+        const next = addConcernNote(
+          db,
+          concern.id,
+          { text: String((req.body as { text?: unknown }).text ?? '') },
+          user.id
+        );
+        const notes = next.internalNotes ?? [];
+        appendAudit(db, {
+          actorId: user.id,
+          // F-2: internal-note events carry their own action so audit reads
+          // can withhold them from reporter-only views. Stored history is
+          // append-only as before; nothing is rewritten or renumbered.
+          action: 'concern.note_added',
+          recordType: 'concern',
+          recordId: concern.id,
+          orgId: concern.orgId,
+          detail: `Concern ${concern.id} internal note #${notes[notes.length - 1].seq} added`
+        });
+        return next;
+      });
+      res.json(presentConcern(user, updated, false));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
   app.get('/api/templates', (req: AuthRequest, res) => {
     const scope = readScope(req, res);
     if (!scope) return;
@@ -1496,6 +1791,25 @@ export function createApp(db: DbShape): express.Express {
     const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
     const events = db.audit
       .filter((e) => {
+        // Slice 1: concern events are reporter-plus-triage only, so the audit
+        // trail cannot leak one reporter's concern to another staff member.
+        // Orphaned concern events (no record; impossible without deletion)
+        // fail closed on the event's own org scope.
+        if (e.recordType === 'concern') {
+          const concern = db.concerns.find((c) => c.id === e.recordId);
+          const orgId = concern ? concern.orgId : e.orgId;
+          const isReporter = concern !== undefined && concern.reporterId === user.id;
+          const triage = canTriageConcern(user, orgId);
+          // F-2: internal-note events are triage-only, so reporters cannot
+          // even tell that notes exist. Triage keeps full visibility.
+          if (e.action === 'concern.note_added' && !triage) return false;
+          return (
+            allowed.includes(orgId) &&
+            (isReporter || triage) &&
+            (!recordType || e.recordType === recordType) &&
+            (!recordId || e.recordId === recordId)
+          );
+        }
         // Only genuine database-level events are globally visible. A 'system'
         // tag on any other record type is forged or stale: contain it like
         // 'unknown' (privileged eyes only) instead of leaking it to tenants.

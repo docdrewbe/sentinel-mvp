@@ -19,6 +19,9 @@ import type {
   CapaSeverity,
   CapaStatus,
   ComplianceTask,
+  ConcernCategory,
+  ConcernRecord,
+  ConcernStatus,
   ControlType,
   DemoUser,
   EscalationRule,
@@ -33,9 +36,10 @@ import type {
   TaskStatus,
   TaskTemplate
 } from '../shared/types.js';
-import { CAPA_CRITERIA_LOCKED_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { CAPA_CRITERIA_LOCKED_MESSAGE, CONCERN_DESCRIPTION_MAX, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_TITLE_MAX, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
+import { CONCERN_CATEGORIES, CONCERN_STATUSES, CONCERN_TRANSITIONS } from '../shared/concerns.js';
 import { missingSubmissionHistory } from '../shared/verification.js';
 import { addDaysISO, isValidIsoDate, isValidTimeZone, nextDueDate, nextOccurrence, orgToday, periodKeyFor } from '../shared/scheduling.js';
 
@@ -48,6 +52,8 @@ export interface DbShape {
   templates: TaskTemplate[];
   capas: CapaRecord[];
   obligations: RecurringObligation[];
+  /** Staff concern reports (slice 1). Additive: older databases lack this key. */
+  concerns: ConcernRecord[];
   audit: AuditEvent[];
   /**
    * Phase 2: follow-up idempotency records. Typed as unknown because
@@ -69,7 +75,7 @@ export function dataFilePath(): string {
 }
 
 export function emptyDb(): DbShape {
-  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], audit: [], docauditKeys: [] };
+  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], concerns: [], audit: [], docauditKeys: [] };
 }
 
 let lastStamp = '';
@@ -106,7 +112,9 @@ function hasFollowupTasks(tasks: unknown): boolean {
 export function loadDb(): DbShape {
   const file = dataFilePath();
   if (!existsSync(file)) return emptyDb();
-  // Tolerant read: databases written before templates existed gain defaults.
+  // Tolerant read: databases written before templates (or concerns)
+  // existed gain defaults — the spread below supplies [] for any absent
+  // collection, so pre-slice-1 databases load with zero concerns.
   const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<DbShape>;
   const db: DbShape = { ...emptyDb(), ...raw };
   // WM2-1: a legacy database — collection absent AND no follow-up tasks —
@@ -331,6 +339,8 @@ export function backfillAuditOrgIds(db: DbShape): void {
       e.orgId = db.templates.find((t) => t.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
     } else if (e.recordType === 'capa') {
       e.orgId = db.capas.find((c) => c.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
+    } else if (e.recordType === 'concern') {
+      e.orgId = db.concerns.find((c) => c.id === e.recordId)?.orgId ?? UNKNOWN_AUDIT_ORG;
     } else if (e.recordType === 'database') {
       e.orgId = SYSTEM_AUDIT_ORG;
     } else {
@@ -783,6 +793,185 @@ export function capaTransferCustody(
   ref.updatedAt = new Date().toISOString();
   capa.updatedAt = ref.updatedAt;
   return { ref, fromHolder };
+}
+
+// ---------------------------------------------------------------------------
+// Staff concerns (slice 1)
+// ---------------------------------------------------------------------------
+
+export interface ConcernInput {
+  orgId: string;
+  reporterId: string;
+  title: string;
+  category: ConcernCategory;
+  description: string;
+  location?: string;
+}
+
+/**
+ * One source for transition legality. The PATCH route calls this before any
+ * mutation so an illegal jump reports the transition. Unknown statuses are
+ * left for updateConcernTriage, which reports 'Unknown concern status.'
+ */
+export function assertLegalConcernTransition(from: ConcernStatus, to: string): void {
+  if (!CONCERN_STATUSES.includes(to as ConcernStatus)) return;
+  if (!CONCERN_TRANSITIONS[from].includes(to as ConcernStatus)) {
+    throw new ValidationError(`Illegal concern transition from '${from}' to '${to}'.`);
+  }
+}
+
+function assertConcernNotLocked(concern: ConcernRecord): void {
+  if (concern.status === 'closed') {
+    throw new ValidationError('Closed concerns are locked.');
+  }
+}
+
+export function createConcern(db: DbShape, input: ConcernInput): ConcernRecord {
+  const org = db.orgs.find((o) => o.id === input.orgId);
+  if (!org) throw new ValidationError('Unknown organization.');
+  const reporter = db.users.find((u) => u.id === input.reporterId);
+  if (!reporter) throw new ValidationError('Unknown reporter.');
+  const title = input.title.trim();
+  if (!title) throw new ValidationError('Concern title is required.');
+  if (title.length > CONCERN_TITLE_MAX) {
+    throw new ValidationError(`Concern title must be ${CONCERN_TITLE_MAX} characters or fewer.`);
+  }
+  if (!CONCERN_CATEGORIES.includes(input.category)) {
+    throw new ValidationError('Unknown concern category.');
+  }
+  const description = input.description.trim();
+  if (!description) throw new ValidationError('Concern description is required.');
+  if (description.length > CONCERN_DESCRIPTION_MAX) {
+    throw new ValidationError(
+      `Concern description must be ${CONCERN_DESCRIPTION_MAX} characters or fewer.`
+    );
+  }
+  const location = input.location?.trim() ? input.location.trim() : undefined;
+  if (location !== undefined && location.length > CONCERN_LOCATION_MAX) {
+    throw new ValidationError(`Concern location must be ${CONCERN_LOCATION_MAX} characters or fewer.`);
+  }
+  const now = new Date().toISOString();
+  const concern: ConcernRecord = {
+    id: randomUUID(),
+    orgId: input.orgId,
+    reporterId: input.reporterId,
+    title,
+    category: input.category,
+    description,
+    ...(location ? { location } : {}),
+    status: 'submitted',
+    updates: [],
+    internalNotes: [],
+    statusHistory: [{ status: 'submitted', at: now, byUserId: input.reporterId }],
+    linkHistory: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  db.concerns.push(concern);
+  return concern;
+}
+
+export interface ConcernTriagePatch {
+  status?: ConcernStatus;
+  assigneeId?: string;
+  capaId?: string | null;
+}
+
+export function updateConcernTriage(
+  db: DbShape,
+  id: string,
+  patch: ConcernTriagePatch,
+  byUserId: string
+): ConcernRecord {
+  const concern = db.concerns.find((c) => c.id === id);
+  if (!concern) throw new ValidationError('Concern not found.');
+  assertConcernNotLocked(concern);
+  // Validate everything before mutating, so combined requests change nothing.
+  if (patch.status !== undefined && patch.status !== concern.status) {
+    if (!CONCERN_STATUSES.includes(patch.status)) throw new ValidationError('Unknown concern status.');
+    assertLegalConcernTransition(concern.status, patch.status);
+  }
+  if (patch.assigneeId !== undefined) {
+    const assignee = db.users.find((u) => u.id === patch.assigneeId);
+    const eligible =
+      assignee !== undefined &&
+      (assignee.role === 'administrator' ||
+        assignee.role === 'compliance_officer' ||
+        (assignee.role === 'department_manager' && assignee.orgId === concern.orgId));
+    if (!eligible) {
+      throw new ValidationError('Assignee must be a triage-authorized user for this organization.');
+    }
+  }
+  if (patch.capaId !== undefined && patch.capaId !== null) {
+    const linked = db.capas.find((c) => c.id === patch.capaId && c.orgId === concern.orgId);
+    if (!linked) throw new ValidationError('Linked CAPA must exist in the same organization.');
+  }
+  const now = monotonicNow();
+  if (patch.status !== undefined && patch.status !== concern.status) {
+    concern.status = patch.status;
+    concern.statusHistory = [
+      ...concern.statusHistory,
+      { status: concern.status, at: now, byUserId }
+    ];
+  }
+  if (patch.assigneeId !== undefined) {
+    concern.assigneeId = patch.assigneeId;
+  }
+  const nextLink = patch.capaId === null ? undefined : patch.capaId;
+  if (patch.capaId !== undefined && nextLink !== concern.capaId) {
+    if (nextLink === undefined) delete concern.capaId;
+    else concern.capaId = nextLink;
+    concern.linkHistory = [
+      ...concern.linkHistory,
+      { seq: concern.linkHistory.length + 1, capaId: patch.capaId, byUserId, at: now }
+    ];
+  }
+  concern.updatedAt = now;
+  return concern;
+}
+
+export function addConcernUpdate(
+  db: DbShape,
+  id: string,
+  input: { message: string; kind: 'progress' | 'closing' },
+  byUserId: string
+): ConcernRecord {
+  const concern = db.concerns.find((c) => c.id === id);
+  if (!concern) throw new ValidationError('Concern not found.');
+  assertConcernNotLocked(concern);
+  const message = input.message.trim();
+  if (!message) throw new ValidationError('Update message is required.');
+  if (message.length > CONCERN_MESSAGE_MAX) {
+    throw new ValidationError(`Update message must be ${CONCERN_MESSAGE_MAX} characters or fewer.`);
+  }
+  const now = monotonicNow();
+  concern.updates = [
+    ...concern.updates,
+    { seq: concern.updates.length + 1, kind: input.kind, message, byUserId, at: now }
+  ];
+  concern.updatedAt = now;
+  return concern;
+}
+
+export function addConcernNote(
+  db: DbShape,
+  id: string,
+  input: { text: string },
+  byUserId: string
+): ConcernRecord {
+  const concern = db.concerns.find((c) => c.id === id);
+  if (!concern) throw new ValidationError('Concern not found.');
+  assertConcernNotLocked(concern);
+  const text = input.text.trim();
+  if (!text) throw new ValidationError('Internal note is required.');
+  if (text.length > CONCERN_MESSAGE_MAX) {
+    throw new ValidationError(`Internal note must be ${CONCERN_MESSAGE_MAX} characters or fewer.`);
+  }
+  const now = monotonicNow();
+  const notes = concern.internalNotes ?? [];
+  concern.internalNotes = [...notes, { seq: notes.length + 1, text, byUserId, at: now }];
+  concern.updatedAt = now;
+  return concern;
 }
 
 // ---------------------------------------------------------------------------

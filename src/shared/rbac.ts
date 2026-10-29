@@ -23,7 +23,9 @@ export type Action =
   | 'capa.review.request'
   | 'obligation.manage'
   | 'docaudit.run'
-  | 'docaudit.followup';
+  | 'docaudit.followup'
+  | 'concern.create'
+  | 'concern.triage';
 
 /**
  * DEMO PRIVILEGE (explicit): administrators and compliance officers have
@@ -49,6 +51,9 @@ export function can(user: DemoUser, action: Action, record?: OwnedRecord): boole
     return action !== 'task.verify' && action !== 'template.manage' && action !== 'capa.close';
   }
   if (user.role === 'staff') {
+    // Any signed-in demo user may file a concern (the route scopes staff to
+    // their own organization). Triage stays with managers and above.
+    if (action === 'concern.create') return true;
     // Staff may only work on records they own, and may never verify or
     // close. Advancing into effectiveness review needs capa.review.request,
     // which staff never hold, so owner-staff stop at Action In Progress.

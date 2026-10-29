@@ -3,7 +3,7 @@
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate } from '../shared/scheduling.js';
 import type { DocAuditFinding, DocAuditFollowupPayload, DocAuditPassage } from './api.js';
-import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
+import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, CAPA_STATUS_LABELS, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE } from '../shared/types.js';
 import { capaGateMissing, capaNoEligibleReviewer, capaReviewIneligible, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
 import type {
@@ -110,6 +110,60 @@ export function panelData<T>(panel: PanelState<T>, currentKey: string): T[] {
 /** Actions are allowed only on freshly loaded data for the current context. */
 export function canAct<T>(panel: PanelState<T>, currentKey: string): boolean {
   return panel.key === currentKey && panel.status === 'loaded' && !panel.error;
+}
+
+/**
+ * Slice-1 concerns ride outside the fixed Panels shape (whose arity existing
+ * tests pin): settle one context-keyed panel with the same staleness rules
+ * as applySettled — a wrong context or superseded request leaves the
+ * previous state untouched.
+ */
+export function applyOneSettled<T>(
+  prev: PanelState<T>,
+  key: string,
+  seq: number,
+  currentKey: string,
+  currentSeq: number,
+  settled: PromiseSettledResult<T[]>
+): PanelState<T> {
+  if (key !== currentKey || seq !== currentSeq) return prev;
+  if (settled.status === 'fulfilled') return { key, status: 'loaded', data: settled.value };
+  return nextPanel(prev, key, undefined, reasonMessage(settled.reason));
+}
+
+/** Users eligible for concern assignment in an org (the server re-checks). */
+export function triageUsersFor(users: DemoUser[], orgId: string): DemoUser[] {
+  return users.filter(
+    (u) =>
+      u.role === 'administrator' ||
+      u.role === 'compliance_officer' ||
+      (u.role === 'department_manager' && u.orgId === orgId)
+  );
+}
+
+/**
+ * Short display form for record ids: readable seed ids stay whole, long
+ * generated ids truncate. Single rule for every concern-view id rendering.
+ */
+export function shortDisplayId(id: string): string {
+  return id.length > 16 ? `${id.slice(0, 8)}…` : id;
+}
+
+/**
+ * F-1: concern linked-CAPA display line from the server summary only — the
+ * concern view never searches full CAPA records for status. An unresolvable
+ * link reports honestly instead of inventing a status.
+ */
+export function linkedCapaLine(concern: {
+  capaId?: string;
+  linkedCapa?: { id: string; status: CapaStatus };
+}): string {
+  if (!concern.capaId) return 'None';
+  const short = shortDisplayId(concern.capaId);
+  if (!concern.linkedCapa || concern.linkedCapa.id !== concern.capaId) {
+    return `${short} (status unavailable)`;
+  }
+  return `${short} (${CAPA_STATUS_LABELS[concern.linkedCapa.status]})`;
 }
 
 /**

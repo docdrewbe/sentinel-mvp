@@ -147,6 +147,31 @@ describe('document audit permissions (Phase 1)', () => {
   });
 });
 
+describe('concern permissions (slice 1)', () => {
+  const scope = (over: { orgId?: string; ownerId?: string } = {}) => ({
+    orgId: 'org-cah',
+    ownerId: '',
+    ...over
+  });
+
+  it('any signed-in role may file; only managers and above triage', () => {
+    for (const role of ['staff', 'department_manager', 'compliance_officer', 'administrator'] as const) {
+      assert.equal(can(user({ role }), 'concern.create'), true);
+    }
+    const s = scope();
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'concern.triage', s), true);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'concern.triage', s), true);
+    assert.equal(can(user({ role: 'administrator', id: 'u-admin' }), 'concern.triage', s), true);
+    assert.equal(can(user({ role: 'staff' }), 'concern.triage', s), false);
+  });
+
+  it('managers triage their own org only', () => {
+    const foreign = scope({ orgId: 'org-clinic' });
+    assert.equal(can(user({ role: 'department_manager', id: 'u-mgr' }), 'concern.triage', foreign), false);
+    assert.equal(can(user({ role: 'compliance_officer', id: 'u-officer' }), 'concern.triage', foreign), true);
+  });
+});
+
 describe('organization visibility (F3)', () => {
   const all = ['org-cah', 'org-clinic', 'org-canna'];
 
