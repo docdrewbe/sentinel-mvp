@@ -13,6 +13,7 @@ import type {
   ComplianceTask,
   DemoUser,
   EvidenceRef,
+  MyUpdateEntry,
   Organization,
   RecurringObligation,
   RegulatoryDomain,
@@ -139,6 +140,140 @@ export function triageUsersFor(users: DemoUser[], orgId: string): DemoUser[] {
       u.role === 'compliance_officer' ||
       (u.role === 'department_manager' && u.orgId === orgId)
   );
+}
+
+/** Which concern detail rendering owns a focus target. */
+export type ConcernDetailView = 'mine' | 'queue';
+
+/**
+ * Focus-target id for one public update item, scoped to its view so the
+ * same concern rendered in both reporter and triage detail never shares
+ * an id. One detail renders per view at a time, so the update sequence
+ * alone is unique within a scope.
+ */
+export function concernUpdateDomId(view: ConcernDetailView, seq: number): string {
+  return `concern-update-${view}-${seq}`;
+}
+
+/**
+ * Focus-target id for one record-history row, scoped to its detail panel.
+ * Audit sequences are globally unique, but the same event can render in
+ * two concern views at once, so the scope keeps every id unique.
+ */
+export function auditEventDomId(view: ConcernDetailView | 'task', seq: number): string {
+  return `audit-event-${view}-${seq}`;
+}
+
+/**
+ * Focus-target id for one concern Status history entry, scoped to its
+ * view. Used when the matching audit event is outside the loaded audit
+ * window: status history is a complete record field, not a window.
+ */
+export function concernStatusDomId(view: ConcernDetailView, index: number): string {
+  return `concern-status-${view}-${index}`;
+}
+
+/** Shown when navigation lands on a heading because the exact target is unavailable. */
+export const UPDATE_OUTSIDE_HISTORY_NOTICE =
+  'This update is outside the currently loaded record history.';
+
+/**
+ * Whether a navigation landing deserves the outside-history notice: only
+ * when an exact candidate existed but the heading was the best available
+ * target. Exact landings and total misses stay silent.
+ */
+export function navFallbackNotice(matchedId: string | null, focusIds: string[]): string | null {
+  if (matchedId === null) return null;
+  if (focusIds.length > 1 && matchedId === focusIds[focusIds.length - 1]) {
+    return UPDATE_OUTSIDE_HISTORY_NOTICE;
+  }
+  return null;
+}
+
+/** Ordered focus candidates for a feed entry (exact target first). */
+export interface UpdateNavTarget {
+  recordKind: 'task' | 'concern';
+  recordId: string;
+  focusIds: string[];
+}
+
+/**
+ * Navigation target for a feed entry: the record to select plus ordered
+ * focus candidates — the exact update item when validated, then the
+ * visible record-history event, then the matching Status history entry
+ * for concern transitions (complete record data, usable past the audit
+ * window), then the detail heading. A user's own concern always resolves
+ * to reporter-facing targets in My reports, never depending on which
+ * duplicate appears first. Callers try each in turn and open nothing
+ * else when all are missing.
+ */
+export function updateNavTarget(entry: {
+  recordKind: 'task' | 'concern';
+  recordId: string;
+  seq: number;
+  updateSeq?: number;
+  statusIndex?: number;
+}): UpdateNavTarget {
+  const focusIds: string[] = [];
+  if (entry.recordKind === 'concern') {
+    if (entry.updateSeq !== undefined) focusIds.push(concernUpdateDomId('mine', entry.updateSeq));
+    focusIds.push(auditEventDomId('mine', entry.seq));
+    if (entry.statusIndex !== undefined) focusIds.push(concernStatusDomId('mine', entry.statusIndex));
+    focusIds.push('my-concern-detail-heading');
+  } else {
+    focusIds.push(auditEventDomId('task', entry.seq));
+    focusIds.push('task-detail-heading');
+  }
+  return { recordKind: entry.recordKind, recordId: entry.recordId, focusIds };
+}
+
+/** Rendered state of the updates panel for one context key. */
+export type UpdatesViewState = 'loading' | 'error' | 'stale' | 'empty' | 'empty-stale' | 'list';
+
+/**
+ * Which updates-panel body to render. Only a failed status (an initial
+ * failure with no successful result) renders the error state; a loaded
+ * panel with a refresh error keeps showing its retained entries while
+ * PanelNotice carries the stale warning. O-1: a retained EMPTY result
+ * under a failed refresh renders 'empty-stale' with qualified wording —
+ * 'empty' ("No updates yet.") is reserved for a current successful empty
+ * response. 'empty' still requires the current context.
+ */
+export function updatesViewState(
+  panel: PanelState<MyUpdateEntry>,
+  currentKey: string
+): UpdatesViewState {
+  if (panel.key !== currentKey) return 'stale';
+  if (panel.status === 'loading') return 'loading';
+  if (panel.status === 'error') return 'error';
+  if (panel.data.length > 0) return 'list';
+  return panel.error ? 'empty-stale' : 'empty';
+}
+
+/**
+ * F-2: feed-only settle. A failed refresh after a successful load in the
+ * SAME context keeps the last entries (or the last empty result) with a
+ * stale marker, so the panel shows them under an explicit warning with
+ * Retry. An initial failure carries no entries and renders the error
+ * state. Context changes and late responses behave exactly like
+ * applyOneSettled: the previous state is left untouched, so another
+ * context's entries are never retained. A success replaces everything
+ * and clears the marker.
+ */
+export function applyFeedSettled<T>(
+  prev: PanelState<T>,
+  key: string,
+  seq: number,
+  currentKey: string,
+  currentSeq: number,
+  settled: PromiseSettledResult<T[]>
+): PanelState<T> {
+  if (key !== currentKey || seq !== currentSeq) return prev;
+  if (settled.status === 'fulfilled') return { key, status: 'loaded', data: settled.value };
+  if (prev.key === key && prev.status === 'loaded') {
+    return { key, status: 'loaded', data: prev.data, error: reasonMessage(settled.reason) };
+  }
+  return { key, status: 'error', data: [], error: reasonMessage(settled.reason) };
 }
 
 /**

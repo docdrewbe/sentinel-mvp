@@ -25,6 +25,7 @@ import {
   instantiateTemplate,
   mutateDb,
   monotonicNow,
+  selectMyUpdates,
   transferCustody,
   updateCapa,
   updateConcernTriage,
@@ -1778,6 +1779,17 @@ export function createApp(db: DbShape): express.Express {
     } catch (e) {
       sendError(req, res, e);
     }
+  });
+
+  // My recent updates: read-only personal feed. Organization scope,
+  // record access, personal relevance, and the event allowlist all apply
+  // BEFORE the newest five are selected, so unrelated activity can never
+  // displace eligible updates. No writes, no audit events, no schema changes.
+  app.get('/api/my-updates', (req: AuthRequest, res) => {
+    const scope = readScope(req, res);
+    if (!scope) return;
+    const user = req.user as DemoUser;
+    res.json(selectMyUpdates(db, user.id, scope));
   });
 
   // Append-only: read-only audit endpoint by design. No write routes exist.

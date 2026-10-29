@@ -419,6 +419,32 @@ export interface ConcernCapaSummary {
   status: CapaStatus;
 }
 
+/**
+ * One "my recent updates" feed entry. Server-composed from a single stored
+ * audit event: plain-language description plus the minimal navigation
+ * fields. Never carries raw audit detail, update text, or internal notes.
+ */
+export interface MyUpdateEntry {
+  recordKind: 'task' | 'concern';
+  recordId: string;
+  recordTitle: string;
+  /** Live record status (for the client's status chip), not historical. */
+  recordStatus: string;
+  /** Plain-language description, including the actor's name. */
+  description: string;
+  /** Stored event timestamp (ISO), verbatim. */
+  timestamp: string;
+  /** Stored event sequence (ordering + navigation), verbatim. */
+  seq: number;
+  /** Reporter-update sequence within the concern; present only when validated. */
+  updateSeq?: number;
+  /**
+   * Index into the concern's status history for status-transition events;
+   * present only when exactly one history entry matches the transition.
+   */
+  statusIndex?: number;
+}
+
 export interface ConcernRecord {
   id: string;
   orgId: string;

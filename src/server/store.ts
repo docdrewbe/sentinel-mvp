@@ -27,6 +27,7 @@ import type {
   EscalationRule,
   EvidenceRef,
   EvidenceRequirement,
+  MyUpdateEntry,
   Organization,
   RecurrenceFrequency,
   RecurringObligation,
@@ -36,7 +37,7 @@ import type {
   TaskStatus,
   TaskTemplate
 } from '../shared/types.js';
-import { CAPA_CRITERIA_LOCKED_MESSAGE, CONCERN_DESCRIPTION_MAX, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_TITLE_MAX, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
+import { CAPA_CRITERIA_LOCKED_MESSAGE, CONCERN_DESCRIPTION_MAX, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, STATUS_LABELS, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import { CAPA_GATE_FIELD_LABELS, capaCriteriaLocked, capaGateMissing, capaRequiredFields } from '../shared/capa.js';
 import { CONCERN_CATEGORIES, CONCERN_STATUSES, CONCERN_TRANSITIONS } from '../shared/concerns.js';
@@ -972,6 +973,377 @@ export function addConcernNote(
   concern.internalNotes = [...notes, { seq: notes.length + 1, text, byUserId, at: now }];
   concern.updatedAt = now;
   return concern;
+}
+
+// ---------------------------------------------------------------------------
+// My recent updates (read-only personal feed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Trailing server-written owner marker: ` (owner A -> B)`. Returns the
+ * historical owner ids, or null unless the marker matches exactly. Titles
+ * are user content, so only the anchored suffix is trusted.
+ */
+function parseOwnerMarker(detail: string): { from: string; to: string } | null {
+  const m = / \(owner (\S+) -> (\S+)\)$/.exec(detail);
+  if (!m) return null;
+  return { from: m[1], to: m[2] };
+}
+
+/** Older-format internal-note detail, exact server shape (R-1 era). */
+function isLegacyNoteDetail(detail: string): boolean {
+  return /^Concern \S+ internal note #\d+ added$/.test(detail);
+}
+
+/**
+ * Reporter-update marker: the update number, or null unless the detail is
+ * exactly the server-written shape. The caller must still validate the
+ * number against the record's updates before navigating to it.
+ */
+function parseUpdateNumber(detail: string): number | null {
+  const m = /^Concern \S+ reporter update #(\d+) added$/.exec(detail);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n >= 1 ? n : null;
+}
+
+/**
+ * Fields-list marker: validated field names, or null when absent or
+ * unparseable. Unknown fields fail closed (the caller falls back to a
+ * generic description) rather than inventing meaning.
+ */
+function parseFieldsList(detail: string): string[] | null {
+  const m = / \(fields: ([^)]*)\)$/.exec(detail);
+  if (!m) return null;
+  const fields = [...new Set(m[1].split(',').map((f) => f.trim()).filter((f) => f !== ''))];
+  if (fields.length === 0) return null;
+  if (!fields.every((f) => f === 'assigneeId' || f === 'capaId')) return null;
+  return fields;
+}
+
+const CONCERN_FIELD_WORDS: Record<string, string> = {
+  assigneeId: 'the handler',
+  capaId: 'the CAPA link'
+};
+
+/**
+ * R-2: validated status-history entries with their ORIGINAL render indices.
+ * Missing/non-array history, null entries, wrong-shaped entries, and
+ * unparseable timestamps are skipped. Never throws, never mutates or
+ * repairs stored data. Indices are preserved (not compacted) so a match
+ * still addresses the row the detail view renders.
+ */
+function validHistoryEntries(
+  concern: ConcernRecord
+): Array<{ index: number; status: string; byUserId: string; at: string }> {
+  const raw = (concern as { statusHistory?: unknown }).statusHistory;
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ index: number; status: string; byUserId: string; at: string }> = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const e = raw[i] as { status?: unknown; byUserId?: unknown; at?: unknown } | null | undefined;
+    if (!e || typeof e !== 'object') continue;
+    if (typeof e.status !== 'string' || typeof e.byUserId !== 'string' || typeof e.at !== 'string') continue;
+    if (Number.isNaN(Date.parse(e.at))) continue;
+    out.push({ index: i, status: e.status, byUserId: e.byUserId, at: e.at });
+  }
+  return out;
+}
+
+/**
+ * R-1/R-5/§5ar: same-block ceiling for event/record stamp skew, in
+ * milliseconds. Each pair is created atomically in one synchronous
+ * mutateDb block — the record stamped first, the audit event microseconds
+ * later — so genuine skew is sub-millisecond (observed over HTTP: -1 to
+ * +1ms, including 300-write bursts). One second is a generous ceiling
+ * covering GC pauses and loaded machines; it is deliberately NOT fitted
+ * to fixtures and sits far below the corrupt skews it must refuse.
+ *
+ * This is a NAVIGATION ELIGIBILITY bound, not proof of identity: a
+ * within-window forgery can still match, which is why status/actor,
+ * exactly-one matching, and the injectivity pass all still apply. A
+ * genuine pair skewed beyond the ceiling — only reachable via sustained
+ * sub-millisecond stamping or a clock regression, never over this app's
+ * HTTP write path — degrades to the safe heading fallback by design.
+ */
+const FEED_HISTORY_SKEW_CEILING_MS = 1000;
+
+/**
+ * R-1/R-5/§5ar: match an event to its status-history entry by status +
+ * actor + a bounded timestamp relationship — never by status alone.
+ * Requires -ceiling <= audit - history <= +ceiling: history dated far
+ * before OR far after its event is ineligible, because neither direction
+ * is producible by the same-block write path.
+ *
+ * Returns the entry index, or null when no exactly-one trustworthy match
+ * exists (the caller falls back to the detail heading).
+ */
+function matchStatusIndex(
+  concern: ConcernRecord,
+  status: string,
+  actorId: string,
+  eventTimestamp: unknown
+): number | null {
+  if (typeof eventTimestamp !== 'string') return null;
+  const eventMs = Date.parse(eventTimestamp);
+  if (Number.isNaN(eventMs)) return null;
+  const hits: number[] = [];
+  for (const h of validHistoryEntries(concern)) {
+    if (h.status !== status || h.byUserId !== actorId) continue;
+    if (Math.abs(eventMs - Date.parse(h.at)) > FEED_HISTORY_SKEW_CEILING_MS) continue;
+    hits.push(h.index);
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * §5ar: validate a reporter-update marker against the referenced update's
+ * own sequence, actor, and stamps. The write path (POST
+ * /api/concerns/:id/updates) appends updates[N] with monotonicNow() and
+ * byUserId, then audits the same actor naming that seq in the same
+ * synchronous block — so the same bounded policy applies. Returns the
+ * sequence, or null when the referenced update is absent, ambiguous,
+ * actor-mismatched, or skewed beyond the ceiling. Never returns a
+ * DIFFERENT update's sequence: failure falls back safely.
+ */
+function matchUpdateSeq(
+  concern: ConcernRecord,
+  updateNo: number,
+  actorId: string,
+  eventTimestamp: unknown
+): number | null {
+  if (typeof eventTimestamp !== 'string') return null;
+  const eventMs = Date.parse(eventTimestamp);
+  if (Number.isNaN(eventMs)) return null;
+  const updates = (concern as { updates?: unknown }).updates;
+  if (!Array.isArray(updates)) return null;
+  let hits = 0;
+  for (const u of updates) {
+    if (u === null || typeof u !== 'object') continue;
+    const entry = u as { seq?: unknown; byUserId?: unknown; at?: unknown };
+    if (entry.seq !== updateNo || entry.byUserId !== actorId) continue;
+    if (typeof entry.at !== 'string') continue;
+    const updateMs = Date.parse(entry.at);
+    if (Number.isNaN(updateMs)) continue;
+    if (Math.abs(eventMs - updateMs) > FEED_HISTORY_SKEW_CEILING_MS) continue;
+    hits += 1;
+  }
+  return hits === 1 ? updateNo : null;
+}
+
+/** R-2: display text that tolerates wrong-typed stored fields. */
+function storedText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/** Assignment clause from historical marker ids; generic when unresolvable. */
+function assignmentClause(
+  marker: { from: string; to: string },
+  names: Map<string, string>
+): string {
+  const from = names.get(marker.from);
+  const to = names.get(marker.to);
+  if (from && to) return `reassigned the task from ${from} to ${to}`;
+  return 'changed the task assignment';
+}
+
+interface FeedContext {
+  userId: string;
+  scopeOrgIds: string[];
+  names: Map<string, string>;
+  tasksById: Map<string, ComplianceTask>;
+  concernsById: Map<string, ConcernRecord>;
+}
+
+function baseEntry(
+  recordKind: 'task' | 'concern',
+  recordId: string,
+  recordTitle: string,
+  recordStatus: string,
+  event: AuditEvent
+): Omit<MyUpdateEntry, 'description'> {
+  return {
+    recordKind,
+    recordId,
+    recordTitle,
+    recordStatus,
+    timestamp: event.timestamp,
+    seq: event.seq
+  };
+}
+
+/**
+ * One stored event mapped to a feed entry, or null when the event is
+ * out of scope, not personally relevant, outside the allowlist, or too
+ * ambiguous to describe truthfully. Pure read: never mutates the database.
+ */
+function describeFeedEvent(ctx: FeedContext, event: AuditEvent): MyUpdateEntry | null {
+  const actor = ctx.names.get(event.actorId) ?? event.actorId;
+  if (event.recordType === 'concern') {
+    const concern = ctx.concernsById.get(event.recordId);
+    // R-2: malformed records cannot establish relevance — skip, never throw.
+    if (!concern || typeof concern !== 'object') return null;
+    if (typeof concern.reporterId !== 'string' || typeof concern.orgId !== 'string') return null;
+    if (concern.reporterId !== ctx.userId || !ctx.scopeOrgIds.includes(concern.orgId)) {
+      return null;
+    }
+    // Internal-note events stay out in both the current and older formats,
+    // for every role: neither notes nor their existence appear in this feed.
+    if (event.action === 'concern.note_added') return null;
+    const base = baseEntry('concern', concern.id, storedText(concern.title), storedText(concern.status), event);
+    switch (event.action) {
+      case 'concern.submitted': {
+        // R-5: target the Submitted history entry under the same identity
+        // checks as transitions; otherwise the safe heading fallback.
+        const statusIndex = matchStatusIndex(concern, 'submitted', event.actorId, event.timestamp);
+        return {
+          ...base,
+          description: `${actor} filed the report`,
+          ...(statusIndex !== null ? { statusIndex } : {})
+        };
+      }
+      case 'concern.acknowledged':
+      case 'concern.in_review':
+      case 'concern.closed': {
+        const status = event.action.slice('concern.'.length);
+        const description =
+          status === 'acknowledged'
+            ? `${actor} acknowledged the report`
+            : status === 'in_review'
+              ? `${actor} moved the report to ${CONCERN_STATUS_LABELS.in_review}`
+              : `${actor} closed the report`;
+        const statusIndex = matchStatusIndex(concern, status, event.actorId, event.timestamp);
+        return {
+          ...base,
+          description,
+          ...(statusIndex !== null ? { statusIndex } : {})
+        };
+      }
+      case 'concern.updated': {
+        if (isLegacyNoteDetail(event.detail)) return null;
+        const updateNo = parseUpdateNumber(event.detail);
+        if (updateNo !== null) {
+          // Only a validated update earns the specific wording and target;
+          // an absent, ambiguous, actor-mismatched, or skewed reference
+          // degrades to the generic change description.
+          if (matchUpdateSeq(concern, updateNo, event.actorId, event.timestamp) !== null) {
+            return {
+              ...base,
+              description: `${actor} posted a follow-up update`,
+              updateSeq: updateNo
+            };
+          }
+          return { ...base, description: `${actor} updated the report` };
+        }
+        const fields = parseFieldsList(event.detail);
+        if (fields) {
+          const words = fields.map((f) => CONCERN_FIELD_WORDS[f]);
+          const object =
+            words.length === 1 ? words[0] : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
+          // The stored event names no assignee, so the description names
+          // none either — never the current handler.
+          return { ...base, description: `${actor} updated ${object}` };
+        }
+        return { ...base, description: `${actor} updated the report` };
+      }
+      default:
+        return null;
+    }
+  }
+  if (event.recordType === 'task') {
+    const task = ctx.tasksById.get(event.recordId);
+    // R-2: malformed records cannot establish relevance — skip, never throw.
+    if (!task || typeof task !== 'object') return null;
+    if (typeof task.ownerId !== 'string' || typeof task.orgId !== 'string') return null;
+    if (task.ownerId !== ctx.userId || !ctx.scopeOrgIds.includes(task.orgId)) return null;
+    const base = baseEntry('task', task.id, storedText(task.title), storedText(task.status), event);
+    if (event.action === 'task.submitted') {
+      return { ...base, description: `${actor} submitted the task` };
+    }
+    if (event.action === 'task.verified') {
+      return { ...base, description: `${actor} verified the task` };
+    }
+    if (event.action === 'task.in_progress' || event.action === 'task.open') {
+      let description = `${actor} moved the task to ${STATUS_LABELS[event.action === 'task.open' ? 'open' : 'in_progress']}`;
+      const marker = parseOwnerMarker(event.detail);
+      if (marker) description += `; ${assignmentClause(marker, ctx.names)}`;
+      return { ...base, description };
+    }
+    if (event.action === 'task.updated') {
+      // Bare task edits (titles, dates) are noise: only a strictly parsed
+      // reassignment marker earns an entry, described from its own ids.
+      const marker = parseOwnerMarker(event.detail);
+      if (!marker) return null;
+      return { ...base, description: `${actor} ${assignmentClause(marker, ctx.names)}` };
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Newest five personal updates for a user within an org scope. Scope,
+ * record access, personal relevance (own reports + owned tasks, every
+ * role alike), and the event allowlist all apply BEFORE the newest five
+ * are selected, so unrelated activity can never displace eligible
+ * updates. Read-only: no writes, no audit events, no schema changes.
+ */
+export function selectMyUpdates(db: DbShape, userId: string, scopeOrgIds: string[]): MyUpdateEntry[] {
+  // R-2: malformed collection entries never break map construction.
+  const users = Array.isArray(db.users) ? db.users : [];
+  const tasks = Array.isArray(db.tasks) ? db.tasks.filter((t) => t && typeof t === 'object') : [];
+  const concerns = Array.isArray(db.concerns)
+    ? db.concerns.filter((c) => c && typeof c === 'object')
+    : [];
+  const audit = Array.isArray(db.audit) ? db.audit : [];
+  const ctx: FeedContext = {
+    userId,
+    scopeOrgIds,
+    names: new Map(users.filter((u) => u && typeof u === 'object').map((u) => [u.id, u.name])),
+    tasksById: new Map(tasks.map((t) => [t.id, t])),
+    concernsById: new Map(concerns.map((c) => [c.id, c]))
+  };
+  const entries: MyUpdateEntry[] = [];
+  for (const event of audit) {
+    if (!event || typeof event !== 'object') continue;
+    // §5ar: events with a missing or unparseable timestamp are excluded
+    // BEFORE sorting and limiting — never emitted with an invented date,
+    // never displacing valid entries, stored data untouched.
+    if (typeof event.timestamp !== 'string' || Number.isNaN(Date.parse(event.timestamp))) continue;
+    const entry = describeFeedEvent(ctx, event);
+    if (entry) entries.push(entry);
+  }
+  // R-1: navigation metadata must be unambiguous — when two events claim
+  // the same history entry or update (duplicate events), neither keeps
+  // the claim; both entries stay on the safe heading fallback.
+  const claims = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.statusIndex !== undefined) {
+      const key = `s:${entry.recordId}:${entry.statusIndex}`;
+      claims.set(key, (claims.get(key) ?? 0) + 1);
+    }
+    if (entry.updateSeq !== undefined) {
+      const key = `u:${entry.recordId}:${entry.updateSeq}`;
+      claims.set(key, (claims.get(key) ?? 0) + 1);
+    }
+  }
+  for (const entry of entries) {
+    if (
+      entry.statusIndex !== undefined &&
+      (claims.get(`s:${entry.recordId}:${entry.statusIndex}`) ?? 0) > 1
+    ) {
+      delete entry.statusIndex;
+    }
+    if (
+      entry.updateSeq !== undefined &&
+      (claims.get(`u:${entry.recordId}:${entry.updateSeq}`) ?? 0) > 1
+    ) {
+      delete entry.updateSeq;
+    }
+  }
+  entries.sort((a, b) =>
+    a.timestamp > b.timestamp ? -1 : a.timestamp < b.timestamp ? 1 : b.seq - a.seq
+  );
+  return entries.slice(0, 5);
 }
 
 // ---------------------------------------------------------------------------

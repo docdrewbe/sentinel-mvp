@@ -8,14 +8,19 @@ import {
   DOCAUDIT_TASK_TITLE_MAX,
   DOCAUDIT_TEXT_MAX,
   FOLLOWUP_EVIDENCE_NOTE,
+  UPDATE_OUTSIDE_HISTORY_NOTICE,
+  applyFeedSettled,
   applyOneSettled,
   applySettled,
+  auditEventDomId,
   beginContext,
   buildFollowupPreview,
   canAct,
   calendarBucket,
   capaAdvanceBlockReason,
   capaReviewBlockReason,
+  concernStatusDomId,
+  concernUpdateDomId,
   findingBlockers,
   findingKindLabel,
   followupSettleAction,
@@ -28,6 +33,7 @@ import {
   isDueSoonWork,
   isOverdueWork,
   linkedCapaLine,
+  navFallbackNotice,
   newObligationBlockReason,
   overdueBadgeLabel,
   panelData,
@@ -42,6 +48,8 @@ import {
   submitBlockReason,
   submitStatusReason,
   triageUsersFor,
+  updateNavTarget,
+  updatesViewState,
   verifyBlockReason,
   verifyEvidenceReason,
   verifyStatusReason,
@@ -1020,6 +1028,167 @@ describe('concern panels (slice 1)', () => {
     assert.equal(
       linkedCapaLine({ capaId: 'capa-temp-log', linkedCapa: { id: 'capa-other', status: 'closed' } }),
       'capa-temp-log (status unavailable)'
+    );
+  });
+
+  it('updateNavTarget orders exact update, trail event, status item, then heading', () => {
+    assert.deepEqual(
+      updateNavTarget({ recordKind: 'concern', recordId: 'c1', seq: 41, updateSeq: 2 }),
+      {
+        recordKind: 'concern',
+        recordId: 'c1',
+        focusIds: ['concern-update-mine-2', 'audit-event-mine-41', 'my-concern-detail-heading']
+      }
+    );
+    assert.deepEqual(
+      updateNavTarget({ recordKind: 'concern', recordId: 'c1', seq: 40, statusIndex: 1 }),
+      {
+        recordKind: 'concern',
+        recordId: 'c1',
+        focusIds: ['audit-event-mine-40', 'concern-status-mine-1', 'my-concern-detail-heading']
+      }
+    );
+    assert.deepEqual(
+      updateNavTarget({ recordKind: 'concern', recordId: 'c1', seq: 40 }),
+      {
+        recordKind: 'concern',
+        recordId: 'c1',
+        focusIds: ['audit-event-mine-40', 'my-concern-detail-heading']
+      }
+    );
+    assert.deepEqual(
+      updateNavTarget({ recordKind: 'task', recordId: 't1', seq: 39 }),
+      { recordKind: 'task', recordId: 't1', focusIds: ['audit-event-task-39', 'task-detail-heading'] }
+    );
+    // A status index on a task entry is ignored: tasks have no status history.
+    assert.deepEqual(
+      updateNavTarget({ recordKind: 'task', recordId: 't1', seq: 39, statusIndex: 0 }),
+      { recordKind: 'task', recordId: 't1', focusIds: ['audit-event-task-39', 'task-detail-heading'] }
+    );
+  });
+
+  it('focus-target ids stay unique when one concern renders in both views', () => {
+    // Same record, same sequences: reporter and triage ids never collide.
+    assert.notEqual(concernUpdateDomId('mine', 2), concernUpdateDomId('queue', 2));
+    assert.notEqual(auditEventDomId('mine', 41), auditEventDomId('queue', 41));
+    assert.notEqual(auditEventDomId('mine', 41), auditEventDomId('task', 41));
+    assert.notEqual(concernStatusDomId('mine', 1), concernStatusDomId('queue', 1));
+    // Navigation for a user's own concern resolves reporter-facing targets.
+    const target = updateNavTarget({ recordKind: 'concern', recordId: 'c1', seq: 41, updateSeq: 2 });
+    assert.ok(target.focusIds.every((id) => !id.includes('queue')));
+    assert.ok(target.focusIds[0].startsWith('concern-update-mine-'));
+    const statusTarget = updateNavTarget({ recordKind: 'concern', recordId: 'c1', seq: 40, statusIndex: 1 });
+    assert.ok(statusTarget.focusIds.every((id) => !id.includes('queue')));
+  });
+
+  it('navFallbackNotice explains heading-only landings', () => {
+    assert.equal(
+      UPDATE_OUTSIDE_HISTORY_NOTICE,
+      'This update is outside the currently loaded record history.'
+    );
+    const focusIds = ['audit-event-mine-40', 'concern-status-mine-1', 'my-concern-detail-heading'];
+    assert.equal(navFallbackNotice('my-concern-detail-heading', focusIds), UPDATE_OUTSIDE_HISTORY_NOTICE);
+    assert.equal(navFallbackNotice('audit-event-mine-40', focusIds), null);
+    assert.equal(navFallbackNotice('concern-status-mine-1', focusIds), null);
+    assert.equal(navFallbackNotice(null, focusIds), null);
+  });
+
+  it('updatesViewState errors only initial failures and keeps stale results', () => {
+    const key = 'u-staff|org-cah';
+    const row = {
+      recordKind: 'task' as const,
+      recordId: 't1',
+      recordTitle: 'T',
+      recordStatus: 'open',
+      description: 'D',
+      timestamp: '2026-10-29T00:00:00.000Z',
+      seq: 1
+    };
+    assert.equal(
+      updatesViewState({ key, status: 'loading', data: [] }, key),
+      'loading'
+    );
+    // Initial failure with no successful result: error, never empty.
+    assert.equal(
+      updatesViewState({ key, status: 'error', data: [], error: 'boom' }, key),
+      'error'
+    );
+    // Failed refresh after a successful load: retained entries stay listed
+    // while PanelNotice carries the stale warning.
+    assert.equal(
+      updatesViewState({ key, status: 'loaded', data: [row], error: 'boom' }, key),
+      'list'
+    );
+    // O-1: failed refresh after a successful empty load renders the
+    // qualified stale-empty state with the warning — never the bare
+    // "No updates yet." and never the error state.
+    assert.equal(
+      updatesViewState({ key, status: 'loaded', data: [], error: 'boom' }, key),
+      'empty-stale'
+    );
+    assert.equal(
+      updatesViewState({ key: 'other|org', status: 'loaded', data: [] }, key),
+      'stale'
+    );
+    assert.equal(
+      updatesViewState({ key, status: 'loaded', data: [] }, key),
+      'empty'
+    );
+    assert.equal(
+      updatesViewState({ key, status: 'loaded', data: [row] }, key),
+      'list'
+    );
+  });
+
+  it('applyFeedSettled retains same-context results and recovers on retry', () => {
+    const key = 'u-staff|org-cah';
+    const loading = { key, status: 'loading' as const, data: [] as string[] };
+    // Initial failure: error state with no entries.
+    const failed = applyFeedSettled(loading, key, 1, key, 1, {
+      status: 'rejected',
+      reason: new Error('boom')
+    });
+    assert.deepEqual(failed, { key, status: 'error', data: [], error: 'boom' });
+    // Success after failure: fresh entries, marker cleared.
+    const loaded = applyFeedSettled(failed, key, 2, key, 2, { status: 'fulfilled', value: ['e1'] });
+    assert.deepEqual(loaded, { key, status: 'loaded', data: ['e1'] });
+    // Failed refresh after success: entries retained with the stale marker.
+    const stale = applyFeedSettled(loaded, key, 3, key, 3, {
+      status: 'rejected',
+      reason: new Error('boom')
+    });
+    assert.deepEqual(stale, { key, status: 'loaded', data: ['e1'], error: 'boom' });
+    // Successful retry replaces the stale result and clears the notice.
+    const recovered = applyFeedSettled(stale, key, 4, key, 4, { status: 'fulfilled', value: ['e2'] });
+    assert.deepEqual(recovered, { key, status: 'loaded', data: ['e2'] });
+    // Late or foreign responses never touch the current state.
+    assert.equal(
+      applyFeedSettled(loaded, 'other|org', 9, key, 4, { status: 'fulfilled', value: ['x'] }),
+      loaded
+    );
+    assert.equal(
+      applyFeedSettled(loaded, key, 1, key, 4, { status: 'fulfilled', value: ['x'] }),
+      loaded
+    );
+    assert.equal(
+      applyFeedSettled(loaded, key, 1, key, 4, { status: 'rejected', reason: new Error('x') }),
+      loaded
+    );
+  });
+
+  it('late feed responses from earlier contexts are discarded', () => {
+    const key = 'u-staff|org-cah';
+    const prev = { key, status: 'loading' as const, data: [] as unknown[] };
+    // Current context applies; earlier context or superseded sequence does not.
+    const applied = applyOneSettled(prev, key, 2, key, 2, { status: 'fulfilled', value: ['e1'] });
+    assert.deepEqual(applied.data, ['e1']);
+    assert.equal(
+      applyOneSettled(prev, 'u-officer|org-cah', 2, key, 2, { status: 'fulfilled', value: ['x'] }),
+      prev
+    );
+    assert.equal(
+      applyOneSettled(applied, key, 1, key, 2, { status: 'fulfilled', value: ['stale'] }),
+      applied
     );
   });
 });

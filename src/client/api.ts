@@ -1,4 +1,4 @@
-import type { AuditEvent, CapaRecord, ComplianceTask, ConcernRecord, DemoUser, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
+import type { AuditEvent, CapaRecord, ComplianceTask, ConcernRecord, DemoUser, MyUpdateEntry, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -150,5 +150,6 @@ export const api = {
   addConcernUpdate: (id: string, u: { message: string }) =>
     req<ConcernRecord>(`/api/concerns/${id}/updates`, { method: 'POST', body: JSON.stringify(u) }),
   addConcernNote: (id: string, n: { text: string }) =>
-    req<ConcernRecord>(`/api/concerns/${id}/notes`, { method: 'POST', body: JSON.stringify(n) })
+    req<ConcernRecord>(`/api/concerns/${id}/notes`, { method: 'POST', body: JSON.stringify(n) }),
+  myUpdates: (orgId: string) => req<MyUpdateEntry[]>(`/api/my-updates?orgId=${orgId}`)
 };

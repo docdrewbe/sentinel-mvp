@@ -214,6 +214,25 @@ button.primary:hover { background: var(--accent-dark); }
   margin: 4px 0 8px;
 }
 
+.updates { list-style: none; margin: 0 0 8px; padding: 0; }
+.update-entry {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.update-entry .update-title { font-weight: 600; }
+.update-entry .update-kind { color: var(--muted); font-size: 12px; }
+
+.focus-target:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .req-ok {
   color: var(--green);
   font-size: 12px;

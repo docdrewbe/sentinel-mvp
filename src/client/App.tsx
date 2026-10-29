@@ -7,12 +7,12 @@ import {
   type DocAuditFollowupPayload,
   type NewTask
 } from './api.js';
-import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONCERN_CATEGORY_LABELS, CONCERN_CLOSED_MEANING_NOTICE, CONCERN_DESCRIPTION_MAX, CONCERN_EMERGENCY_NOTICE, CONCERN_IDENTIFIED_NOTICE, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_NO_SENSITIVE_DETAILS_HINT, CONCERN_REVIEWER_ACCESS_NOTICE, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type ConcernCategory, type ConcernRecord, type ConcernStatus, type DemoUser, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
+import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONCERN_CATEGORY_LABELS, CONCERN_CLOSED_MEANING_NOTICE, CONCERN_DESCRIPTION_MAX, CONCERN_EMERGENCY_NOTICE, CONCERN_IDENTIFIED_NOTICE, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_NO_SENSITIVE_DETAILS_HINT, CONCERN_REVIEWER_ACCESS_NOTICE, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type ConcernCategory, type ConcernRecord, type ConcernStatus, type DemoUser, type MyUpdateEntry, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CONCERN_CATEGORIES, nextConcernStatus } from '../shared/concerns.js';
-import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyOneSettled, applySettled, beginContext, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isDueSoonWork, isOverdueWork, linkedCapaLine, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type FollowupPreviewRow, type PanelState, type Panels } from './dashboard.js';
+import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyFeedSettled, applyOneSettled, applySettled, auditEventDomId, beginContext, concernStatusDomId, concernUpdateDomId, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isDueSoonWork, isOverdueWork, linkedCapaLine, navFallbackNotice, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, updateNavTarget, updatesViewState, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type ConcernDetailView, type FollowupPreviewRow, type PanelState, type Panels, type UpdateNavTarget } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -43,6 +43,10 @@ export default function App(): JSX.Element {
   const [concernId, setConcernId] = useState<string | null>(null);
   const [myConcernId, setMyConcernId] = useState<string | null>(null);
   const [concernReceipt, setConcernReceipt] = useState<{ key: string; concern: ConcernRecord } | null>(null);
+  // My recent updates: personal feed panel + pending exact-target navigation.
+  const [updatesPanel, setUpdatesPanel] = useState<PanelState<MyUpdateEntry>>({ key: '', status: 'loading', data: [] });
+  const [pendingNav, setPendingNav] = useState<{ key: string; target: UpdateNavTarget } | null>(null);
+  const [navNotice, setNavNotice] = useState<{ key: string; recordId: string; message: string } | null>(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [controlFilter, setControlFilter] = useState('all');
   const [calDomain, setCalDomain] = useState('all');
@@ -88,6 +92,8 @@ export default function App(): JSX.Element {
   const myRows = panelData(myConcerns, contextKey);
   const queueReady = canAct(concernQueue, contextKey);
   const myReady = canAct(myConcerns, contextKey);
+  const updateRows = panelData(updatesPanel, contextKey);
+  const updatesView = updatesViewState(updatesPanel, contextKey);
   const canTriageHere =
     me !== null && orgId !== '' && can(me, 'concern.triage', { orgId, ownerId: '' });
   const task = tasks.find((t) => t.id === taskId) ?? null;
@@ -133,7 +139,7 @@ export default function App(): JSX.Element {
   const refresh = useCallback(async (oid: string, key: string) => {
     if (!oid) return;
     const mySeq = ++requestSeq.current;
-    const [t, d, a, tpl, c, o, cq, mc] = await Promise.allSettled([
+    const [t, d, a, tpl, c, o, cq, mc, up] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
@@ -141,7 +147,8 @@ export default function App(): JSX.Element {
       api.capas(oid),
       api.obligations(oid),
       api.concerns(oid),
-      api.myConcerns(oid)
+      api.myConcerns(oid),
+      api.myUpdates(oid)
     ]);
     setPanels((prev) =>
       applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c, o)
@@ -151,6 +158,9 @@ export default function App(): JSX.Element {
     );
     setMyConcerns((prev) =>
       applyOneSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, mc)
+    );
+    setUpdatesPanel((prev) =>
+      applyFeedSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, up)
     );
   }, []);
 
@@ -218,6 +228,10 @@ export default function App(): JSX.Element {
       setConcernReceipt(null);
       setConcernQueue({ key: nextKey, status: 'loading', data: [] });
       setMyConcerns({ key: nextKey, status: 'loading', data: [] });
+      // Feed entries and pending navigation never survive a user/org switch.
+      setUpdatesPanel({ key: nextKey, status: 'loading', data: [] });
+      setPendingNav(null);
+      setNavNotice(null);
     }
     refresh(orgId, nextKey).catch((e: Error) => setError(e.message));
   }, [userId, orgId, users, orgs, refresh, clearDocAudit]);
@@ -376,6 +390,58 @@ export default function App(): JSX.Element {
     verified: tasks.filter((t) => t.status === 'verified').length
   };
 
+  const updateStatusLabel = (entry: MyUpdateEntry): string =>
+    entry.recordKind === 'task'
+      ? (STATUS_LABELS[entry.recordStatus as TaskStatus] ?? entry.recordStatus)
+      : (CONCERN_STATUS_LABELS[entry.recordStatus as ConcernStatus] ?? entry.recordStatus);
+
+  /** Feed navigation: select the record first; the effect below focuses the exact target. */
+  const openUpdate = (entry: MyUpdateEntry): void => {
+    setNavNotice(null);
+    const target = updateNavTarget(entry);
+    if (target.recordKind === 'task') {
+      // Stale entry (record gone from this context): open nothing else.
+      if (!tasks.some((t) => t.id === target.recordId)) return;
+      setTaskId(target.recordId);
+    } else {
+      if (!myRows.some((c) => c.id === target.recordId)) return;
+      setMyConcernId(target.recordId);
+    }
+    setPendingNav({ key: contextKey, target });
+  };
+
+  const scrollToMyReports = (): void => {
+    const el = document.getElementById('my-reports-heading');
+    if (!el) return;
+    el.scrollIntoView({ block: 'start' });
+    el.focus({ preventScroll: true });
+  };
+
+  // Selection commits (render) before this effect runs, so targets resolve
+  // against the freshly rendered detail. First available candidate wins;
+  // unavailable targets clear silently without opening another record.
+  // A heading landing (no exact target in the loaded window) raises the
+  // outside-history notice in the detail panel.
+  useEffect(() => {
+    if (!pendingNav) return;
+    if (pendingNav.key !== contextKey) {
+      setPendingNav(null);
+      return;
+    }
+    const target = pendingNav.target;
+    const el = target.focusIds
+      .map((id) => document.getElementById(id))
+      .find((node): node is HTMLElement => node !== null) ?? null;
+    setPendingNav(null);
+    const notice = navFallbackNotice(el ? el.id : null, target.focusIds);
+    setNavNotice(notice ? { key: contextKey, recordId: target.recordId, message: notice } : null);
+    if (!el) return;
+    // R-4: fallback landings center the heading so the explanation above it
+    // is visible too; exact targets keep minimal scrolling.
+    el.scrollIntoView({ block: notice ? 'center' : 'nearest' });
+    el.focus({ preventScroll: true });
+  }, [pendingNav, contextKey, taskId, myConcernId]);
+
   const recordTrail = task ? audit.filter((e) => e.recordId === task.id) : [];
   const capaTrail = capa ? audit.filter((e) => e.recordId === capa.id) : [];
   const queueConcernTrail = queueConcern ? audit.filter((e) => e.recordId === queueConcern.id) : [];
@@ -449,6 +515,34 @@ export default function App(): JSX.Element {
           <Stat label="Verified" value={tasksReady ? stats.verified : '—'} tone="green" />
         </section>
 
+        <section className="panel" aria-label="My recent updates">
+          <div className="panel-head">
+            <h3>My recent updates</h3>
+          </div>
+          <PanelNotice panel={updatesPanel} contextKey={contextKey} name="recent updates" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+          {updatesView === 'empty' && <p className="empty">No updates yet.</p>}
+          {updatesView === 'empty-stale' && <p className="empty">No updates were found at the last successful check.</p>}
+          {updatesView === 'list' && (
+            <ol className="updates">
+              {updateRows.map((entry) => (
+                <li key={`${entry.recordKind}-${entry.recordId}-${entry.seq}`}>
+                  <button type="button" className="update-entry" onClick={() => openUpdate(entry)}>
+                    <span className="update-title">{entry.recordTitle}</span>{' '}
+                    <span className="update-kind">{entry.recordKind === 'task' ? 'Task' : 'Report'}</span>{' '}
+                    <span className="status">{updateStatusLabel(entry)}</span>
+                    <div className="trail-detail">
+                      {entry.description} · {new Date(entry.timestamp).toLocaleString()}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )}
+          <p>
+            <button type="button" onClick={scrollToMyReports}>View my reports</button>
+          </p>
+        </section>
+
         <section className="panel">
           <div className="panel-head">
             <h3>Compliance calendar (illustrative targets — org-selected, not legal mandates)</h3>
@@ -489,7 +583,7 @@ export default function App(): JSX.Element {
             </thead>
             <tbody>
               {calendarTasks.map((t) => (
-                <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => setTaskId(t.id)}>
+                <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => { setNavNotice(null); setTaskId(t.id); }}>
                   <td className={isOverdue(t, today) ? 'overdue' : ''}>{t.dueDate}</td>
                   <td className="task-title">{t.title}</td>
                   <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
@@ -619,7 +713,7 @@ export default function App(): JSX.Element {
               </thead>
               <tbody>
                 {filtered.map((t) => (
-                  <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => setTaskId(t.id)}>
+                  <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => { setNavNotice(null); setTaskId(t.id); }}>
                     <td className="task-title">{t.title}</td>
                     <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
                     <td>{userName.get(t.ownerId) ?? '—'}</td>
@@ -640,8 +734,13 @@ export default function App(): JSX.Element {
           </div>
 
           <div className="detail panel">
+            {navNotice && navNotice.key === contextKey && task && navNotice.recordId === task.id && (
+              <p className="notice" role="status">
+                {navNotice.message} <button type="button" onClick={() => setNavNotice(null)}>Dismiss</button>
+              </p>
+            )}
             <div className="panel-head">
-              <h3>Task detail</h3>
+              <h3 id="task-detail-heading" tabIndex={-1} className="focus-target">Task detail</h3>
             </div>
             {!task && <p className="empty">Select a task to review evidence, custody, and history.</p>}
             {task && me && (
@@ -734,10 +833,10 @@ export default function App(): JSX.Element {
                   </p>
                 )}
                 <h5>Record history (append-only)</h5>
-                {recordTrail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
+                {recordTrail.length === 0 && <p className="empty">No events for this record in the loaded history.</p>}
                 <ol className="trail">
                   {recordTrail.map((e) => (
-                    <li key={e.id}>
+                    <li key={e.id} id={auditEventDomId('task', e.seq)} tabIndex={-1} className="focus-target">
                       <code>#{e.seq}</code> {e.action} · {userName.get(e.actorId) ?? e.actorId} ·{' '}
                       {new Date(e.timestamp).toLocaleString()}
                       <div className="trail-detail">{e.detail}</div>
@@ -847,7 +946,7 @@ export default function App(): JSX.Element {
         <section className="columns">
           <div className="tasklist panel">
             <div className="panel-head">
-              <h3>My reports</h3>
+              <h3 id="my-reports-heading" tabIndex={-1} className="focus-target">My reports</h3>
             </div>
             <p className="notice">{CONCERN_IDENTIFIED_NOTICE}</p>
             <PanelNotice panel={myConcerns} contextKey={contextKey} name="reports" orgName={org?.name ?? 'this organization'} onRetry={retry} />
@@ -861,7 +960,7 @@ export default function App(): JSX.Element {
               </thead>
               <tbody>
                 {myRows.map((c) => (
-                  <tr key={c.id} className={c.id === myConcernId ? 'selected' : ''} onClick={() => setMyConcernId(c.id)}>
+                  <tr key={c.id} className={c.id === myConcernId ? 'selected' : ''} onClick={() => { setNavNotice(null); setMyConcernId(c.id); }}>
                     <td className="task-title">{c.title.length > 60 ? `${c.title.slice(0, 60)}…` : c.title}</td>
                     <td>{CONCERN_CATEGORY_LABELS[c.category]}</td>
                     <td>
@@ -879,13 +978,19 @@ export default function App(): JSX.Element {
           </div>
 
           <div className="detail panel">
+            {navNotice && navNotice.key === contextKey && myConcern && navNotice.recordId === myConcern.id && (
+              <p className="notice" role="status">
+                {navNotice.message} <button type="button" onClick={() => setNavNotice(null)}>Dismiss</button>
+              </p>
+            )}
             <div className="panel-head">
-              <h3>My report detail</h3>
+              <h3 id="my-concern-detail-heading" tabIndex={-1} className="focus-target">My report detail</h3>
             </div>
             {!myConcern && <p className="empty">Select one of your reports to follow its status and updates.</p>}
             {myConcern && me && (
               <ConcernDetail
                 key={myConcern.id}
+                viewId="mine"
                 concern={myConcern}
                 ready={myReady}
                 triage={false}
@@ -942,6 +1047,7 @@ export default function App(): JSX.Element {
               {queueConcern && me && (
                 <ConcernDetail
                   key={queueConcern.id}
+                  viewId="queue"
                   concern={queueConcern}
                   ready={queueReady}
                   triage
@@ -1191,7 +1297,7 @@ function ConcernReceipt({ concern, onDone }: { concern: ConcernRecord; onDone: (
   );
 }
 
-function ConcernDetail({ concern, ready, triage, userName, capas, trail, assignees, onAdvance, onAssign, onLink, onUnlink, onUpdate, onNote }: {
+function ConcernDetail({ concern, ready, triage, userName, capas, trail, assignees, viewId, onAdvance, onAssign, onLink, onUnlink, onUpdate, onNote }: {
   concern: ConcernRecord;
   ready: boolean;
   triage: boolean;
@@ -1199,6 +1305,8 @@ function ConcernDetail({ concern, ready, triage, userName, capas, trail, assigne
   capas: CapaRecord[];
   trail: AuditEvent[];
   assignees: DemoUser[];
+  /** Which detail rendering this is; scopes focus-target ids so both views never share one. */
+  viewId: ConcernDetailView;
   onAdvance?: (status: ConcernStatus, closingMessage?: string) => void;
   onAssign?: (assigneeId: string) => void;
   onLink?: (capaId: string) => void;
@@ -1233,7 +1341,7 @@ function ConcernDetail({ concern, ready, triage, userName, capas, trail, assigne
       {concern.updates.length === 0 && <p className="empty">No updates yet.</p>}
       <ol className="trail">
         {concern.updates.map((u) => (
-          <li key={u.seq}>
+          <li key={u.seq} id={concernUpdateDomId(viewId, u.seq)} tabIndex={-1} className="focus-target">
             {u.kind === 'closing' ? 'Closing explanation' : 'Update'} · {userName.get(u.byUserId) ?? u.byUserId} ·{' '}
             {new Date(u.at).toLocaleString()}
             <div className="trail-detail">{u.message}</div>
@@ -1257,7 +1365,7 @@ function ConcernDetail({ concern, ready, triage, userName, capas, trail, assigne
       <h5>Status history</h5>
       <ol className="trail">
         {concern.statusHistory.map((s, i) => (
-          <li key={`${s.status}-${i}`}>
+          <li key={`${s.status}-${i}`} id={concernStatusDomId(viewId, i)} tabIndex={-1} className="focus-target">
             {CONCERN_STATUS_LABELS[s.status]} · {userName.get(s.byUserId) ?? s.byUserId} ·{' '}
             {new Date(s.at).toLocaleString()}
           </li>
@@ -1277,10 +1385,10 @@ function ConcernDetail({ concern, ready, triage, userName, capas, trail, assigne
         </>
       )}
       <h5>Record history (append-only)</h5>
-      {trail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
+      {trail.length === 0 && <p className="empty">No events for this record in the loaded history.</p>}
       <ol className="trail">
         {trail.map((e) => (
-          <li key={e.id}>
+          <li key={e.id} id={auditEventDomId(viewId, e.seq)} tabIndex={-1} className="focus-target">
             <code>#{e.seq}</code> {e.action} · {userName.get(e.actorId) ?? e.actorId} ·{' '}
             {new Date(e.timestamp).toLocaleString()}
             <div className="trail-detail">{e.detail}</div>
@@ -1673,7 +1781,7 @@ function CapaDetail({ me, capa, ready, userName, domainName, linkedTaskTitle, tr
         <TransferForm evidence={capa.evidence} onTransfer={onTransfer} />
       )}
       <h5>Record history (append-only)</h5>
-      {trail.length === 0 && <p className="empty">No audit events for this record yet.</p>}
+      {trail.length === 0 && <p className="empty">No events for this record in the loaded history.</p>}
       <ol className="trail">
         {trail.map((e) => (
           <li key={e.id}>
