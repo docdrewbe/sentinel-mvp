@@ -25,7 +25,8 @@ export type Action =
   | 'docaudit.run'
   | 'docaudit.followup'
   | 'concern.create'
-  | 'concern.triage';
+  | 'concern.triage'
+  | 'notice.manage';
 
 /**
  * DEMO PRIVILEGE (explicit): administrators and compliance officers have

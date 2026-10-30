@@ -28,6 +28,7 @@ import type {
   EvidenceRef,
   EvidenceRequirement,
   MyUpdateEntry,
+  NoticeRecord,
   Organization,
   RecurrenceFrequency,
   RecurringObligation,
@@ -55,6 +56,9 @@ export interface DbShape {
   obligations: RecurringObligation[];
   /** Staff concern reports (slice 1). Additive: older databases lack this key. */
   concerns: ConcernRecord[];
+  /** Manually pasted safety notices. Absent in legacy databases, which
+   * load with [] via the spread in loadDb (no migration, no save). */
+  notices: NoticeRecord[];
   audit: AuditEvent[];
   /**
    * Phase 2: follow-up idempotency records. Typed as unknown because
@@ -64,6 +68,13 @@ export interface DbShape {
    * untouched. Additive only — version stays 1.
    */
   docauditKeys: unknown;
+  /**
+   * Notice follow-up idempotency records. Same verbatim round-trip rule
+   * as docauditKeys: only a validated array is ever used (see
+   * noticeKeysHealth), and whatever was stored round-trips through
+   * unrelated writes untouched. Additive only — version stays 1.
+   */
+  noticeFollowupKeys: unknown;
 }
 
 export class ValidationError extends Error {}
@@ -76,7 +87,7 @@ export function dataFilePath(): string {
 }
 
 export function emptyDb(): DbShape {
-  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], concerns: [], audit: [], docauditKeys: [] };
+  return { version: 1, orgs: [], domains: [], users: [], tasks: [], templates: [], capas: [], obligations: [], concerns: [], notices: [], audit: [], docauditKeys: [], noticeFollowupKeys: [] };
 }
 
 let lastStamp = '';
@@ -110,6 +121,19 @@ function hasFollowupTasks(tasks: unknown): boolean {
   );
 }
 
+/**
+ * Notice-slice legacy probe: true when any task carries a notice link.
+ * Defensive against corrupt task entries (never throws), since loadDb
+ * must not crash on malformed data.
+ */
+function hasNoticeTasks(tasks: unknown): boolean {
+  if (!Array.isArray(tasks)) return false;
+  return tasks.some(
+    (t: unknown) =>
+      typeof t === 'object' && t !== null && (t as Record<string, unknown>).noticeId !== undefined
+  );
+}
+
 export function loadDb(): DbShape {
   const file = dataFilePath();
   if (!existsSync(file)) return emptyDb();
@@ -125,6 +149,13 @@ export function loadDb(): DbShape {
   // byte-for-byte and the follow-ups endpoint judges health per request.
   if (!('docauditKeys' in raw)) {
     db.docauditKeys = hasFollowupTasks(db.tasks) ? undefined : [];
+  }
+  // Notices: same legacy rule for the follow-up key collection — a
+  // genuine legacy database (absent AND no notice-linked tasks) defaults
+  // to [], while any other unusual state keeps its stored value verbatim
+  // for the per-request health gate to judge.
+  if (!('noticeFollowupKeys' in raw)) {
+    db.noticeFollowupKeys = hasNoticeTasks(db.tasks) ? undefined : [];
   }
   backfillAuditOrgIds(db);
   // CAL3: organizations stored before time zones keep the pre-CAL3

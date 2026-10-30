@@ -79,6 +79,12 @@ export interface ComplianceTask {
   obligationId?: string;
   /** Recurrence period covered (week/month/quarter/year key, or 'once'). */
   periodKey?: string;
+  /**
+   * Source safety notice, when created as a notice follow-up. Set only by
+   * the dedicated follow-up endpoint; immutable after creation. The notice
+   * derives its task list from this link (no duplicate arrays).
+   */
+  noticeId?: string;
   title: string;
   ownerId: string;
   /** ISO calendar date (YYYY-MM-DD). */
@@ -509,6 +515,68 @@ export const CONCERN_NO_SENSITIVE_DETAILS_HINT =
   'Describe the situation only — do not include patient names or other sensitive personal details.';
 export const CONCERN_CLOSED_MEANING_NOTICE =
   'Closing a concern means the reporting workflow ended. It does not establish that a hazard was fixed, that a CAPA is closed, or that effectiveness was verified.';
+
+/** Safety-notice applicability states (slice 1: one decision, final). */
+export type NoticeStatus = 'needs_review' | 'applicable' | 'not_applicable';
+
+/**
+ * One manually pasted synthetic safety notice. Source material (source,
+ * title, noticeDate, text) is immutable once saved in this slice; the
+ * reviewer records exactly one applicability decision with rationale.
+ * No automated discovery, fetching, or verdicts: every field is human
+ * supplied and human reviewed.
+ */
+export interface NoticeRecord {
+  id: string;
+  orgId: string;
+  /** Intake user; server-set from simulated auth, never from clients. */
+  createdBy: string;
+  /** Human-supplied source label/reference (free text, never fetched). */
+  source: string;
+  title: string;
+  /** Notice date as stated on the source (ISO calendar date). */
+  noticeDate: string;
+  /** Pasted synthetic notice text, verbatim. Rendered as plain text. */
+  text: string;
+  status: NoticeStatus;
+  /** Required reviewer rationale for BOTH decisions. */
+  rationale?: string;
+  /** Reviewer and decision time; set exactly once with the decision. */
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const NOTICE_STATUS_LABELS: Record<NoticeStatus, string> = {
+  needs_review: 'Needs review',
+  applicable: 'Applicable',
+  not_applicable: 'Not applicable'
+};
+
+/** Slice-1 input length limits (server-enforced; the form mirrors them). */
+export const NOTICE_SOURCE_MAX = 120;
+export const NOTICE_TITLE_MAX = 200;
+export const NOTICE_TEXT_MAX = 4000;
+export const NOTICE_RATIONALE_MAX = 1000;
+
+/** Slice-1 reviewer notices (exact approved wording). */
+export const NOTICE_FINALITY_NOTICE =
+  'Applicability decisions are final in this slice: they cannot be changed, reopened, or deleted after confirmation.';
+export const NOTICE_APPLICABLE_MEANING_NOTICE =
+  'Applicable means a human reviewer judged this notice relevant. Linked task states are shown for tracking only; they do not prove every instruction in the notice was addressed.';
+export const NOTICE_SYNTHETIC_NOTICE =
+  'Paste synthetic text only. No web addresses are fetched; record the source as a written label.';
+
+/** One persisted idempotency record for notice follow-up creation. */
+export interface NoticeFollowupKeyRecord {
+  key: string;
+  actorId: string;
+  orgId: string;
+  taskId: string;
+  contentHash: string;
+  createdAt: string;
+}
 
 export const KIND_LABELS: Record<OrgKind, string> = {
   hospital: 'Hospital',

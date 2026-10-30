@@ -1,4 +1,4 @@
-import type { AuditEvent, CapaRecord, ComplianceTask, ConcernRecord, DemoUser, MyUpdateEntry, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
+import type { AuditEvent, CapaRecord, ComplianceTask, ConcernRecord, DemoUser, MyUpdateEntry, NoticeRecord, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -105,6 +105,35 @@ export interface DocAuditFollowupResult {
   duplicate: boolean;
 }
 
+// Safety-notice wire shapes (slice 1; the server re-validates everything).
+
+export interface NewNotice {
+  orgId: string;
+  source: string;
+  title: string;
+  noticeDate: string;
+  text: string;
+}
+
+export interface NoticeReviewPatch {
+  status: 'applicable' | 'not_applicable';
+  rationale: string;
+}
+
+export interface NoticeFollowupPayload {
+  idempotencyKey: string;
+  orgId: string;
+  domainId: string;
+  title: string;
+  ownerId: string;
+  dueDate: string;
+}
+
+export interface NoticeFollowupResult {
+  task: ComplianceTask;
+  duplicate: boolean;
+}
+
 export const api = {
   orgs: () => req<Organization[]>('/api/orgs'),
   users: () => req<DemoUser[]>('/api/users'),
@@ -151,5 +180,12 @@ export const api = {
     req<ConcernRecord>(`/api/concerns/${id}/updates`, { method: 'POST', body: JSON.stringify(u) }),
   addConcernNote: (id: string, n: { text: string }) =>
     req<ConcernRecord>(`/api/concerns/${id}/notes`, { method: 'POST', body: JSON.stringify(n) }),
+  notices: (orgId: string) => req<NoticeRecord[]>(`/api/notices?orgId=${orgId}`),
+  createNotice: (n: NewNotice) =>
+    req<NoticeRecord>('/api/notices', { method: 'POST', body: JSON.stringify(n) }),
+  patchNotice: (id: string, patch: NoticeReviewPatch) =>
+    req<NoticeRecord>(`/api/notices/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  createNoticeFollowup: (id: string, body: NoticeFollowupPayload) =>
+    req<NoticeFollowupResult>(`/api/notices/${id}/followups`, { method: 'POST', body: JSON.stringify(body) }),
   myUpdates: (orgId: string) => req<MyUpdateEntry[]>(`/api/my-updates?orgId=${orgId}`)
 };

@@ -51,6 +51,16 @@ import {
   validateFollowupInput,
   validateProviderOutput
 } from './docaudit.js';
+import {
+  NOTICE_FOLLOWUPS_UNAVAILABLE,
+  NOTICE_FOLLOWUPS_UNAVAILABLE_CODE,
+  NOTICE_IDEMPOTENCY_CONFLICT,
+  NoticeFollowupsUnavailable,
+  noticeKeysHealth,
+  validateNoticeFollowup,
+  validateNoticeIntake,
+  validateNoticeReview
+} from './notices.js';
 import { requiredEvidenceCount } from '../shared/evidence.js';
 import {
   capaGateMissing,
@@ -60,7 +70,7 @@ import {
   qualifyingEffectivenessEvidence
 } from '../shared/capa.js';
 import { ineligibleVerifiers, missingSubmissionHistory, noEligibleVerifier } from '../shared/verification.js';
-import type { CapaRecord, CapaStatus, ComplianceTask, ConcernRecord, ConcernStatus, DemoUser } from '../shared/types.js';
+import type { CapaRecord, CapaStatus, ComplianceTask, ConcernRecord, ConcernStatus, DemoUser, NoticeRecord } from '../shared/types.js';
 import { CAPA_CLOSE_SOD_MESSAGE, CAPA_NO_ELIGIBLE_REVIEWER_MESSAGE, NO_ELIGIBLE_VERIFIER_MESSAGE, SEPARATION_OF_DUTIES_MESSAGE, SUBMITTER_UNKNOWN_MESSAGE, SYSTEM_AUDIT_ORG, UNKNOWN_AUDIT_ORG } from '../shared/types.js';
 
 export interface AuthRequest extends Request {
@@ -102,6 +112,12 @@ function sendError(req: Request, res: Response, e: unknown): void {
   // so they answer directly without touching the error log.
   if (e instanceof ProviderError) {
     res.status(e.status).json({ error: e.message });
+    return;
+  }
+  // Unusable follow-up key storage (including a retained record whose
+  // task is gone): fixed 503, no writes, no repair, no error-log line.
+  if (e instanceof NoticeFollowupsUnavailable) {
+    res.status(503).json({ error: NOTICE_FOLLOWUPS_UNAVAILABLE, code: NOTICE_FOLLOWUPS_UNAVAILABLE_CODE });
     return;
   }
   console.error(errorLogLine('error.route.unexpected', req));
@@ -1468,6 +1484,209 @@ export function createApp(db: DbShape): express.Express {
         return next;
       });
       res.json(presentConcern(user, updated, false));
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // Slice-1 safety notices: manually pasted synthetic notices with one
+  // final human applicability decision and explicitly created follow-up
+  // tasks. No fetching, no automation, no verdicts. Staff read within
+  // their org; intake/review/follow-ups need notice.manage (manager+).
+  app.get('/api/notices', (req: AuthRequest, res) => {
+    const scope = readScope(req, res);
+    if (!scope) return;
+    res.json(db.notices.filter((n) => scope.includes(n.orgId)));
+  });
+
+  app.post('/api/notices', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const input = req.body as { orgId: string };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'notice.manage');
+      return;
+    }
+    if (!can(user, 'notice.manage', { orgId: input.orgId, ownerId: '' })) {
+      forbidden(res, user, 'notice.manage');
+      return;
+    }
+    if (!db.orgs.some((o) => o.id === input.orgId)) {
+      res.status(400).json({ error: 'Unknown organization.' });
+      return;
+    }
+    if (rejectBadText(res, req.body, ['orgId', 'source', 'title', 'noticeDate', 'text'])) {
+      return;
+    }
+    try {
+      const clean = validateNoticeIntake(req.body);
+      const created = mutateDb(db, () => {
+        const now = new Date().toISOString();
+        const notice: NoticeRecord = {
+          id: randomUUID(),
+          orgId: clean.orgId,
+          createdBy: user.id,
+          source: clean.source,
+          title: clean.title,
+          noticeDate: clean.noticeDate,
+          text: clean.text,
+          status: 'needs_review',
+          createdAt: now,
+          updatedAt: now
+        };
+        db.notices.push(notice);
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'notice.created',
+          recordType: 'notice',
+          recordId: notice.id,
+          orgId: notice.orgId,
+          detail: notice.title
+        });
+        return notice;
+      });
+      res.status(201).json(created);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  app.patch('/api/notices/:id', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const notice = db.notices.find((n) => n.id === req.params.id);
+    if (!notice) {
+      res.status(404).json({ error: 'Notice not found.' });
+      return;
+    }
+    if ((user.role === 'department_manager' || user.role === 'staff') && notice.orgId !== user.orgId) {
+      forbidden(res, user, 'notice.manage');
+      return;
+    }
+    if (!can(user, 'notice.manage', { orgId: notice.orgId, ownerId: '' })) {
+      forbidden(res, user, 'notice.manage');
+      return;
+    }
+    if (
+      rejectBadText(res, req.body, ['status', 'rationale', 'source', 'title', 'noticeDate', 'text'])
+    ) {
+      return;
+    }
+    try {
+      const clean = validateNoticeReview(req.body, notice);
+      const updated = mutateDb(db, () => {
+        const now = new Date().toISOString();
+        notice.status = clean.status;
+        notice.rationale = clean.rationale;
+        notice.reviewedBy = user.id;
+        notice.reviewedAt = now;
+        notice.updatedAt = now;
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'notice.reviewed',
+          recordType: 'notice',
+          recordId: notice.id,
+          orgId: notice.orgId,
+          detail: `needs_review -> ${clean.status}`
+        });
+        return notice;
+      });
+      res.json(updated);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // Notice follow-ups: ordinary tasks carrying the authoritative
+  // task.noticeId link, created only from applicable notices. Human
+  // enters every task field; the persisted idempotency pattern mirrors
+  // the docaudit follow-up endpoint (same actor/org/key/payload retry
+  // returns the original task, conflicting payload answers 409).
+  // Needs no provider. Ordinary POST /api/tasks is untouched.
+  app.post('/api/notices/:id/followups', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    const notice = db.notices.find((n) => n.id === req.params.id);
+    if (!notice) {
+      res.status(404).json({ error: 'Notice not found.' });
+      return;
+    }
+    if ((user.role === 'department_manager' || user.role === 'staff') && notice.orgId !== user.orgId) {
+      forbidden(res, user, 'notice.manage');
+      return;
+    }
+    if (!can(user, 'notice.manage', { orgId: notice.orgId, ownerId: '' })) {
+      forbidden(res, user, 'notice.manage');
+      return;
+    }
+    if (
+      rejectBadText(res, req.body, ['orgId', 'domainId', 'title', 'ownerId', 'dueDate', 'idempotencyKey'])
+    ) {
+      return;
+    }
+    const keysHealth = noticeKeysHealth(db);
+    if (!keysHealth.ok) {
+      res.status(503).json({ error: NOTICE_FOLLOWUPS_UNAVAILABLE, code: NOTICE_FOLLOWUPS_UNAVAILABLE_CODE });
+      return;
+    }
+    const keys = keysHealth.keys;
+    try {
+      const clean = validateNoticeFollowup(req.body, notice);
+      const scopeMatch = (r: { key: string; actorId: string; orgId: string }): boolean =>
+        r.key === clean.key && r.actorId === user.id && r.orgId === clean.orgId;
+      const recorded = keys.find(scopeMatch);
+      if (recorded) {
+        if (recorded.contentHash !== clean.contentHash) {
+          res.status(409).json({ error: NOTICE_IDEMPOTENCY_CONFLICT });
+          return;
+        }
+        const original = db.tasks.find((t) => t.id === recorded.taskId);
+        if (!original) throw new NoticeFollowupsUnavailable();
+        res.json({ task: presentTask(original), duplicate: true });
+        return;
+      }
+      let replayed = false;
+      const task = mutateDb(db, () => {
+        const raced = keys.find(scopeMatch);
+        if (raced) {
+          if (raced.contentHash !== clean.contentHash) throw new ConflictError(NOTICE_IDEMPOTENCY_CONFLICT);
+          const original = db.tasks.find((t) => t.id === raced.taskId);
+          if (!original) throw new NoticeFollowupsUnavailable();
+          replayed = true;
+          return original;
+        }
+        const created = createTask(db, {
+          orgId: clean.orgId,
+          domainId: clean.domainId,
+          title: clean.title,
+          ownerId: clean.ownerId,
+          dueDate: clean.dueDate
+        });
+        created.noticeId = notice.id;
+        keys.push({
+          key: clean.key,
+          actorId: user.id,
+          orgId: clean.orgId,
+          taskId: created.id,
+          contentHash: clean.contentHash,
+          createdAt: created.createdAt
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'task.created',
+          recordType: 'task',
+          recordId: created.id,
+          orgId: created.orgId,
+          detail: created.title
+        });
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'notice.followup.created',
+          recordType: 'notice',
+          recordId: notice.id,
+          orgId: notice.orgId,
+          detail: `Follow-up task for notice ${notice.id}`
+        });
+        return created;
+      });
+      res.status(replayed ? 200 : 201).json({ task: presentTask(task), duplicate: replayed });
     } catch (e) {
       sendError(req, res, e);
     }

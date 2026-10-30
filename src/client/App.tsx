@@ -5,9 +5,11 @@ import {
   type DocAuditCompareResult,
   type DocAuditFinding,
   type DocAuditFollowupPayload,
-  type NewTask
+  type NewNotice,
+  type NewTask,
+  type NoticeFollowupPayload
 } from './api.js';
-import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONCERN_CATEGORY_LABELS, CONCERN_CLOSED_MEANING_NOTICE, CONCERN_DESCRIPTION_MAX, CONCERN_EMERGENCY_NOTICE, CONCERN_IDENTIFIED_NOTICE, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_NO_SENSITIVE_DETAILS_HINT, CONCERN_REVIEWER_ACCESS_NOTICE, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, CONTROL_LABELS, KIND_LABELS, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type ConcernCategory, type ConcernRecord, type ConcernStatus, type DemoUser, type MyUpdateEntry, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
+import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONCERN_CATEGORY_LABELS, CONCERN_CLOSED_MEANING_NOTICE, CONCERN_DESCRIPTION_MAX, CONCERN_EMERGENCY_NOTICE, CONCERN_IDENTIFIED_NOTICE, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_NO_SENSITIVE_DETAILS_HINT, CONCERN_REVIEWER_ACCESS_NOTICE, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, CONTROL_LABELS, KIND_LABELS, NOTICE_APPLICABLE_MEANING_NOTICE, NOTICE_FINALITY_NOTICE, NOTICE_RATIONALE_MAX, NOTICE_SOURCE_MAX, NOTICE_STATUS_LABELS, NOTICE_SYNTHETIC_NOTICE, NOTICE_TEXT_MAX, NOTICE_TITLE_MAX, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type ConcernCategory, type ConcernRecord, type ConcernStatus, type DemoUser, type MyUpdateEntry, type NoticeRecord, type NoticeStatus, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
@@ -64,6 +66,15 @@ export default function App(): JSX.Element {
   const [concernId, setConcernId] = useState<string | null>(null);
   const [myConcernId, setMyConcernId] = useState<string | null>(null);
   const [concernReceipt, setConcernReceipt] = useState<{ key: string; concern: ConcernRecord } | null>(null);
+  // Slice-1 safety notices: org-scoped list + selected detail, context-keyed
+  // like the concern panels. All readers in the org may view; intake,
+  // review, and follow-up creation need notice.manage (manager+).
+  const [noticePanel, setNoticePanel] = useState<PanelState<NoticeRecord>>({ key: '', status: 'loading', data: [] });
+  const [noticeId, setNoticeId] = useState<string | null>(null);
+  const [showNoticeIntake, setShowNoticeIntake] = useState(false);
+  // N-2: every intake opening is a distinct instance; only its own
+  // completed submission may close it (R-2, like the task forms).
+  const noticeIntakeSeq = useRef(0);
   // My recent updates: personal feed panel + pending exact-target navigation.
   const [updatesPanel, setUpdatesPanel] = useState<PanelState<MyUpdateEntry>>({ key: '', status: 'loading', data: [] });
   const [pendingNav, setPendingNav] = useState<{ key: string; target: UpdateNavTarget } | null>(null);
@@ -124,6 +135,11 @@ export default function App(): JSX.Element {
   const myRows = panelData(myConcerns, contextKey);
   const queueReady = canAct(concernQueue, contextKey);
   const myReady = canAct(myConcerns, contextKey);
+  const noticeRows = panelData(noticePanel, contextKey);
+  const noticesReady = canAct(noticePanel, contextKey);
+  const selectedNotice = noticeRows.find((n) => n.id === noticeId) ?? null;
+  const canNoticeManage =
+    me !== null && orgId !== '' && can(me, 'notice.manage', { orgId, ownerId: '' });
   const updateRows = panelData(updatesPanel, contextKey);
   const updatesView = updatesViewState(updatesPanel, contextKey);
   const canTriageHere =
@@ -171,7 +187,7 @@ export default function App(): JSX.Element {
   const refresh = useCallback(async (oid: string, key: string) => {
     if (!oid) return;
     const mySeq = ++requestSeq.current;
-    const [t, d, a, tpl, c, o, cq, mc, up] = await Promise.allSettled([
+    const [t, d, a, tpl, c, o, cq, mc, up, nt] = await Promise.allSettled([
       api.tasks(oid),
       api.domains(oid),
       api.audit(200),
@@ -180,7 +196,8 @@ export default function App(): JSX.Element {
       api.obligations(oid),
       api.concerns(oid),
       api.myConcerns(oid),
-      api.myUpdates(oid)
+      api.myUpdates(oid),
+      api.notices(oid)
     ]);
     setPanels((prev) =>
       applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c, o)
@@ -200,6 +217,9 @@ export default function App(): JSX.Element {
     );
     setUpdatesPanel((prev) =>
       applyFeedSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, up)
+    );
+    setNoticePanel((prev) =>
+      applyOneSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, nt)
     );
   }, []);
 
@@ -267,6 +287,10 @@ export default function App(): JSX.Element {
       setConcernReceipt(null);
       setConcernQueue({ key: nextKey, status: 'loading', data: [] });
       setMyConcerns({ key: nextKey, status: 'loading', data: [] });
+      // Notice selection, intake draft, and rows never survive a user/org switch.
+      setNoticeId(null);
+      setShowNoticeIntake(false);
+      setNoticePanel({ key: nextKey, status: 'loading', data: [] });
       // Feed entries and pending navigation never survive a user/org switch.
       setUpdatesPanel({ key: nextKey, status: 'loading', data: [] });
       setPendingNav(null);
@@ -1016,6 +1040,23 @@ export default function App(): JSX.Element {
                   {task.obligationId && (
                     <div><dt>Obligation</dt><dd>Due period {task.periodKey ?? '—'} (recurring schedule)</dd></div>
                   )}
+                  {task.noticeId && (
+                    <div><dt>Notice</dt><dd>
+                      <TaskNoticeLink
+                        noticeId={task.noticeId}
+                        noticesReady={noticesReady}
+                        noticesError={noticePanel.key === contextKey && (noticePanel.status === 'error' || noticePanel.error !== undefined)}
+                        noticeTitle={noticeRows.find((n) => n.id === task.noticeId)?.title ?? null}
+                        onOpen={(id) => {
+                          setNoticeId(id);
+                          const el = document.getElementById('notice-detail-heading');
+                          el?.scrollIntoView({ block: 'start' });
+                          el?.focus({ preventScroll: true });
+                        }}
+                        onRetry={retry}
+                      />
+                    </dd></div>
+                  )}
                   <div><dt>Owner</dt><dd>{userName.get(task.ownerId) ?? '—'}</dd></div>
                   {task.submittedBy && (
                     <div><dt>Submitted by</dt><dd>{userName.get(task.submittedBy) ?? task.submittedBy}</dd></div>
@@ -1344,6 +1385,102 @@ export default function App(): JSX.Element {
             </div>
           </section>
         )}
+
+        <section className="columns">
+          <div className="tasklist panel">
+            <div className="panel-head">
+              <h3>Safety notices (synthetic — manually pasted, human reviewed)</h3>
+              {canNoticeManage && (
+                <div className="panel-actions">
+                  <button
+                    onClick={() => {
+                      if (!showNoticeIntake) noticeIntakeSeq.current += 1;
+                      setShowNoticeIntake((v) => !v);
+                    }}
+                    disabled={!noticesReady}
+                  >
+                    {showNoticeIntake ? 'Cancel intake' : 'Record notice'}
+                  </button>
+                </div>
+              )}
+            </div>
+            <PanelNotice panel={noticePanel} contextKey={contextKey} name="notices" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+            {showNoticeIntake && canNoticeManage && me && (
+              <NoticeIntakeForm
+                key={noticeIntakeSeq.current}
+                orgId={orgId}
+                onSubmit={(n) => {
+                  const formSeq = noticeIntakeSeq.current;
+                  return run(async () => api.createNotice(n)).then((o) => {
+                    if (shouldCloseFormOnCompletion(o, formSeq, noticeIntakeSeq.current)) {
+                      setShowNoticeIntake(false);
+                    }
+                  });
+                }}
+                onCancel={() => setShowNoticeIntake(false)}
+              />
+            )}
+            {noticesReady && noticeRows.length === 0 && (
+              <p className="empty">No safety notices recorded in this organization yet.</p>
+            )}
+            {noticeRows.length > 0 && (
+              <table>
+                <thead>
+                  <tr><th>Title</th><th>Source</th><th>Date</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                  {noticeRows.map((n) => (
+                    <tr key={n.id} className={n.id === noticeId ? 'selected' : ''} onClick={() => setNoticeId(n.id)}>
+                      <td><button type="button" className="notice-rowlink" onClick={() => setNoticeId(n.id)} aria-label={`Open notice ${n.title}`}>{n.title}</button></td>
+                      <td>{n.source}</td>
+                      <td>{n.noticeDate}</td>
+                      <td>{NOTICE_STATUS_LABELS[n.status]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="detail panel">
+            <div className="panel-head">
+              <h3 id="notice-detail-heading" tabIndex={-1} className="focus-target">Notice detail</h3>
+            </div>
+            {!selectedNotice && <p className="empty">Select a notice to review its applicability or follow-up tasks.</p>}
+            {selectedNotice && me && (
+              <NoticeDetail
+                key={selectedNotice.id}
+                notice={selectedNotice}
+                tasks={tasks}
+                domains={domains}
+                users={orgUsers}
+                timeZone={org?.timeZone ?? 'UTC'}
+                userName={userName}
+                canManage={canNoticeManage}
+                ready={noticesReady && tasksReady}
+                onReview={(status, rationale) =>
+                  run(async () => api.patchNotice(selectedNotice.id, { status, rationale }))
+                }
+                onFollowup={async (payload) => {
+                  const box: { r: { task: ComplianceTask; duplicate: boolean } | null } = { r: null };
+                  const outcome = await run(async () => {
+                    box.r = await api.createNoticeFollowup(selectedNotice.id, payload);
+                  });
+                  if (outcome !== 'completed' || box.r === null) {
+                    return { ok: false as const, duplicate: false, taskId: '' };
+                  }
+                  return { ok: true as const, duplicate: box.r.duplicate, taskId: box.r.task.id };
+                }}
+                onOpenTask={(id) => {
+                  openTaskFromOutside(id);
+                  const el = document.getElementById('task-detail-heading');
+                  el?.scrollIntoView({ block: 'start' });
+                  el?.focus({ preventScroll: true });
+                }}
+              />
+            )}
+          </div>
+        </section>
 
         <section className="panel">
           <div className="panel-head">
@@ -2394,6 +2531,347 @@ function InstantiateForm({ template, timeZone, users, formKey, onSubmit }: { tem
       <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required />
       <button className="primary" type="submit" disabled={submitting}>{submitting ? 'Creating task…' : 'Create task'}</button>
     </form>
+  );
+}
+
+/**
+ * N-5: the task-to-notice link is honest about every backing state. Only
+ * a notice found in the current context's server-scoped rows is named
+ * and opened; loading, failure, and missing targets say so instead of
+ * landing on an unexplained prompt. Retry re-runs the normal refresh.
+ */
+function TaskNoticeLink({ noticeId, noticesReady, noticesError, noticeTitle, onOpen, onRetry }: {
+  noticeId: string;
+  noticesReady: boolean;
+  noticesError: boolean;
+  noticeTitle: string | null;
+  onOpen: (id: string) => void;
+  onRetry: () => void;
+}): JSX.Element {
+  if (!noticesReady) {
+    if (noticesError) {
+      return (
+        <span>Safety notice (couldn't load notices) <button type="button" onClick={onRetry}>Retry</button></span>
+      );
+    }
+    return <span>Safety notice (loading…)</span>;
+  }
+  if (noticeTitle === null) {
+    return (
+      <span>Safety notice (unavailable) <button type="button" onClick={onRetry}>Retry</button></span>
+    );
+  }
+  return <button type="button" onClick={() => onOpen(noticeId)}>{noticeTitle}</button>;
+}
+
+function NoticeIntakeForm({ orgId, onSubmit, onCancel }: { orgId: string; onSubmit: (n: NewNotice) => Promise<unknown>; onCancel: () => void }): JSX.Element {
+  const [source, setSource] = useState('');
+  const [title, setTitle] = useState('');
+  const [noticeDate, setNoticeDate] = useState('');
+  const [text, setText] = useState('');
+  // D-1 style: synchronous in-flight guard plus pending UI. Success closes
+  // (unmount); failure restores with the draft intact.
+  const guardRef = useRef<SubmitGuard>({ inFlightFor: null });
+  const [submitting, setSubmitting] = useState(false);
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!tryBeginSubmit(guardRef.current, 1)) return;
+        setSubmitting(true);
+        const settle = (): void => {
+          if (guardRef.current.inFlightFor !== 1) return;
+          endSubmit(guardRef.current, 1);
+          setSubmitting(false);
+        };
+        onSubmit({ orgId, source, title, noticeDate, text }).then(settle, settle);
+      }}
+    >
+      <p className="empty">{NOTICE_SYNTHETIC_NOTICE}</p>
+      <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="Source label" aria-label="Source label" maxLength={NOTICE_SOURCE_MAX} required />
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Notice title" aria-label="Notice title" maxLength={NOTICE_TITLE_MAX} required />
+      <input type="date" value={noticeDate} onChange={(e) => setNoticeDate(e.target.value)} aria-label="Notice date" required />
+      <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Pasted notice text (synthetic only)" aria-label="Notice text" rows={4} maxLength={NOTICE_TEXT_MAX} required />
+      <div className="panel-actions">
+        <button className="primary" type="submit" disabled={submitting}>{submitting ? 'Recording…' : 'Record notice'}</button>
+        <button type="button" onClick={onCancel}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+function NoticeFollowupForm({ orgId, noticeId, timeZone, domains, users, onSubmit, onCreated }: {
+  orgId: string;
+  noticeId: string;
+  timeZone: string;
+  domains: RegulatoryDomain[];
+  users: DemoUser[];
+  onSubmit: (payload: NoticeFollowupPayload) => Promise<{ ok: boolean; duplicate: boolean; taskId: string; seq: number }>;
+  onCreated: (info: { taskId: string; title: string; duplicate: boolean }, submitSeq: number) => void;
+}): JSX.Element {
+  const [title, setTitle] = useState('');
+  const [domainId, setDomainId] = useState(domains[0]?.id ?? '');
+  const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
+  const [dueDate, setDueDate] = useState(orgToday(timeZone));
+  const [preview, setPreview] = useState<{ payload: NoticeFollowupPayload; key: string } | null>(null);
+  const [previewError, setPreviewError] = useState('');
+  const guardRef = useRef<SubmitGuard>({ inFlightFor: null });
+  const [submitting, setSubmitting] = useState(false);
+  // N-1: the first domain fills an empty choice exactly once (the initial
+  // list completing). Afterwards a valid choice survives every refresh —
+  // only an id that left the list clears, never an identity change.
+  const domainInit = useRef(domains.length > 0);
+  useEffect(() => {
+    if (domains.length === 0) return;
+    if (!domainInit.current) {
+      domainInit.current = true;
+      setDomainId(domains[0].id);
+      return;
+    }
+    setDomainId((prev) => retainSelection(prev, domains));
+  }, [domains]);
+  // O-1: keep a valid chosen owner across renders; only an id that left
+  // the list clears (the confirm then requires a pick).
+  useEffect(() => {
+    setOwnerId((prev) => retainSelection(prev, users));
+  }, [users]);
+  // Any draft edit closes the preview so confirmation always matches it.
+  const touch = (): void => setPreview(null);
+  // A select reset to '' (its id left the list) also invalidates the
+  // preview: confirmation must be rebuilt, never silently substituted.
+  const prevSelects = useRef({ domainId, ownerId });
+  useEffect(() => {
+    const prev = prevSelects.current;
+    if ((prev.domainId !== '' && domainId === '') || (prev.ownerId !== '' && ownerId === '')) {
+      setPreview(null);
+    }
+    prevSelects.current = { domainId, ownerId };
+  }, [domainId, ownerId]);
+  // N-1: the preview renders the exact frozen payload that Confirm sends
+  // (names looked up by the payload ids), including notice and key.
+  const previewDomain = preview === null ? undefined : domains.find((d) => d.id === preview.payload.domainId);
+  const previewOwner = preview === null ? undefined : users.find((u) => u.id === preview.payload.ownerId);
+  const openPreview = (): void => {
+    if (!title.trim() || !domainId || !ownerId || !isValidIsoDate(dueDate)) {
+      setPreviewError('Title, domain, owner, and a real calendar due date are required.');
+      setPreview(null);
+      return;
+    }
+    setPreviewError('');
+    // One key per preview: a retry after failure reuses it, so the server
+    // answers with the original task instead of a duplicate.
+    setPreview({
+      payload: { idempotencyKey: '', orgId, domainId, title: title.trim(), ownerId, dueDate },
+      key: crypto.randomUUID()
+    });
+  };
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (preview === null) {
+          openPreview();
+          return;
+        }
+        if (!tryBeginSubmit(guardRef.current, 1)) return;
+        setSubmitting(true);
+        const payload: NoticeFollowupPayload = { ...preview.payload, idempotencyKey: preview.key };
+        const settle = (ok: boolean, duplicate: boolean, taskId: string, submitSeq: number): void => {
+          if (guardRef.current.inFlightFor !== 1) return;
+          endSubmit(guardRef.current, 1);
+          setSubmitting(false);
+          // Success remounts this form (parent instance key): the next
+          // follow-up starts with a fresh guard and empty draft. The seq
+          // lets the parent ignore completions for older instances (N-3).
+          if (ok) onCreated({ taskId, title: payload.title, duplicate }, submitSeq);
+        };
+        onSubmit(payload).then(
+          (r) => settle(r.ok, r.duplicate, r.taskId, r.seq),
+          () => settle(false, false, '', -1)
+        );
+      }}
+    >
+      <input value={title} onChange={(e) => { setTitle(e.target.value); touch(); }} placeholder="Follow-up task title" aria-label="Follow-up task title" maxLength={200} required />
+      <select value={domainId} onChange={(e) => { setDomainId(e.target.value); touch(); }} aria-label="Regulatory domain" required>
+        {domainId === '' && <option value="">Select a domain</option>}
+        {domains.map((d) => (
+          <option key={d.id} value={d.id}>{d.code} — {d.name}</option>
+        ))}
+      </select>
+      {domainId === '' && domains.length > 0 && (
+        <p className="panel-error" role="alert">The selected domain is no longer available — choose a domain before confirming.</p>
+      )}
+      <select value={ownerId} onChange={(e) => { setOwnerId(e.target.value); touch(); }} aria-label="Owner" required>
+        {ownerId === '' && <option value="">Select an owner</option>}
+        {users.map((u) => (
+          <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
+        ))}
+      </select>
+      {ownerId === '' && users.length > 0 && (
+        <p className="panel-error" role="alert">The selected owner is no longer available — choose an owner before confirming.</p>
+      )}
+      <input type="date" value={dueDate} onChange={(e) => { setDueDate(e.target.value); touch(); }} aria-label="Due date" required />
+      {previewError !== '' && <p className="panel-error" role="alert">{previewError}</p>}
+      {preview !== null && (
+        <dl className="meta">
+          <div><dt>Title</dt><dd>{preview.payload.title}</dd></div>
+          <div><dt>Domain</dt><dd>{previewDomain ? `${previewDomain.code} — ${previewDomain.name}` : preview.payload.domainId}</dd></div>
+          <div><dt>Owner</dt><dd>{previewOwner ? `${previewOwner.name} (${ROLE_LABELS[previewOwner.role]})` : preview.payload.ownerId}</dd></div>
+          <div><dt>Due</dt><dd>{preview.payload.dueDate}</dd></div>
+          <div><dt>Notice</dt><dd>{noticeId}</dd></div>
+          <div><dt>Key</dt><dd>{preview.key}</dd></div>
+        </dl>
+      )}
+      <button className="primary" type="submit" disabled={submitting}>
+        {submitting ? 'Creating task…' : preview === null ? 'Preview follow-up' : 'Confirm follow-up'}
+      </button>
+    </form>
+  );
+}
+
+function NoticeDetail({ notice, tasks, domains, users, timeZone, userName, canManage, ready, onReview, onFollowup, onOpenTask }: {
+  notice: NoticeRecord;
+  tasks: ComplianceTask[];
+  domains: RegulatoryDomain[];
+  users: DemoUser[];
+  timeZone: string;
+  userName: Map<string, string>;
+  canManage: boolean;
+  ready: boolean;
+  onReview: (status: 'applicable' | 'not_applicable', rationale: string) => Promise<unknown>;
+  onFollowup: (payload: NoticeFollowupPayload) => Promise<{ ok: boolean; duplicate: boolean; taskId: string }>;
+  onOpenTask: (taskId: string) => void;
+}): JSX.Element {
+  // The notice's task list derives from the authoritative task.noticeId
+  // link — no duplicate arrays are maintained.
+  const linked = tasks.filter((t) => t.noticeId === notice.id);
+  const [decision, setDecision] = useState<'' | 'applicable' | 'not_applicable'>('');
+  const [rationale, setRationale] = useState('');
+  const [reviewing, setReviewing] = useState(false);
+  const [showFollowup, setShowFollowup] = useState(false);
+  // N-3: every follow-up form opening is a distinct instance. Completions
+  // carry the submit-time key; only the current instance may show its
+  // note or remount, so a late completion can never wipe a newer draft.
+  const [followupKey, setFollowupKey] = useState(0);
+  const followupKeyRef = useRef(0);
+  const [createdNote, setCreatedNote] = useState<{ taskId: string; title: string; duplicate: boolean } | null>(null);
+  const reviewGuardRef = useRef<SubmitGuard>({ inFlightFor: null });
+  const decided = notice.status !== 'needs_review';
+  const reviewReady = decision !== '' && rationale.trim() !== '' && ready && !reviewing;
+  return (
+    <>
+      <h4>{notice.title}</h4>
+      <dl className="meta">
+        <div><dt>Source</dt><dd>{notice.source}</dd></div>
+        <div><dt>Notice date</dt><dd>{notice.noticeDate}</dd></div>
+        <div><dt>Status</dt><dd>{NOTICE_STATUS_LABELS[notice.status]}</dd></div>
+        <div><dt>Recorded by</dt><dd>{userName.get(notice.createdBy) ?? notice.createdBy}</dd></div>
+        {decided && (
+          <div><dt>Reviewed by</dt><dd>{userName.get(notice.reviewedBy ?? '') ?? notice.reviewedBy}{notice.reviewedAt ? ` · ${new Date(notice.reviewedAt).toLocaleString()}` : ''}</dd></div>
+        )}
+      </dl>
+      <blockquote className="doca-quote notice-text">{notice.text}</blockquote>
+      {decided && notice.rationale !== undefined && (
+        <>
+          <h5>Review rationale</h5>
+          <p>{notice.rationale}</p>
+        </>
+      )}
+      {!decided && canManage && (
+        <form
+          className="form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (decision === '' || rationale.trim() === '') return;
+            if (!tryBeginSubmit(reviewGuardRef.current, 1)) return;
+            setReviewing(true);
+            const settle = (): void => {
+              if (reviewGuardRef.current.inFlightFor !== 1) return;
+              endSubmit(reviewGuardRef.current, 1);
+              setReviewing(false);
+            };
+            onReview(decision, rationale.trim()).then(settle, settle);
+          }}
+        >
+          <p className="empty">{NOTICE_FINALITY_NOTICE}</p>
+          <fieldset>
+            <legend>Applicability decision (final)</legend>
+            <label className="doca-option">
+              <input type="radio" name={`notice-decision-${notice.id}`} checked={decision === 'applicable'} disabled={!ready} onChange={() => setDecision('applicable')} />
+              <span>Applicable</span>
+            </label>
+            <label className="doca-option">
+              <input type="radio" name={`notice-decision-${notice.id}`} checked={decision === 'not_applicable'} disabled={!ready} onChange={() => setDecision('not_applicable')} />
+              <span>Not applicable</span>
+            </label>
+          </fieldset>
+          <textarea value={rationale} onChange={(e) => setRationale(e.target.value)} placeholder="Rationale (required for either decision)" aria-label="Review rationale" rows={3} maxLength={NOTICE_RATIONALE_MAX} required />
+          <button className="primary" type="submit" disabled={!reviewReady}>{reviewing ? 'Recording…' : 'Record final decision'}</button>
+        </form>
+      )}
+      {notice.status === 'applicable' && (
+        <>
+          <p className="empty">{NOTICE_APPLICABLE_MEANING_NOTICE}</p>
+          <h5>Linked follow-up tasks ({linked.length})</h5>
+          {linked.length === 0 && <p className="empty">No follow-up tasks yet.</p>}
+          {linked.length > 0 && (
+            <ul>
+              {linked.map((t) => (
+                <li key={t.id}>
+                  <button onClick={() => onOpenTask(t.id)}>{t.title}</button>
+                  {' — '}{STATUS_LABELS[t.status]}
+                </li>
+              ))}
+            </ul>
+          )}
+          {createdNote !== null && (
+            <p role="status">
+              Follow-up task created: {createdNote.title} (<code>{createdNote.taskId.slice(0, 8)}</code>)
+              {createdNote.duplicate ? ' — this retry reused the original task.' : '.'}
+            </p>
+          )}
+          {canManage && (
+            <div className="panel-actions">
+              <button
+                onClick={() => {
+                  if (!showFollowup) {
+                    followupKeyRef.current += 1;
+                    setFollowupKey(followupKeyRef.current);
+                  }
+                  setShowFollowup((v) => !v);
+                }}
+                disabled={!ready}
+              >
+                {showFollowup ? 'Cancel follow-up' : 'New follow-up task'}
+              </button>
+            </div>
+          )}
+          {showFollowup && canManage && (
+            <NoticeFollowupForm
+              key={followupKey}
+              orgId={notice.orgId}
+              noticeId={notice.id}
+              timeZone={timeZone}
+              domains={domains}
+              users={users}
+              onSubmit={async (payload) => {
+                const submitSeq = followupKeyRef.current;
+                const r = await onFollowup(payload);
+                return { ...r, seq: submitSeq };
+              }}
+              onCreated={(info, submitSeq) => {
+                if (submitSeq !== followupKeyRef.current) return;
+                setCreatedNote(info);
+                followupKeyRef.current += 1;
+                setFollowupKey(followupKeyRef.current);
+              }}
+            />
+          )}
+        </>
+      )}
+    </>
   );
 }
 

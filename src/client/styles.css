@@ -332,6 +332,22 @@ footer {
   border-left: 3px solid var(--accent);
   background: #f4f8f7;
 }
+/* N-7: pasted notice text keeps its line breaks (plain text only — React
+ * escapes the content; this only affects wrapping). Scoped to notices;
+ * docaudit quotes are unchanged. */
+.notice-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Notice-list records are keyboard-operable buttons with visible focus. */
+.notice-rowlink {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--blue);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.notice-rowlink:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .doca-passage fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
 .doca-passage legend { font-weight: 600; }
 .doca-option { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
