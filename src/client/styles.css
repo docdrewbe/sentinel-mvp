@@ -348,6 +348,9 @@ footer {
   text-align: left;
 }
 .notice-rowlink:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Evidence shortcut below the task title; target heading uses .focus-target. */
+.evidence-jump { margin: 0 0 8px; }
+.evidence-jump:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .doca-passage fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
 .doca-passage legend { font-weight: 600; }
 .doca-option { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }

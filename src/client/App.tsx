@@ -1032,6 +1032,22 @@ export default function App(): JSX.Element {
             {task && me && (
               <>
                 <h4>{task.title}</h4>
+                {tasksReady && task.evidence.length > 0 && (
+                  <button
+                    type="button"
+                    className="evidence-jump"
+                    onClick={() => {
+                      const el = document.getElementById('task-evidence-heading');
+                      el?.scrollIntoView({ block: 'start' });
+                      el?.focus({ preventScroll: true });
+                    }}
+                  >
+                    View evidence ({task.evidence.length})
+                  </button>
+                )}
+                {tasksReady && task.evidence.length === 0 && (
+                  <p className="empty">No evidence recorded.</p>
+                )}
                 <dl className="meta">
                   <div><dt>Domain</dt><dd>{domainById.get(task.domainId)?.name ?? '—'}</dd></div>
                   {task.templateId && (
@@ -1088,8 +1104,8 @@ export default function App(): JSX.Element {
                       lockNoteId={taskLockNoteId ?? undefined}
                       onChange={(status: TaskStatus) => run(async () => api.patchTask(task.id, { status }))}
                     />
-                    <h5>Evidence & chain of custody ({task.evidence.length})</h5>
-                    {task.evidence.length === 0 && <p className="empty">No evidence attached yet.</p>}
+                    <h5 id="task-evidence-heading" tabIndex={-1} className="focus-target">Evidence & chain of custody ({task.evidence.length})</h5>
+                    {task.evidence.length === 0 && <p className="empty">No evidence recorded.</p>}
                     <ul className="evidence">
                       {task.evidence.map((e) => (
                         <li key={e.id} className="evidence-item">
