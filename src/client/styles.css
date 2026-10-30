@@ -96,6 +96,37 @@ main { padding: 18px 20px 8px; max-width: 1280px; width: 100%; margin: 0 auto; }
 .stat-amber { border-top-color: #d9930d; }
 .stat-red { border-top-color: var(--red); }
 .stat-green { border-top-color: var(--green); }
+/* Interactive summary cards: the stat is a real button; the preview toggle
+   is its sibling, never nested. */
+button.stat { text-align: left; color: inherit; cursor: pointer; }
+button.stat:disabled { cursor: default; opacity: 0.7; }
+.stat-active { outline: 2px solid var(--blue); outline-offset: 1px; }
+.stat-cell { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.stat-preview-toggle { font-size: 12px; padding: 2px 6px; align-self: flex-start; }
+.stat-preview-toggle:disabled { cursor: default; opacity: 0.7; }
+.stat-preview {
+  position: absolute; top: 100%; left: 0; z-index: 30;
+  min-width: 220px; max-width: 320px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  padding: 8px 10px; font-size: 13px;
+}
+/* F-1: the popover touches the cell (no gap), so the pointer travels from
+   the card into this child element without firing the cell's mouseleave. */
+/* F-7: pinned previews lay out inline — they push content instead of
+   covering other cards, and always fit the viewport width. */
+.stat-preview-pinned { position: static; min-width: 0; max-width: none; box-shadow: none; }
+@media (max-width: 980px) {
+  .stat-preview { min-width: 0; max-width: min(320px, calc(100vw - 16px)); }
+  .stat-cell:nth-child(even) .stat-preview { left: auto; right: 0; }
+}
+.stat-preview ol { margin: 0 0 6px; padding-left: 20px; }
+.stat-preview p { margin: 4px 0; }
+.stat-preview .hint { color: var(--muted); font-size: 12px; }
+.filter-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; }
+button.stat:focus-visible, .stat-preview-toggle:focus-visible, .filter-bar button:focus-visible {
+  outline: 2px solid var(--blue); outline-offset: 2px;
+}
 
 .columns { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; margin-bottom: 12px; }
 @media (max-width: 980px) { .columns { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); } }

@@ -570,6 +570,288 @@ export function isDueSoonWork(
   return calendarBucket(task, todayISODate) === 'dueSoon';
 }
 
+// ---------------------------------------------------------------------------
+// Interactive summary cards: one matcher source for counts, preview
+// membership, and filtered rows, so the three can never disagree.
+// ---------------------------------------------------------------------------
+
+/** Summary-card keys; each doubles as its task-status filter value. */
+export type StatKey = 'open' | 'in_progress' | 'dueSoon' | 'overdue' | 'verified';
+
+export const STAT_KEYS: StatKey[] = ['open', 'in_progress', 'dueSoon', 'overdue', 'verified'];
+
+/** Human labels for cards, previews, and the active-filter bar. */
+export const STAT_LABELS: Record<StatKey, string> = {
+  open: 'Open',
+  in_progress: 'In progress',
+  dueSoon: 'Due within 7 days',
+  overdue: 'Overdue',
+  verified: 'Verified'
+};
+
+/** F-6: display labels for every filter value, including dropdown-only ones. */
+export const FILTER_LABELS: Record<string, string> = {
+  all: 'All',
+  submitted: 'Submitted',
+  ...STAT_LABELS
+};
+
+/** Unique preview-region id for a card (always mounted; see O-2). */
+export function statPreviewRegionId(stat: StatKey): string {
+  return `stat-preview-${stat}`;
+}
+
+/** Unique Preview-toggle id for a card (Escape focus restore target). */
+export function statPreviewToggleId(stat: StatKey): string {
+  return `stat-preview-toggle-${stat}`;
+}
+
+/**
+ * F-2: toggle id for a preview-region id, or null unless the region id is
+ * well-formed. Escape restores focus to the toggle only on a match;
+ * anything else leaves focus where it is.
+ */
+export function previewToggleIdForRegion(regionId: string): string | null {
+  const m = /^stat-preview-(.+)$/.exec(regionId);
+  if (!m || !(STAT_KEYS as string[]).includes(m[1])) return null;
+  return statPreviewToggleId(m[1] as StatKey);
+}
+
+/** Active-filter bar visibility: current data, or retained rows marked stale. */
+export interface FilterBarState {
+  visible: boolean;
+  stale: boolean;
+}
+
+/**
+ * O-1: the filter bar shows for an active filter on current data; retained
+ * rows after a refresh failure keep their label, flagged stale. Loading
+ * or failed-without-data shows no bar — never a masquerading zero.
+ */
+export function filterBarState(
+  statusFilter: string,
+  tasksReady: boolean,
+  hasTasks: boolean
+): FilterBarState {
+  if (statusFilter === 'all' || (!tasksReady && !hasTasks)) return { visible: false, stale: false };
+  return { visible: true, stale: !tasksReady };
+}
+
+/**
+ * F-5/N-2: whether a task selection survives reconciliation against the
+ * active filter and the current dataset. No selection, or loading/failure
+ * (not ready), always survives — only a loaded selection outside the
+ * filter is cleared. Calendar/feed navigation resets the filter to All
+ * in the same batch as selecting, so the new selection always survives.
+ */
+export function selectionSurvivesReconcile(
+  taskId: string | null,
+  tasks: CardTask[],
+  statusFilter: string,
+  todayISODate: string,
+  tasksReady: boolean
+): boolean {
+  if (taskId === null || !tasksReady) return true;
+  return tasks.some((t) => t.id === taskId && statusFilterMatches(statusFilter, t, todayISODate));
+}
+
+/** Pending creation-selection decision: none, wait, select, unavailable, cancelled. */
+export type PendingCreationOutcome = 'none' | 'wait' | 'select' | 'unavailable' | 'cancelled';
+
+/** Creation intent: the click's sequence plus the context it belongs to. */
+export interface CreationIntent {
+  key: string;
+  seq: number;
+}
+
+/** Pending creation: context-bound id plus the load bound. */
+export interface PendingCreation {
+  key: string;
+  id: string;
+  /** Resolve only against loads with a request seq above this bound. */
+  afterSeq: number;
+}
+
+/**
+ * S-1: a creation response is superseded unless its click sequence is
+ * still current. Every newer selection, navigation, filter action, and
+ * context switch bumps the live counter, so a late response for an
+ * abandoned intent refreshes data only — no filter reset, no selection,
+ * no navigation error.
+ */
+export function creationResponseSuperseded(clickSeq: number, currentSeq: number): boolean {
+  return clickSeq !== currentSeq;
+}
+
+/**
+ * P-2: an async completion is obsolete unless its originating context
+ * generation is current. Key equality alone would revive away-and-back
+ * operations; the generation bump on every switch never matches again.
+ * Obsolete completions must not refresh, mutate counters or state, or
+ * report errors into the current context.
+ */
+export function contextOpObsolete(opGen: number, currentGen: number): boolean {
+  return opGen !== currentGen;
+}
+
+/**
+ * O-1: preserve a valid dropdown selection across list refreshes. The
+ * previous id survives when still present — a new array identity alone
+ * never resets it — and clears to '' (never to another entry) when the
+ * id left the list, so the form shows an explicit empty choice instead
+ * of silently substituting someone else.
+ */
+export function retainSelection<T extends { id: string }>(prevId: string, items: T[]): string {
+  return items.some((item) => item.id === prevId) ? prevId : '';
+}
+
+/** run() completion: success in the originating context, failure, or obsolete. */
+export type RunOutcome = 'completed' | 'failed' | 'obsolete';
+
+/**
+ * R-2: a form closes only on successful completion for its own instance.
+ * Failures keep the form/draft with their error; obsolete completions
+ * and newer instances never close. Swallowed errors are never success.
+ */
+export function shouldCloseFormOnCompletion(
+  outcome: RunOutcome,
+  submitSeq: number,
+  currentSeq: number
+): boolean {
+  return outcome === 'completed' && submitSeq === currentSeq;
+}
+
+/** D-1: in-flight submit guard state for one form mount. */
+export type SubmitGuard = { inFlightFor: number | null };
+
+/**
+ * D-1: claim the guard for a submit. The first call for an instance wins
+ * synchronously — before any rerender — so rapid clicks or Enter cannot
+ * issue a second request. A newer instance key always wins, so an old
+ * completion can never keep a newer instance locked. This is an in-flight
+ * duplicate guard, not a claim of server-side idempotency.
+ */
+export function tryBeginSubmit(guard: SubmitGuard, formKey: number): boolean {
+  if (guard.inFlightFor !== null && guard.inFlightFor === formKey) return false;
+  guard.inFlightFor = formKey;
+  return true;
+}
+
+/**
+ * D-1: release the guard when a submit settles, but only when the
+ * settling key is still current. A late completion for a superseded
+ * instance is a no-op: it never unlocks or alters a newer instance.
+ */
+export function endSubmit(guard: SubmitGuard, formKey: number): void {
+  if (guard.inFlightFor === formKey) guard.inFlightFor = null;
+}
+
+/**
+ * N-3/N-4/§5ay: resolve a pending creation selection. "Same context and
+ * loaded" is insufficient: the id resolves only against a successful
+ * task load whose request STARTED after the creation response
+ * (appliedTasksSeq > afterSeq). Older snapshots and older in-flight
+ * responses stay 'wait' — they never declare the task unavailable.
+ * Failed loads also wait with their honest reporting. The first
+ * qualifying load selects the task when present, reports it unavailable
+ * when absent, or cancels on a context mismatch.
+ */
+export function resolvePendingCreation(
+  pending: PendingCreation | null,
+  contextKey: string,
+  tasksReady: boolean,
+  appliedTasksSeq: number | null,
+  taskPresent: boolean
+): PendingCreationOutcome {
+  if (!pending) return 'none';
+  if (pending.key !== contextKey) return 'cancelled';
+  if (!tasksReady || appliedTasksSeq === null || appliedTasksSeq <= pending.afterSeq) return 'wait';
+  return taskPresent ? 'select' : 'unavailable';
+}
+
+/**
+ * P-1: the template a "New task" form may render: the target's template
+ * from the CURRENT context's loaded templates, or null when the target
+ * is unset, belongs to another context, or is not loaded. Render-time
+ * guard — an effect clearing after render cannot prevent the crash.
+ */
+export function resolveInstantiateTemplate<T extends Pick<TaskTemplate, 'id'>>(
+  target: { key: string; templateId: string } | null,
+  contextKey: string,
+  templates: T[]
+): T | null {
+  if (!target || target.key !== contextKey) return null;
+  return templates.find((t) => t.id === target.templateId) ?? null;
+}
+
+/** Fixed preview size; no setting. */
+export const STAT_PREVIEW_SIZE = 3;
+
+/**
+ * Whether a task belongs to a summary card as of an org-local `today`.
+ * Status cards match exact status; due/overdue reuse the shared bucket
+ * predicates with their submitted/verified exclusions and civil window.
+ */
+export function statMatches(
+  stat: StatKey,
+  task: Pick<ComplianceTask, 'dueDate' | 'status'>,
+  todayISODate: string
+): boolean {
+  if (stat === 'dueSoon') return isDueSoonWork(task, todayISODate);
+  if (stat === 'overdue') return isOverdueWork(task, todayISODate);
+  return task.status === stat;
+}
+
+/**
+ * Status-filter predicate shared by the dropdown and card activation.
+ * 'all' keeps everything; the five card keys reuse `statMatches` so the
+ * dropdown and the cards can never disagree. Other values (e.g. the
+ * dropdown-only 'submitted') keep the pre-existing exact-status behavior.
+ */
+export function statusFilterMatches(
+  statusFilter: string,
+  task: Pick<ComplianceTask, 'dueDate' | 'status'>,
+  todayISODate: string
+): boolean {
+  if (statusFilter === 'all') return true;
+  if (
+    statusFilter === 'open' ||
+    statusFilter === 'in_progress' ||
+    statusFilter === 'dueSoon' ||
+    statusFilter === 'overdue' ||
+    statusFilter === 'verified'
+  ) {
+    return statMatches(statusFilter, task, todayISODate);
+  }
+  return task.status === statusFilter;
+}
+
+/** Minimal task shape for card matching, ordering, and previews. */
+export type CardTask = Pick<ComplianceTask, 'id' | 'title' | 'dueDate' | 'status'>;
+
+/** Tasks for a summary card, in load order (counts and filter results). */
+export function statTasks(stat: StatKey, tasks: CardTask[], todayISODate: string): CardTask[] {
+  return tasks.filter((t) => statMatches(stat, t, todayISODate));
+}
+
+/**
+ * Preview order: due date ascending, then title under an explicit 'en'
+ * collation (consistent across browsers — never the default locale), then
+ * stable id. Deterministic; ties can never shuffle between renders.
+ */
+export function compareTasksForPreview(a: CardTask, b: CardTask): number {
+  if (a.dueDate !== b.dueDate) return a.dueDate < b.dueDate ? -1 : 1;
+  const title = a.title.localeCompare(b.title, 'en');
+  if (title !== 0) return title;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
+}
+
+/** Up-to-three preview rows for a summary card, in preview order. */
+export function statPreviewTasks(stat: StatKey, tasks: CardTask[], todayISODate: string): CardTask[] {
+  return statTasks(stat, tasks, todayISODate).sort(compareTasksForPreview).slice(0, STAT_PREVIEW_SIZE);
+}
+
 /** Task action label: returning a submitted task to in-progress reads as a send-back. */
 export function startButtonLabel(task: Pick<ComplianceTask, 'status'>): string {
   return task.status === 'submitted' ? 'Send back' : 'Start';

@@ -45,6 +45,28 @@ import {
   settlePanels,
   startBlockReason,
   startButtonLabel,
+  compareTasksForPreview,
+  contextOpObsolete,
+  creationResponseSuperseded,
+  FILTER_LABELS,
+  filterBarState,
+  resolveInstantiateTemplate,
+  resolvePendingCreation,
+  retainSelection,
+  selectionSurvivesReconcile,
+  shouldCloseFormOnCompletion,
+  endSubmit,
+  tryBeginSubmit,
+  previewToggleIdForRegion,
+  STAT_KEYS,
+  STAT_LABELS,
+  STAT_PREVIEW_SIZE,
+  statMatches,
+  statPreviewRegionId,
+  statPreviewTasks,
+  statPreviewToggleId,
+  statTasks,
+  statusFilterMatches,
   submitBlockReason,
   submitStatusReason,
   triageUsersFor,
@@ -62,6 +84,7 @@ import {
   FOLLOWUPS_UNAVAILABLE_CODE
 } from '../../server/docaudit.js';
 import type { CapaRecord, CapaStatus, ComplianceTask, DemoUser, Organization } from '../../shared/types.js';
+import type { CardTask, StatKey } from '../dashboard.js';
 
 const orgs: Organization[] = [
   { id: 'org-cah', name: 'Hospital', kind: 'hospital', beds: 25, location: 'x', timeZone: 'America/Chicago', createdAt: 't' },
@@ -1190,5 +1213,422 @@ describe('concern panels (slice 1)', () => {
       applyOneSettled(applied, key, 1, key, 2, { status: 'fulfilled', value: ['stale'] }),
       applied
     );
+  });
+});
+
+describe('summary card matching', () => {
+  const today = '2026-10-29';
+  const cardTask = (over: Partial<CardTask> & { id: string }): CardTask => ({
+    title: over.id,
+    dueDate: '2026-10-29',
+    status: 'open',
+    ...over
+  });
+  // One fixture exercising every status, the civil-window edges, and the
+  // submitted/verified exclusions from due/overdue membership.
+  const fixture: CardTask[] = [
+    cardTask({ id: 'o-past', dueDate: '2026-10-28' }),
+    cardTask({ id: 'o-today', dueDate: '2026-10-29' }),
+    cardTask({ id: 'o-edge', dueDate: '2026-11-05' }),
+    cardTask({ id: 'o-late', dueDate: '2026-11-06' }),
+    cardTask({ id: 'p-past', status: 'in_progress', dueDate: '2026-10-01' }),
+    cardTask({ id: 'p-soon', status: 'in_progress', dueDate: '2026-10-30' }),
+    cardTask({ id: 's-soon', status: 'submitted', dueDate: '2026-10-30' }),
+    cardTask({ id: 's-past', status: 'submitted', dueDate: '2026-10-01' }),
+    cardTask({ id: 'v-past', status: 'verified', dueDate: '2026-10-01' }),
+    cardTask({ id: 'v-any', status: 'verified', dueDate: '2026-12-01' })
+  ];
+
+  it('uses one matcher for counts, previews, and filtered rows', () => {
+    assert.deepEqual(STAT_KEYS, ['open', 'in_progress', 'dueSoon', 'overdue', 'verified']);
+    for (const stat of STAT_KEYS) {
+      assert.equal(typeof STAT_LABELS[stat], 'string');
+      // Card membership and dropdown/filtered membership are identical.
+      assert.deepEqual(
+        fixture.filter((t) => statusFilterMatches(stat, t, today)),
+        statTasks(stat, fixture, today)
+      );
+      // The preview pool is a prefix of the same membership, never more.
+      const preview = statPreviewTasks(stat, fixture, today);
+      assert.ok(preview.length <= STAT_PREVIEW_SIZE);
+      assert.ok(preview.every((t) => statMatches(stat, t, today)));
+    }
+    assert.deepEqual(
+      statTasks('open', fixture, today).map((t) => t.id),
+      ['o-past', 'o-today', 'o-edge', 'o-late']
+    );
+    assert.deepEqual(
+      statTasks('dueSoon', fixture, today).map((t) => t.id),
+      ['o-today', 'o-edge', 'p-soon']
+    );
+    assert.deepEqual(
+      statTasks('overdue', fixture, today).map((t) => t.id),
+      ['o-past', 'p-past']
+    );
+  });
+
+  it('preserves date boundaries and submitted/verified exclusions', () => {
+    // Window edges: today and today+7 are in, today+8 is out, yesterday is out.
+    assert.equal(statMatches('dueSoon', cardTask({ id: 'a', dueDate: '2026-10-29' }), today), true);
+    assert.equal(statMatches('dueSoon', cardTask({ id: 'b', dueDate: '2026-11-05' }), today), true);
+    assert.equal(statMatches('dueSoon', cardTask({ id: 'c', dueDate: '2026-11-06' }), today), false);
+    assert.equal(statMatches('dueSoon', cardTask({ id: 'd', dueDate: '2026-10-28' }), today), false);
+    assert.equal(statMatches('overdue', cardTask({ id: 'e', dueDate: '2026-10-28' }), today), true);
+    assert.equal(statMatches('overdue', cardTask({ id: 'f', dueDate: '2026-10-29' }), today), false);
+    // Submitted and verified work never lands on due/overdue cards.
+    const submittedSoon = cardTask({ id: 'g', status: 'submitted', dueDate: '2026-10-30' });
+    const submittedPast = cardTask({ id: 'h', status: 'submitted', dueDate: '2026-10-01' });
+    const verifiedPast = cardTask({ id: 'i', status: 'verified', dueDate: '2026-10-01' });
+    for (const t of [submittedSoon, submittedPast, verifiedPast]) {
+      assert.equal(statMatches('dueSoon', t, today), false);
+      assert.equal(statMatches('overdue', t, today), false);
+    }
+    assert.equal(statMatches('verified', verifiedPast, today), true);
+    // Submitted has no card but the dropdown-only value still matches exactly.
+    assert.equal(statusFilterMatches('submitted', submittedSoon, today), true);
+    assert.equal(statusFilterMatches('submitted', cardTask({ id: 'j' }), today), false);
+  });
+
+  it('orders previews by due date, title, then stable id', () => {
+    const rows: CardTask[] = [
+      cardTask({ id: 't3', title: 'Beta', dueDate: '2026-10-30' }),
+      cardTask({ id: 't1', title: 'Alpha', dueDate: '2026-10-30' }),
+      cardTask({ id: 't2', title: 'Alpha', dueDate: '2026-10-30' }),
+      cardTask({ id: 't0', title: 'Zed', dueDate: '2026-10-29' })
+    ];
+    assert.deepEqual(
+      statPreviewTasks('open', rows, today).map((t) => t.id),
+      ['t0', 't1', 't2']
+    );
+  });
+
+  it('caps previews at three with a countable remainder', () => {
+    assert.equal(STAT_PREVIEW_SIZE, 3);
+    const rows: CardTask[] = [1, 2, 3, 4, 5].map((n) =>
+      cardTask({ id: `o${n}`, title: `Task ${n}`, dueDate: '2026-10-01' })
+    );
+    const total = statTasks('overdue', rows, today).length;
+    const shown = statPreviewTasks('overdue', rows, today);
+    assert.equal(total, 5);
+    assert.equal(shown.length, 3);
+    assert.equal(total - shown.length, 2);
+  });
+
+  it('yields honest empty pools for zero counts', () => {
+    for (const stat of STAT_KEYS) {
+      assert.deepEqual(statTasks(stat, [], today), []);
+      assert.deepEqual(statPreviewTasks(stat, [], today), []);
+    }
+    // Upcoming-only work lands on no due/overdue card.
+    const upcoming = [cardTask({ id: 'u', dueDate: '2027-01-01' })];
+    assert.deepEqual(statTasks('dueSoon', upcoming, today), []);
+    assert.deepEqual(statTasks('overdue', upcoming, today), []);
+  });
+
+  it('keeps dropdown and card filters equivalent', () => {
+    assert.deepEqual(
+      fixture.filter((t) => statusFilterMatches('all', t, today)),
+      fixture
+    );
+    for (const stat of STAT_KEYS) {
+      assert.deepEqual(
+        fixture.filter((t) => statusFilterMatches(stat, t, today)),
+        fixture.filter((t) => statMatches(stat, t, today))
+      );
+    }
+  });
+
+  it('labels every filter value for display', () => {
+    assert.deepEqual(FILTER_LABELS, {
+      all: 'All',
+      submitted: 'Submitted',
+      open: 'Open',
+      in_progress: 'In progress',
+      dueSoon: 'Due within 7 days',
+      overdue: 'Overdue',
+      verified: 'Verified'
+    });
+  });
+
+  it('derives unique preview ids and Escape restore targets', () => {
+    const regions = STAT_KEYS.map(statPreviewRegionId);
+    const toggles = STAT_KEYS.map(statPreviewToggleId);
+    assert.equal(new Set([...regions, ...toggles]).size, regions.length + toggles.length);
+    for (const stat of STAT_KEYS) {
+      assert.equal(
+        previewToggleIdForRegion(statPreviewRegionId(stat)),
+        statPreviewToggleId(stat)
+      );
+    }
+    assert.equal(previewToggleIdForRegion('stat-preview-submitted'), null);
+    assert.equal(previewToggleIdForRegion('tasks-heading'), null);
+    assert.equal(previewToggleIdForRegion(''), null);
+  });
+
+  it('shows the filter bar on current or stale retained rows only', () => {
+    assert.deepEqual(filterBarState('all', true, true), { visible: false, stale: false });
+    assert.deepEqual(filterBarState('overdue', true, true), { visible: true, stale: false });
+    assert.deepEqual(filterBarState('overdue', false, true), { visible: true, stale: true });
+    assert.deepEqual(filterBarState('overdue', false, false), { visible: false, stale: false });
+    assert.deepEqual(filterBarState('submitted', false, true), { visible: true, stale: true });
+  });
+
+  it('orders titles under the explicit en collation', () => {
+    const lower = cardTask({ id: 'lower', title: 'alpha', dueDate: '2026-10-30' });
+    const upper = cardTask({ id: 'upper', title: 'Alpha', dueDate: '2026-10-30' });
+    assert.ok(compareTasksForPreview(lower, upper) < 0);
+    assert.ok(compareTasksForPreview(upper, lower) > 0);
+    assert.deepEqual(
+      statPreviewTasks('open', [upper, lower], today).map((t) => t.id),
+      ['lower', 'upper']
+    );
+  });
+
+  it('reconciles filtered-list selections but keeps navigated ones', () => {
+    // F-5(a)/(b): selected from the Open list, then an action or refresh
+    // moves it outside that filter — the detail must clear.
+    const open = [cardTask({ id: 't', status: 'open', dueDate: '2026-10-29' })];
+    assert.equal(selectionSurvivesReconcile('t', open, 'open', today, true), true);
+    const moved = [cardTask({ id: 't', status: 'in_progress', dueDate: '2026-10-29' })];
+    assert.equal(selectionSurvivesReconcile('t', moved, 'open', today, true), false);
+    // N-1/N-2: calendar/feed navigation pairs the selection with All, so
+    // the new selection always survives reconciliation.
+    assert.equal(selectionSurvivesReconcile('t', moved, 'all', today, true), true);
+    assert.equal(selectionSurvivesReconcile('missing', moved, 'all', today, true), false);
+    // F-5(c): loading/failure is not a successful dataset — valid detail stays.
+    assert.equal(selectionSurvivesReconcile('t', [], 'open', today, false), true);
+    assert.equal(selectionSurvivesReconcile('t', moved, 'open', today, false), true);
+    // Context switches null the selection; nothing left to reconcile.
+    assert.equal(selectionSurvivesReconcile(null, moved, 'open', today, true), true);
+  });
+
+  it('resolves pending creation only against loads started after it', () => {
+    const key = 'u-staff|org-cah';
+    // Request 7 was latest when the creation response arrived; the
+    // follow-up refresh is request 8.
+    const pending = { key, id: 'new-task', afterSeq: 7 };
+    // The pre-creation snapshot (request 7's data, still current) waits —
+    // ready and absent must never declare the task unavailable.
+    assert.equal(resolvePendingCreation(pending, key, true, 7, false), 'wait');
+    assert.equal(resolvePendingCreation(pending, key, true, 7, true), 'wait');
+    // An older in-flight response landing late is dropped by the settle
+    // guard and never recorded; even if consulted, it waits.
+    assert.equal(resolvePendingCreation(pending, key, true, 5, false), 'wait');
+    // No successful load yet at all: wait.
+    assert.equal(resolvePendingCreation(pending, key, false, null, false), 'wait');
+    // Failed follow-up load: wait with honest failure reporting, then the
+    // successful retry resolves.
+    assert.equal(resolvePendingCreation(pending, key, false, 7, false), 'wait');
+    assert.equal(resolvePendingCreation(pending, key, true, 8, true), 'select');
+    // A qualifying load genuinely lacking the task reports unavailable once.
+    assert.equal(resolvePendingCreation(pending, key, true, 9, false), 'unavailable');
+    // Superseding navigation clears the pending value itself.
+    assert.equal(resolvePendingCreation(null, key, true, 8, true), 'none');
+    // A user/org switch cancels; delayed completion selects nothing elsewhere.
+    assert.equal(resolvePendingCreation(pending, 'u-other|org-cah', true, 8, true), 'cancelled');
+  });
+
+  it('supersedes creation responses after newer navigation', () => {
+    // The live counter behind this protocol is bumped by every selection,
+    // calendar/feed navigation, filter action, creation click, and switch.
+    let seq = 0;
+    const firstClick = ++seq;
+    assert.equal(creationResponseSuperseded(firstClick, seq), false);
+    ++seq; // Overdue card applied while the creation request is in flight.
+    assert.equal(creationResponseSuperseded(firstClick, seq), true);
+    const secondClick = ++seq; // A newer creation supersedes the older one.
+    assert.equal(creationResponseSuperseded(firstClick, seq), true);
+    assert.equal(creationResponseSuperseded(secondClick, seq), false);
+    ++seq; // A context switch invalidates the surviving intent as well.
+    assert.equal(creationResponseSuperseded(secondClick, seq), true);
+  });
+
+  it('never invalidates a new-context load from a stale completion', () => {
+    // P-2 ordering, driven through the real settle guard: old creation
+    // pending → context switch → new-context load pending → old creation
+    // completes → new load succeeds. Local counters mirror App's refs.
+    let requestSeq = 10;
+    let contextGen = 1;
+    const keyB = 'u-officer|org-cah';
+    const emptyOk = <T,>(): PromiseSettledResult<T[]> => ({ status: 'fulfilled', value: [] });
+
+    const opGen = contextGen; // Generate clicked in context A.
+    contextGen += 1; // Switch to B...
+    const newLoadSeq = ++requestSeq; // ...whose first load (11) starts.
+    assert.equal(newLoadSeq, 11);
+
+    // Old creation completes: obsolete, so App refreshes nothing and the
+    // shared counter stays at 11.
+    assert.equal(contextOpObsolete(opGen, contextGen), true);
+
+    // The new load succeeds and applies — nothing bumped past it.
+    const applied = applySettled(
+      initialPanels(),
+      keyB,
+      newLoadSeq,
+      keyB,
+      requestSeq,
+      emptyOk(),
+      emptyOk(),
+      emptyOk(),
+      emptyOk(),
+      emptyOk(),
+      emptyOk()
+    );
+    assert.equal(applied.tasks.status, 'loaded');
+    assert.equal(applied.tasks.key, keyB);
+
+    // Contrast pinned as the defect avoided: had the stale completion
+    // refreshed (counter 12), load 11 would be dropped and B stuck loading.
+    const poisoned = applySettled(
+      initialPanels(),
+      keyB,
+      newLoadSeq,
+      keyB,
+      newLoadSeq + 1,
+      emptyOk(),
+      emptyOk(),
+      emptyOk(),
+      emptyOk(),
+      emptyOk(),
+      emptyOk()
+    );
+    assert.deepEqual(poisoned.tasks, initialPanels().tasks);
+  });
+
+  it('binds completions to context generation across away-and-back', () => {
+    let gen = 1;
+    let nav = 0;
+    const opGen = gen;
+    const clickSeq = ++nav; // Creation clicked in A.
+    gen += 1;
+    nav += 1; // Switch to B.
+    gen += 1;
+    nav += 1; // Switch back to A: the key matches again...
+    assert.equal(contextOpObsolete(opGen, gen), true); // ...but no revival.
+    assert.equal(creationResponseSuperseded(clickSeq, nav), true);
+    // A failed old operation post-switch reports nothing in the new context.
+    assert.equal(contextOpObsolete(opGen, gen), true);
+    // Same context, undisturbed: the operation proceeds fully.
+    const gen2 = gen;
+    const click2 = ++nav;
+    assert.equal(contextOpObsolete(gen2, gen), false);
+    assert.equal(creationResponseSuperseded(click2, nav), false);
+    // Same-context superseded (filter applied mid-request): navigation is
+    // skipped while the data refresh still proceeds.
+    nav += 1;
+    assert.equal(creationResponseSuperseded(click2, nav), true);
+    assert.equal(contextOpObsolete(gen2, gen), false);
+  });
+
+  it('renders the template form only with current-context data', () => {
+    const key = 'u-staff|org-cah';
+    const templates = [{ id: 'tpl-1' }, { id: 'tpl-2' }];
+    assert.deepEqual(
+      resolveInstantiateTemplate({ key, templateId: 'tpl-1' }, key, templates),
+      { id: 'tpl-1' }
+    );
+    // Unset target, another context's target, or an unloaded template:
+    // render nothing instead of crashing on undefined.
+    assert.equal(resolveInstantiateTemplate(null, key, templates), null);
+    assert.equal(
+      resolveInstantiateTemplate({ key, templateId: 'tpl-1' }, 'u-other|org-cah', templates),
+      null
+    );
+    assert.equal(resolveInstantiateTemplate({ key, templateId: 'tpl-9' }, key, templates), null);
+    assert.equal(resolveInstantiateTemplate({ key, templateId: 'tpl-1' }, key, []), null);
+  });
+
+  it('closes a form only on its own successful completion', () => {
+    // Normal same-context success closes its own instance.
+    assert.equal(shouldCloseFormOnCompletion('completed', 3, 3), true);
+    // Failures keep the form/draft with their error; obsolete
+    // completions never close; swallowed errors are never success.
+    assert.equal(shouldCloseFormOnCompletion('failed', 3, 3), false);
+    assert.equal(shouldCloseFormOnCompletion('obsolete', 3, 3), false);
+    // A newer form instance opened before the old completion keeps its draft.
+    assert.equal(shouldCloseFormOnCompletion('completed', 3, 4), false);
+  });
+
+  it('keeps newer form instances across interleaved completions', () => {
+    // Per-form instance counters, mirroring App's refs: instance 1
+    // submits slowly, instance 2 opens with a draft, then 1 completes.
+    let formSeq = 0;
+    const firstSubmit = ++formSeq;
+    formSeq += 1; // Officer opens their own form and types a draft.
+    assert.equal(shouldCloseFormOnCompletion('completed', firstSubmit, formSeq), false);
+    // The second instance's own success still closes it.
+    const secondSubmit = formSeq;
+    assert.equal(shouldCloseFormOnCompletion('completed', secondSubmit, formSeq), true);
+    // And a failure there keeps it open with the error shown.
+    assert.equal(shouldCloseFormOnCompletion('failed', secondSubmit, formSeq), false);
+  });
+
+  it('retains valid selections across list refreshes', () => {
+    const users = [{ id: 'u-tnguyen' }, { id: 'u-arahman' }];
+    // Same members, new array identity (inline filter per render): kept.
+    assert.equal(retainSelection('u-tnguyen', [...users]), 'u-tnguyen');
+    assert.equal(retainSelection('u-arahman', users.slice().reverse()), 'u-arahman');
+    // Chosen id left the list: cleared, never substituted with another person.
+    assert.equal(retainSelection('u-gone', users), '');
+    assert.equal(retainSelection('u-tnguyen', []), '');
+    assert.equal(retainSelection('', users), '');
+  });
+
+  it('never revives concern receipts across away-and-back switches', () => {
+    // The filing closure guards receipt/selection on the originating
+    // generation: away-and-back changes it twice, so the late success
+    // sets nothing even though the user/org key matches again.
+    let contextGen = 1;
+    const submitGen = contextGen;
+    contextGen += 1; // Switch away.
+    contextGen += 1; // Switch back: key matches, generation does not.
+    assert.equal(contextOpObsolete(submitGen, contextGen), true);
+    // Normal same-context filing proceeds to receipt and refresh.
+    assert.equal(contextOpObsolete(contextGen, contextGen), false);
+  });
+});
+
+describe('submit guard (D-1)', () => {
+  it('blocks a second submit while one is in flight', () => {
+    const guard = { inFlightFor: null };
+    assert.equal(tryBeginSubmit(guard, 1), true);
+    // Rapid clicks/Enter before any rerender: same instance still guarded.
+    assert.equal(tryBeginSubmit(guard, 1), false);
+    assert.equal(guard.inFlightFor, 1);
+  });
+
+  it('restores availability after the submit settles', () => {
+    const guard = { inFlightFor: null };
+    assert.equal(tryBeginSubmit(guard, 1), true);
+    endSubmit(guard, 1);
+    assert.equal(guard.inFlightFor, null);
+    // Retry after failure starts cleanly.
+    assert.equal(tryBeginSubmit(guard, 1), true);
+  });
+
+  it('lets a newer instance submit while an old one is in flight', () => {
+    const guard = { inFlightFor: null };
+    assert.equal(tryBeginSubmit(guard, 1), true);
+    assert.equal(tryBeginSubmit(guard, 2), true);
+    assert.equal(guard.inFlightFor, 2);
+  });
+
+  it('never lets an old completion unlock a newer instance', () => {
+    const guard = { inFlightFor: null };
+    assert.equal(tryBeginSubmit(guard, 1), true);
+    assert.equal(tryBeginSubmit(guard, 2), true);
+    endSubmit(guard, 1); // Late completion for the superseded instance.
+    assert.equal(guard.inFlightFor, 2);
+    assert.equal(tryBeginSubmit(guard, 2), false);
+    endSubmit(guard, 2);
+    assert.equal(tryBeginSubmit(guard, 2), true);
+  });
+
+  it('ignores releases with no matching in-flight submit', () => {
+    const guard = { inFlightFor: null };
+    endSubmit(guard, 9);
+    assert.equal(guard.inFlightFor, null);
+    assert.equal(tryBeginSubmit(guard, 9), true);
   });
 });

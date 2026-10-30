@@ -12,14 +12,22 @@ import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CONCERN_CATEGORIES, nextConcernStatus } from '../shared/concerns.js';
-import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyFeedSettled, applyOneSettled, applySettled, auditEventDomId, beginContext, concernStatusDomId, concernUpdateDomId, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isDueSoonWork, isOverdueWork, linkedCapaLine, navFallbackNotice, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, updateNavTarget, updatesViewState, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type ConcernDetailView, type FollowupPreviewRow, type PanelState, type Panels, type UpdateNavTarget } from './dashboard.js';
+import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyFeedSettled, applyOneSettled, applySettled, auditEventDomId, beginContext, concernStatusDomId, concernUpdateDomId, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, linkedCapaLine, STAT_KEYS, STAT_LABELS, FILTER_LABELS, filterBarState, previewToggleIdForRegion, statPreviewRegionId, statPreviewToggleId, statPreviewTasks, statTasks, contextOpObsolete, creationResponseSuperseded, resolveInstantiateTemplate, resolvePendingCreation, retainSelection, selectionSurvivesReconcile, shouldCloseFormOnCompletion, endSubmit, tryBeginSubmit, statusFilterMatches, navFallbackNotice, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, updateNavTarget, updatesViewState, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type ConcernDetailView, type FollowupPreviewRow, type PanelState, type Panels, type PendingCreation, type RunOutcome, type StatKey, type SubmitGuard, type UpdateNavTarget } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
 // isOverdue flags any past-target date (including submitted awaiting
 // verification) for red styling and due-soon exclusion; the local dueSoon
-// feeds only the inline badge. The KPI cards and filters use isOverdueWork
-// and isDueSoonWork (open/in-progress only) so counts match rows.
+// feeds only the inline badge. The KPI cards and filters use statMatches
+// (over isOverdueWork/isDueSoonWork, open/in-progress only) so counts,
+// previews, and rows share one matcher.
+const STAT_TONES: Record<StatKey, string> = {
+  open: 'ink',
+  in_progress: 'blue',
+  dueSoon: 'amber',
+  overdue: 'red',
+  verified: 'green'
+};
 const isOverdue = (t: ComplianceTask, today: string): boolean => t.status !== 'verified' && t.dueDate < today;
 const dueSoon = (t: ComplianceTask, today: string): boolean => {
   if (t.status === 'verified' || isOverdue(t, today)) return false;
@@ -33,6 +41,19 @@ export default function App(): JSX.Element {
   const [panels, setPanels] = useState<Panels>(initialPanels);
   const requestSeq = useRef(0);
   const contextKeyRef = useRef('');
+  // N-3/N-4/S-1: creation-intent identity (bumped by every newer selection,
+  // navigation, filter action, creation click, and context switch) and the
+  // request seq that produced the current tasks data (null before any).
+  // P-2: context generation, bumped ONLY by context switches, so stale
+  // completions can be told apart from same-context superseded ones.
+  // R-2: per-form instance counters, bumped on every open, so a late
+  // completion closes only the instance that submitted.
+  const creationSeq = useRef(0);
+  const contextSeq = useRef(0);
+  const newTaskFormSeq = useRef(0);
+  const newObligationFormSeq = useRef(0);
+  const instantiateFormSeq = useRef(0);
+  const lastTasksLoadSeq = useRef<number | null>(null);
   const [orgId, setOrgId] = useState('');
   const [userId, setUserId] = useState(() => localStorage.getItem('sentinel-user') ?? '');
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -48,12 +69,22 @@ export default function App(): JSX.Element {
   const [pendingNav, setPendingNav] = useState<{ key: string; target: UpdateNavTarget } | null>(null);
   const [navNotice, setNavNotice] = useState<{ key: string; recordId: string; message: string } | null>(null);
   const [statusFilter, setStatusFilter] = useState('all');
+  // Summary-card previews: one pinned (disclosure) at a time plus one
+  // transient hover/focus preview. Never stale-context: cleared on switch.
+  const [pinnedPreview, setPinnedPreview] = useState<StatKey | null>(null);
+  const [hoverPreview, setHoverPreview] = useState<StatKey | null>(null);
+  // N-3/N-4: creation id awaiting a follow-up load that started after
+  // the creation response (afterSeq bound), context-bound like pendingNav.
+  // Resolves once; superseded or switch-cancelled after that.
+  const [pendingCreatedTask, setPendingCreatedTask] = useState<PendingCreation | null>(null);
   const [controlFilter, setControlFilter] = useState('all');
   const [calDomain, setCalDomain] = useState('all');
   const [calPerson, setCalPerson] = useState('all');
   const [calBucket, setCalBucket] = useState('all');
   const [showNewObligation, setShowNewObligation] = useState(false);
-  const [instantiateFor, setInstantiateFor] = useState<string | null>(null);
+  // P-1: bound to its originating context; the form renders only when the
+  // template resolves in the current context's loaded templates (below).
+  const [instantiateFor, setInstantiateFor] = useState<{ key: string; templateId: string } | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [error, setError] = useState('');
   // WM2 client: document-audit review state. Findings, verdicts, selections,
@@ -80,6 +111,7 @@ export default function App(): JSX.Element {
   const domains = panelData(panels.domains, contextKey);
   const audit = panelData(panels.audit, contextKey);
   const templates = panelData(panels.templates, contextKey);
+  const instantiateTemplate = resolveInstantiateTemplate(instantiateFor, contextKey, templates);
   const capas = panelData(panels.capas, contextKey);
   const obligations = panelData(panels.obligations, contextKey);
   const tasksReady = canAct(panels.tasks, contextKey);
@@ -153,6 +185,13 @@ export default function App(): JSX.Element {
     setPanels((prev) =>
       applySettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, t, d, a, tpl, c, o)
     );
+    // N-3/N-4: record which request produced the current tasks data, using
+    // applySettled's exact guard, so pending creation resolves only
+    // against loads that started after the creation response. Older
+    // in-flight responses are dropped by the guard and never recorded.
+    if (t.status === 'fulfilled' && key === contextKeyRef.current && mySeq === requestSeq.current) {
+      lastTasksLoadSeq.current = mySeq;
+    }
     setConcernQueue((prev) =>
       applyOneSettled(prev, key, mySeq, contextKeyRef.current, requestSeq.current, cq)
     );
@@ -232,18 +271,38 @@ export default function App(): JSX.Element {
       setUpdatesPanel({ key: nextKey, status: 'loading', data: [] });
       setPendingNav(null);
       setNavNotice(null);
+      // The card filter, pinned/hover previews, and any pending focus reset
+      // on a user/org switch so no stale-context titles can display.
+      setStatusFilter('all');
+      setPinnedPreview(null);
+      setHoverPreview(null);
+      setPendingCreatedTask(null);
+      creationSeq.current += 1;
+      contextSeq.current += 1;
     }
     refresh(orgId, nextKey).catch((e: Error) => setError(e.message));
   }, [userId, orgId, users, orgs, refresh, clearDocAudit]);
 
-  const run = async (fn: () => Promise<unknown>): Promise<void> => {
+  const run = async (fn: () => Promise<unknown>): Promise<RunOutcome> => {
     setError('');
+    // P-2: bind the operation to its originating context generation.
+    const gen = contextSeq.current;
     try {
       await fn();
+      // Obsolete completion (switch, incl. away-and-back): skip the
+      // refresh — a stale key would bump the shared sequence and
+      // invalidate the current context's in-flight load.
+      if (contextOpObsolete(gen, contextSeq.current)) return 'obsolete';
       await refresh(orgId, contextKey);
     } catch (e) {
+      if (contextOpObsolete(gen, contextSeq.current)) return 'obsolete';
       setError(e instanceof Error ? e.message : 'Action failed.');
+      return 'failed';
     }
+    // R-2: re-check after the refresh — a switch during the load must not
+    // report success into the new context.
+    if (contextOpObsolete(gen, contextSeq.current)) return 'obsolete';
+    return 'completed';
   };
 
   const retry = (): void => {
@@ -375,20 +434,105 @@ export default function App(): JSX.Element {
     sendFollowup(docaPending.findingId, docaPending.payload, true).catch(() => {});
   }, [docaPending, docaPosting, sendFollowup]);
 
-  const filtered = tasks.filter((t) => {
-    if (statusFilter === 'all') return true;
-    if (statusFilter === 'overdue') return isOverdueWork(t, today);
-    if (statusFilter === 'dueSoon') return isDueSoonWork(t, today);
-    return t.status === statusFilter;
-  });
+  // Dropdown and card activation share one matcher, so counts, previews,
+  // and rows always agree. Card keys double as filter values.
+  const filtered = tasks.filter((t) => statusFilterMatches(statusFilter, t, today));
+  const filterBar = filterBarState(statusFilter, tasksReady, tasks.length > 0);
 
-  const stats = {
-    open: tasks.filter((t) => t.status === 'open').length,
-    inProgress: tasks.filter((t) => t.status === 'in_progress').length,
-    dueSoon: tasks.filter((t) => isDueSoonWork(t, today)).length,
-    overdue: tasks.filter((t) => isOverdueWork(t, today)).length,
-    verified: tasks.filter((t) => t.status === 'verified').length
+  const statCounts = (stat: StatKey): number => statTasks(stat, tasks, today).length;
+
+  /** Filter activation from a card, the dropdown, or Clear: replace the
+   * filter and drop a task selection the new filter excludes, so an
+   * unrelated detail never stays open. An explicit filter action also
+   * supersedes any pending creation navigation. */
+  const applyStatusFilter = (value: string): void => {
+    setStatusFilter(value);
+    creationSeq.current += 1;
+    setPendingCreatedTask(null);
+    if (taskId !== null && !tasks.some((t) => t.id === taskId && statusFilterMatches(value, t, today))) {
+      setTaskId(null);
+    }
   };
+
+  /** N-1/N-2: explicit navigation from the calendar or the feed resets the
+   * task-list filter to All (calendar filters untouched) and closes card
+   * previews before opening the task. All updates batch in one handler, so
+   * the F-5 effect reconciles the new selection against 'all' — never the
+   * previous filter. */
+  const openTaskFromOutside = (id: string): void => {
+    setHoverPreview(null);
+    setPinnedPreview(null);
+    creationSeq.current += 1;
+    setPendingCreatedTask(null);
+    setStatusFilter('all');
+    setTaskId(id);
+  };
+
+  /** F-4: Summary-card activation closes every preview first, then filters
+   * and lands on the results heading. The heading always renders, so no
+   * pending state. "View all N" shares this action. */
+  const activateStatCard = (stat: StatKey): void => {
+    setHoverPreview(null);
+    setPinnedPreview(null);
+    applyStatusFilter(stat);
+    const el = document.getElementById('tasks-heading');
+    if (!el) return;
+    el.scrollIntoView({ block: 'start' });
+    el.focus({ preventScroll: true });
+  };
+
+  // F-2/F-3: Escape dismisses an open preview wherever focus is. The
+  // listener exists only while a preview is open, so other controls'
+  // Escape behavior is untouched otherwise. If dismissal removes the
+  // focused element (inside the preview), focus returns to that card's
+  // Preview toggle — focusing the toggle reopens nothing; focus elsewhere
+  // is left alone.
+  useEffect(() => {
+    if (pinnedPreview === null && hoverPreview === null) return;
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      const active = document.activeElement;
+      const region = active instanceof HTMLElement ? active.closest('.stat-preview') : null;
+      const toggleId = region?.id ? previewToggleIdForRegion(region.id) : null;
+      setHoverPreview(null);
+      setPinnedPreview(null);
+      if (toggleId) document.getElementById(toggleId)?.focus({ preventScroll: true });
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [pinnedPreview, hoverPreview]);
+
+  // F-5/N-2: reconcile the selection whenever successful current-context
+  // task data changes — a selected task that no longer matches the active
+  // filter (after an action or refresh) loses its detail. Loading and
+  // failure are not successful datasets: they never clear valid detail.
+  useEffect(() => {
+    if (!selectionSurvivesReconcile(taskId, tasks, statusFilter, today, tasksReady)) {
+      setTaskId(null);
+    }
+  }, [tasksReady, taskId, tasks, statusFilter, today]);
+
+  // N-3/N-4/§5ay: resolve a pending creation selection only against a
+  // successful task load that started after the creation response
+  // (lastTasksLoadSeq, recorded at the settle site). Older snapshots and
+  // older in-flight responses wait — they never declare the task
+  // unavailable — as do loading and failed loads with their honest
+  // reporting. The first qualifying load selects the task, reports it
+  // unavailable once, or cancels on a context mismatch.
+  useEffect(() => {
+    if (!pendingCreatedTask) return;
+    const outcome = resolvePendingCreation(
+      pendingCreatedTask,
+      contextKey,
+      tasksReady,
+      lastTasksLoadSeq.current,
+      tasks.some((t) => t.id === pendingCreatedTask.id)
+    );
+    if (outcome === 'wait') return;
+    setPendingCreatedTask(null);
+    if (outcome === 'select') setTaskId(pendingCreatedTask.id);
+    else if (outcome === 'unavailable') setError('The created task is not available.');
+  }, [pendingCreatedTask, contextKey, tasksReady, tasks]);
 
   const updateStatusLabel = (entry: MyUpdateEntry): string =>
     entry.recordKind === 'task'
@@ -402,7 +546,7 @@ export default function App(): JSX.Element {
     if (target.recordKind === 'task') {
       // Stale entry (record gone from this context): open nothing else.
       if (!tasks.some((t) => t.id === target.recordId)) return;
-      setTaskId(target.recordId);
+      openTaskFromOutside(target.recordId);
     } else {
       if (!myRows.some((c) => c.id === target.recordId)) return;
       setMyConcernId(target.recordId);
@@ -508,11 +652,78 @@ export default function App(): JSX.Element {
         </section>
 
         <section className="stats" aria-label="Task summary">
-          <Stat label="Open" value={tasksReady ? stats.open : '—'} tone="ink" />
-          <Stat label="In progress" value={tasksReady ? stats.inProgress : '—'} tone="blue" />
-          <Stat label="Due within 7 days" value={tasksReady ? stats.dueSoon : '—'} tone="amber" />
-          <Stat label="Overdue" value={tasksReady ? stats.overdue : '—'} tone="red" />
-          <Stat label="Verified" value={tasksReady ? stats.verified : '—'} tone="green" />
+          {STAT_KEYS.map((stat) => {
+            const total = tasksReady ? statCounts(stat) : 0;
+            const previewId = statPreviewRegionId(stat);
+            const visible = tasksReady && (hoverPreview === stat || pinnedPreview === stat);
+            const pinned = pinnedPreview === stat;
+            const shown = visible ? statPreviewTasks(stat, tasks, today) : [];
+            return (
+              <div
+                key={stat}
+                className="stat-cell"
+                onMouseLeave={() => setHoverPreview((h) => (h === stat ? null : h))}
+              >
+                <button
+                  type="button"
+                  className={`stat stat-${STAT_TONES[stat]}${statusFilter === stat ? ' stat-active' : ''}`}
+                  aria-pressed={statusFilter === stat}
+                  aria-describedby={visible ? previewId : undefined}
+                  disabled={!tasksReady}
+                  onClick={() => activateStatCard(stat)}
+                  onMouseEnter={() => setHoverPreview(stat)}
+                  onFocus={() => setHoverPreview(stat)}
+                  onBlur={() => setHoverPreview((h) => (h === stat ? null : h))}
+                >
+                  <span className="stat-value">{tasksReady ? total : '—'}</span>
+                  <span className="stat-label">{STAT_LABELS[stat]}</span>
+                </button>
+                <button
+                  type="button"
+                  id={statPreviewToggleId(stat)}
+                  className="stat-preview-toggle"
+                  aria-label={`Preview ${STAT_LABELS[stat].toLowerCase()} tasks`}
+                  aria-expanded={pinned}
+                  aria-controls={previewId}
+                  disabled={!tasksReady}
+                  onClick={() => setPinnedPreview((p) => (p === stat ? null : stat))}
+                >
+                  Preview
+                </button>
+                <div
+                  id={previewId}
+                  className={`stat-preview${pinned ? ' stat-preview-pinned' : ''}`}
+                  role="region"
+                  aria-label={`${STAT_LABELS[stat]} preview`}
+                  hidden={!visible}
+                  onMouseEnter={() => setHoverPreview(stat)}
+                >
+                  {visible &&
+                    (total === 0 ? (
+                      <p className="empty">No matching tasks.</p>
+                    ) : (
+                      <>
+                        <ol>
+                          {shown.map((t) => (
+                            <li key={t.id}>
+                              {t.title} — {t.dueDate}
+                            </li>
+                          ))}
+                        </ol>
+                        {total > shown.length && <p>+{total - shown.length} more</p>}
+                        {pinned ? (
+                          <button type="button" onClick={() => activateStatCard(stat)}>
+                            View all {total}
+                          </button>
+                        ) : (
+                          <p className="hint">Activate the card to view all.</p>
+                        )}
+                      </>
+                    ))}
+                </div>
+              </div>
+            );
+          })}
         </section>
 
         <section className="panel" aria-label="My recent updates">
@@ -583,7 +794,7 @@ export default function App(): JSX.Element {
             </thead>
             <tbody>
               {calendarTasks.map((t) => (
-                <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => { setNavNotice(null); setTaskId(t.id); }}>
+                <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => { setNavNotice(null); openTaskFromOutside(t.id); }}>
                   <td className={isOverdue(t, today) ? 'overdue' : ''}>{t.dueDate}</td>
                   <td className="task-title">{t.title}</td>
                   <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
@@ -608,7 +819,10 @@ export default function App(): JSX.Element {
               {me && can(me, 'task.create') && (
                 <button
                   className="primary"
-                  onClick={() => setShowNewObligation((s) => !s)}
+                  onClick={() => {
+                    if (!showNewObligation) newObligationFormSeq.current += 1;
+                    setShowNewObligation((s) => !s);
+                  }}
                   disabled={!obligationsReady || !templatesReady || newObligationBlockReason(templates) !== null}
                   title={templatesReady && obligationsReady ? (newObligationBlockReason(templates) ?? '') : ''}
                 >
@@ -624,7 +838,14 @@ export default function App(): JSX.Element {
               timeZone={org.timeZone}
               templates={templates.filter((x) => x.active)}
               users={orgUsers}
-              onSubmit={(o) => run(async () => api.createObligation(o)).then(() => setShowNewObligation(false))}
+              onSubmit={(o) => {
+                const formSeq = newObligationFormSeq.current;
+                return run(async () => api.createObligation(o)).then((outcome) => {
+                  if (shouldCloseFormOnCompletion(outcome, formSeq, newObligationFormSeq.current)) {
+                    setShowNewObligation(false);
+                  }
+                });
+              }}
             />
           )}
           <table>
@@ -651,12 +872,36 @@ export default function App(): JSX.Element {
                   canGenerate={!!me && can(me, 'task.create')}
                   onGenerate={() => {
                     setError('');
+                    // S-1/P-2: the navigation intent and context generation
+                    // are recorded at CLICK time. A newer creation
+                    // supersedes any older pending one.
+                    const key = contextKey;
+                    const gen = contextSeq.current;
+                    const clickSeq = ++creationSeq.current;
+                    setPendingCreatedTask(null);
                     api.generateObligation(o.id)
                       .then((out) => {
-                        setTaskId(out.task.id);
+                        // P-2: obsolete context (switch, incl. away-and-back):
+                        // no refresh, no counters, no state changes at all.
+                        if (contextOpObsolete(gen, contextSeq.current)) return;
+                        // Same-context superseded (newer selection,
+                        // navigation, filter, or creation): refresh data
+                        // only — no filter reset, no selection, no error.
+                        if (creationResponseSuperseded(clickSeq, creationSeq.current)) {
+                          return refresh(orgId, contextKey);
+                        }
+                        // N-3: previews close, the list resets to All, and
+                        // the new id waits for a load started after this
+                        // response (afterSeq bound captured first).
+                        setHoverPreview(null);
+                        setPinnedPreview(null);
+                        setStatusFilter('all');
+                        setPendingCreatedTask({ key, id: out.task.id, afterSeq: requestSeq.current });
                         return refresh(orgId, contextKey);
                       })
-                      .catch((e: Error) => setError(e.message));
+                      .catch((e: Error) => {
+                        if (!contextOpObsolete(gen, contextSeq.current)) setError(e.message);
+                      });
                   }}
                 />
               ))}
@@ -672,9 +917,9 @@ export default function App(): JSX.Element {
         <section className="columns">
           <div className="tasklist panel">
             <div className="panel-head">
-              <h3>Compliance tasks</h3>
+              <h3 id="tasks-heading" tabIndex={-1} className="focus-target">Compliance tasks</h3>
               <div className="panel-actions">
-                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status" disabled={!tasksReady}>
+                <select value={statusFilter} onChange={(e) => applyStatusFilter(e.target.value)} aria-label="Filter by status" disabled={!tasksReady}>
                   <option value="all">All statuses</option>
                   <option value="open">Open</option>
                   <option value="in_progress">In progress</option>
@@ -684,12 +929,21 @@ export default function App(): JSX.Element {
                   <option value="overdue">Overdue</option>
                 </select>
                 {me && can(me, 'task.create') && (
-                  <button className="primary" onClick={() => setShowNew((s) => !s)} disabled={!tasksReady}>
+                  <button className="primary" onClick={() => { if (!showNew) newTaskFormSeq.current += 1; setShowNew((s) => !s); }} disabled={!tasksReady}>
                     {showNew ? 'Close' : 'New task'}
                   </button>
                 )}
               </div>
             </div>
+            {filterBar.visible && (
+              <p className="filter-bar" role="status">
+                Showing: {FILTER_LABELS[statusFilter] ?? statusFilter} ({filtered.length})
+                {filterBar.stale ? ' — may be out of date' : ''}{' '}
+                <button type="button" onClick={() => applyStatusFilter('all')}>
+                  Clear filter
+                </button>
+              </p>
+            )}
             <PanelNotice panel={panels.tasks} contextKey={contextKey} name="tasks" orgName={org?.name ?? 'this organization'} onRetry={retry} />
             <PanelNotice panel={panels.domains} contextKey={contextKey} name="regulatory domains" orgName={org?.name ?? 'this organization'} onRetry={retry} />
             {showNew && me && org && (
@@ -697,8 +951,16 @@ export default function App(): JSX.Element {
                 orgId={org.id}
                 timeZone={org.timeZone}
                 domains={domains}
-                users={users.filter((u) => u.orgId === org.id)}
-                onSubmit={(t) => run(async () => api.createTask(t)).then(() => setShowNew(false))}
+                users={orgUsers}
+                formKey={newTaskFormSeq.current}
+                onSubmit={(t) => {
+                  const formSeq = newTaskFormSeq.current;
+                  return run(async () => api.createTask(t)).then((outcome) => {
+                    if (shouldCloseFormOnCompletion(outcome, formSeq, newTaskFormSeq.current)) {
+                      setShowNew(false);
+                    }
+                  });
+                }}
               />
             )}
             <table>
@@ -713,7 +975,7 @@ export default function App(): JSX.Element {
               </thead>
               <tbody>
                 {filtered.map((t) => (
-                  <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => { setNavNotice(null); setTaskId(t.id); }}>
+                  <tr key={t.id} className={t.id === taskId ? 'selected' : ''} onClick={() => { setNavNotice(null); creationSeq.current += 1; setPendingCreatedTask(null); setTaskId(t.id); }}>
                     <td className="task-title">{t.title}</td>
                     <td>{domainById.get(t.domainId)?.code ?? '—'}</td>
                     <td>{userName.get(t.ownerId) ?? '—'}</td>
@@ -932,13 +1194,18 @@ export default function App(): JSX.Element {
             <ConcernForm
               key={contextKey}
               disabled={!me || !orgId}
-              onSubmit={(body) =>
-                run(async () => {
+              onSubmit={(body) => {
+                // R-1: bind the filing to its originating context
+                // generation; the receipt/selection below must not revive
+                // after a switch away and back.
+                const gen = contextSeq.current;
+                return run(async () => {
                   const created = await api.createConcern({ orgId, ...body });
+                  if (contextOpObsolete(gen, contextSeq.current)) return;
                   setConcernReceipt({ key: contextKey, concern: created });
                   setMyConcernId(created.id);
-                })
-              }
+                });
+              }}
             />
           )}
         </section>
@@ -1130,8 +1397,14 @@ export default function App(): JSX.Element {
                     </td>
                     <td>
                       {me && can(me, 'task.create') && x.active && (
-                        <button onClick={() => setInstantiateFor(instantiateFor === x.id ? null : x.id)} disabled={!templatesReady}>
-                          {instantiateFor === x.id ? 'Cancel' : 'New task'}
+                        <button onClick={() => {
+                          if (instantiateFor?.templateId === x.id) setInstantiateFor(null);
+                          else {
+                            instantiateFormSeq.current += 1;
+                            setInstantiateFor({ key: contextKey, templateId: x.id });
+                          }
+                        }} disabled={!templatesReady}>
+                          {instantiateFor?.templateId === x.id ? 'Cancel' : 'New task'}
                         </button>
                       )}
                     </td>
@@ -1144,17 +1417,42 @@ export default function App(): JSX.Element {
               )}
             </tbody>
           </table>
-          {instantiateFor && me && org && (
+          {instantiateTemplate && me && org && (
             <InstantiateForm
-              template={templates.find((x) => x.id === instantiateFor) as TaskTemplate}
+              template={instantiateTemplate}
               timeZone={org.timeZone}
-              users={users.filter((u) => u.orgId === org.id)}
-              onSubmit={(ownerId, dueDate) =>
-                run(async () => {
-                  const created = await api.instantiate(instantiateFor, { ownerId, dueDate });
-                  setTaskId(created.id);
-                }).then(() => setInstantiateFor(null))
-              }
+              users={orgUsers}
+              formKey={instantiateFormSeq.current}
+              onSubmit={(ownerId, dueDate) => {
+                // S-1/P-2: the navigation intent and context generation
+                // are recorded at CLICK time.
+                const key = contextKey;
+                const gen = contextSeq.current;
+                const clickSeq = ++creationSeq.current;
+                const formSeq = instantiateFormSeq.current;
+                setPendingCreatedTask(null);
+                return run(async () => {
+                  const created = await api.instantiate(instantiateTemplate.id, { ownerId, dueDate });
+                  // P-2: obsolete context: touch nothing (run's own guard
+                  // also skips its refresh for the stale generation).
+                  if (contextOpObsolete(gen, contextSeq.current)) return;
+                  // Same-context superseded: run's refresh still updates
+                  // data, but no filter reset, selection, or error follows.
+                  if (creationResponseSuperseded(clickSeq, creationSeq.current)) return;
+                  // N-4: same pending treatment as Generate — previews
+                  // close, the list resets to All, and the id waits for a
+                  // load started after this response (bound captured first).
+                  setHoverPreview(null);
+                  setPinnedPreview(null);
+                  setStatusFilter('all');
+                  setPendingCreatedTask({ key, id: created.id, afterSeq: requestSeq.current });
+                }).then((outcome) => {
+                  // R-2: close only this form instance on its own success.
+                  if (shouldCloseFormOnCompletion(outcome, formSeq, instantiateFormSeq.current)) {
+                    setInstantiateFor(null);
+                  }
+                });
+              }}
             />
           )}
         </section>
@@ -1512,15 +1810,6 @@ function PanelNotice({ panel, contextKey, name, orgName, onRetry }: {
     );
   }
   return null;
-}
-
-function Stat({ label, value, tone }: { label: string; value: number | string; tone: string }): JSX.Element {
-  return (
-    <div className={`stat stat-${tone}`}>
-      <span className="stat-value">{value}</span>
-      <span className="stat-label">{label}</span>
-    </div>
-  );
 }
 
 function EvidenceRequirement({ task }: { task: ComplianceTask }): JSX.Element | null {
@@ -1921,24 +2210,47 @@ function NewObligationForm({ orgId, timeZone, templates, users, onSubmit }: {
   );
 }
 
-function NewTaskForm({ orgId, timeZone, domains, users, onSubmit }: { orgId: string; timeZone: string; domains: RegulatoryDomain[]; users: DemoUser[]; onSubmit: (t: NewTask) => void }): JSX.Element {
+function NewTaskForm({ orgId, timeZone, domains, users, formKey, onSubmit }: { orgId: string; timeZone: string; domains: RegulatoryDomain[]; users: DemoUser[]; formKey: number; onSubmit: (t: NewTask) => Promise<unknown> }): JSX.Element {
   const [title, setTitle] = useState('');
   const [domainId, setDomainId] = useState(domains[0]?.id ?? '');
   const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
   const [dueDate, setDueDate] = useState(orgToday(timeZone));
+  // D-1: in-flight duplicate guard (not server idempotency). The ref check
+  // runs synchronously at submit, before any rerender, so rapid clicks or
+  // Enter cannot issue a second request for this form instance.
+  const guardRef = useRef<SubmitGuard>({ inFlightFor: null });
+  const [submitting, setSubmitting] = useState(false);
   useEffect(() => {
     setDomainId(domains[0]?.id ?? '');
   }, [domains]);
+  // O-1: keep a valid chosen owner across renders and refreshes; only an
+  // id that left the list clears (to an explicit empty choice, below).
   useEffect(() => {
-    setOwnerId(users[0]?.id ?? '');
+    setOwnerId((prev) => retainSelection(prev, users));
   }, [users]);
+  // D-1: a newer form instance starts unguarded; any late completion for
+  // the superseded instance cannot unlock or alter this one.
+  useEffect(() => {
+    guardRef.current.inFlightFor = null;
+    setSubmitting(false);
+  }, [formKey]);
   return (
     <form
       className="form"
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit({ orgId, domainId, title, ownerId, dueDate });
-        setTitle('');
+        if (!tryBeginSubmit(guardRef.current, formKey)) return;
+        setSubmitting(true);
+        // L-1: the title stays until confirmed success closes the form
+        // (unmount clears) or the user cancels — a failed submission keeps
+        // the draft. Settle restores availability only for the still-current
+        // instance; success closes via the parent's R-2 completion check.
+        const settle = (): void => {
+          if (guardRef.current.inFlightFor !== formKey) return;
+          endSubmit(guardRef.current, formKey);
+          setSubmitting(false);
+        };
+        onSubmit({ orgId, domainId, title, ownerId, dueDate }).then(settle, settle);
       }}
     >
       <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Task title" required />
@@ -1947,13 +2259,14 @@ function NewTaskForm({ orgId, timeZone, domains, users, onSubmit }: { orgId: str
           <option key={d.id} value={d.id}>{d.code} — {d.name}</option>
         ))}
       </select>
-      <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} aria-label="Owner">
+      <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} aria-label="Owner" required>
+        {ownerId === '' && <option value="">Select an owner</option>}
         {users.map((u) => (
           <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
         ))}
       </select>
       <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required />
-      <button className="primary" type="submit">Create task</button>
+      <button className="primary" type="submit" disabled={submitting}>{submitting ? 'Creating task…' : 'Create task'}</button>
     </form>
   );
 }
@@ -2020,37 +2333,66 @@ function TransferForm({ evidence, onTransfer, lockedTitle, describedBy }: { evid
   );
 }
 
-function InstantiateForm({ template, timeZone, users, onSubmit }: { template: TaskTemplate; timeZone: string; users: DemoUser[]; onSubmit: (ownerId: string, dueDate: string) => void }): JSX.Element {
+function InstantiateForm({ template, timeZone, users, formKey, onSubmit }: { template: TaskTemplate; timeZone: string; users: DemoUser[]; formKey: number; onSubmit: (ownerId: string, dueDate: string) => Promise<unknown> }): JSX.Element {
   const defaultDue =
     nextDueDate(orgToday(timeZone), template.recurrence.frequency) ??
     (addDaysISO(orgToday(timeZone), 30) ?? orgToday(timeZone));
   const [ownerId, setOwnerId] = useState(users[0]?.id ?? '');
   const [dueDate, setDueDate] = useState(defaultDue);
+  // D-1: in-flight duplicate guard (not server idempotency). The ref check
+  // runs synchronously at submit, before any rerender, so rapid clicks or
+  // Enter cannot issue a second request for this form instance.
+  const guardRef = useRef<SubmitGuard>({ inFlightFor: null });
+  const [submitting, setSubmitting] = useState(false);
+  // O-1: keep a valid chosen owner across renders and refreshes; only an
+  // id that left the list clears (to an explicit empty choice, below).
   useEffect(() => {
-    setOwnerId(users[0]?.id ?? '');
+    setOwnerId((prev) => retainSelection(prev, users));
   }, [users]);
+  // R-3: re-init the due date only when the template or zone identity
+  // changes — never on object identity (refreshes) — so edited drafts
+  // survive reloads. Fresh instances mount fresh via initial state.
   useEffect(() => {
     setDueDate(
       nextDueDate(orgToday(timeZone), template.recurrence.frequency) ??
         (addDaysISO(orgToday(timeZone), 30) ?? orgToday(timeZone))
     );
-  }, [template, timeZone]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- template object
+    // identity must NOT reset the draft; template.id carries the reset.
+  }, [template.id, timeZone]);
+  // D-1: a newer form instance starts unguarded; any late completion for
+  // the superseded instance cannot unlock or alter this one.
+  useEffect(() => {
+    guardRef.current.inFlightFor = null;
+    setSubmitting(false);
+  }, [formKey]);
   return (
     <form
       className="form inline"
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit(ownerId, dueDate);
+        if (!tryBeginSubmit(guardRef.current, formKey)) return;
+        setSubmitting(true);
+        // Settle restores availability only for the still-current instance,
+        // keeping the draft on failure; success closes via the parent's
+        // R-2 completion check.
+        const settle = (): void => {
+          if (guardRef.current.inFlightFor !== formKey) return;
+          endSubmit(guardRef.current, formKey);
+          setSubmitting(false);
+        };
+        onSubmit(ownerId, dueDate).then(settle, settle);
       }}
     >
       <span className="task-title">New task from “{template.title}”</span>
-      <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} aria-label="Owner">
+      <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} aria-label="Owner" required>
+        {ownerId === '' && <option value="">Select an owner</option>}
         {users.map((u) => (
           <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
         ))}
       </select>
       <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required />
-      <button className="primary" type="submit">Create task</button>
+      <button className="primary" type="submit" disabled={submitting}>{submitting ? 'Creating task…' : 'Create task'}</button>
     </form>
   );
 }
@@ -2210,8 +2552,10 @@ function DocAuditFindingCard({ finding, missingLabel, disabled, completed, orgId
   useEffect(() => {
     setDomainId(domains[0]?.id ?? '');
   }, [domains]);
+  // O-1: keep a valid chosen owner across renders and refreshes; only an
+  // id that left the list clears (preview validation then requires a pick).
   useEffect(() => {
-    setOwnerId(users[0]?.id ?? '');
+    setOwnerId((prev) => retainSelection(prev, users));
   }, [users]);
   useEffect(() => {
     if (preview) previewHeadingRef.current?.focus();
@@ -2368,7 +2712,9 @@ function DocAuditFindingCard({ finding, missingLabel, disabled, completed, orgId
             }}
             aria-label={`Owner for finding ${finding.id}`}
             disabled={disabled}
+            required
           >
+            {ownerId === '' && <option value="">Select an owner</option>}
             {users.map((u) => (
               <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]})</option>
             ))}
