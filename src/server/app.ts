@@ -5,6 +5,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
 import { randomUUID } from 'node:crypto';
+import { buildSurveyPacket } from './survey.js';
 import {
   ConflictError,
   ValidationError,
@@ -2009,6 +2010,31 @@ export function createApp(db: DbShape): express.Express {
     if (!scope) return;
     const user = req.user as DemoUser;
     res.json(selectMyUpdates(db, user.id, scope));
+  });
+
+  // Survey/OCM inspection packet: read-only snapshot over existing records.
+  // Same organization visibility as every other read (readScope); the
+  // projection additionally constrains all lookups to the packet org and
+  // includes only task/template events (never concern, CAPA, or notice
+  // records). Deliberately writes nothing — not even an audit event — so a
+  // packet request can never perturb the chain it reports on.
+  app.get('/api/survey-packet', (req: AuthRequest, res) => {
+    res.set('Cache-Control', 'no-store');
+    const scope = readScope(req, res);
+    if (!scope) return;
+    const orgId = typeof req.query.orgId === 'string' ? req.query.orgId : '';
+    const kind = typeof req.query.kind === 'string' ? req.query.kind : '';
+    const id = typeof req.query.id === 'string' ? req.query.id : '';
+    if (!orgId || (kind !== 'template' && kind !== 'domain' && kind !== 'task') || !id) {
+      res.status(400).json({ error: 'Organization, scope kind and record id are required.' });
+      return;
+    }
+    const packet = buildSurveyPacket(db, orgId, kind, id);
+    if (!packet) {
+      res.status(404).json({ error: 'Survey scope not found.' });
+      return;
+    }
+    res.json(packet);
   });
 
   // Append-only: read-only audit endpoint by design. No write routes exist.

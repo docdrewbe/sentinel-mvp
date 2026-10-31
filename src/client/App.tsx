@@ -11,6 +11,7 @@ import {
 } from './api.js';
 import { CAPA_SEVERITY_LABELS, CAPA_STATUS_LABELS, CONCERN_CATEGORY_LABELS, CONCERN_CLOSED_MEANING_NOTICE, CONCERN_DESCRIPTION_MAX, CONCERN_EMERGENCY_NOTICE, CONCERN_IDENTIFIED_NOTICE, CONCERN_LOCATION_MAX, CONCERN_MESSAGE_MAX, CONCERN_NO_SENSITIVE_DETAILS_HINT, CONCERN_REVIEWER_ACCESS_NOTICE, CONCERN_STATUS_LABELS, CONCERN_TITLE_MAX, CONTROL_LABELS, KIND_LABELS, NOTICE_APPLICABLE_MEANING_NOTICE, NOTICE_FINALITY_NOTICE, NOTICE_RATIONALE_MAX, NOTICE_SOURCE_MAX, NOTICE_STATUS_LABELS, NOTICE_SYNTHETIC_NOTICE, NOTICE_TEXT_MAX, NOTICE_TITLE_MAX, RECURRENCE_LABELS, ROLE_LABELS, STATUS_LABELS, type AuditEvent, type CapaRecord, type CapaStatus, type ComplianceTask, type ConcernCategory, type ConcernRecord, type ConcernStatus, type DemoUser, type MyUpdateEntry, type NoticeRecord, type NoticeStatus, type Organization, type RecurringObligation, type RegulatoryDomain, type TaskStatus, type TaskTemplate } from '../shared/types.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
+import { SurveyPacketPanel } from './Survey.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CONCERN_CATEGORIES, nextConcernStatus } from '../shared/concerns.js';
@@ -1677,6 +1678,18 @@ export default function App(): JSX.Element {
             onDismissError={() => setDocaError('')}
           />
         )}
+
+        <SurveyPacketPanel
+          key={contextKey}
+          orgId={orgId}
+          orgKind={org?.kind}
+          orgName={org?.name ?? 'this organization'}
+          contextKey={contextKey}
+          domains={domains}
+          templates={templates}
+          tasks={tasks}
+          ready={tasksReady && domainsReady && templatesReady}
+        />
       </main>
 
       <footer>

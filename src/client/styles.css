@@ -369,3 +369,44 @@ footer {
   border-radius: 8px;
   padding: 8px 12px;
 }
+
+/* Survey/OCM inspection packet panel and scoped print view. Packet text
+ * wraps anywhere so long hashes, ids, and pasted labels cannot overflow;
+ * the print rules show only the displayed packet snapshot. */
+.survey-panel { min-width: 0; }
+.survey-controls select { max-width: 100%; margin: 6px 0; padding: 6px; }
+.survey-packet { overflow-wrap: anywhere; border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
+.survey-packet h2 { font-size: 20px; }
+.survey-sim { font-size: 13px; }
+.survey-pass { color: var(--green); }
+/* Packet warnings (integrity failure, legacy events): body size, bold, boxed.
+ * The border and WARNING label carry the emphasis in monochrome print. */
+.survey-warning {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--red);
+  border: 2px solid var(--red);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  break-inside: avoid;
+  break-after: avoid;
+}
+.survey-task { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 8px; }
+.survey-history p { margin: 2px 0; }
+/* Screen-hidden: explains a print taken with no packet gathered. */
+.survey-print-empty { display: none; }
+@media print {
+  @page { margin: 16mm; }
+  body { background: white; color: black; }
+  .page { display: block; min-height: 0; }
+  .page > :not(main), main > :not(.survey-panel), .survey-controls { display: none !important; }
+  main { display: block; max-width: none; padding: 0; margin: 0; }
+  .survey-panel { border: none; padding: 0; margin: 0; }
+  .survey-packet { border: none; margin: 0; padding: 0; }
+  .survey-packet h3, .survey-packet h4, .survey-packet h5 { break-after: avoid; }
+  .survey-packet li { break-inside: avoid; }
+  .survey-pass, .panel-error { color: black; }
+  .survey-warning { color: black; border-color: black; }
+  .survey-print-empty { display: block; }
+}

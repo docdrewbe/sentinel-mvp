@@ -1001,6 +1001,20 @@ export function shouldApplyDocAuditResponse(
   return sentKey === currentKey && sentSeq === currentSeq;
 }
 
+/**
+ * Same rule for single-shot survey-packet responses: a delayed packet or
+ * error applies only when its context key and request sequence are both
+ * still current, so user/org/scope changes can never surface stale records.
+ */
+export function shouldApplySurveyResponse(
+  sentKey: string,
+  sentSeq: number,
+  currentKey: string,
+  currentSeq: number
+): boolean {
+  return sentKey === currentKey && sentSeq === currentSeq;
+}
+
 export type FollowupSettleAction = 'apply' | 'refresh' | 'ignore';
 
 /**

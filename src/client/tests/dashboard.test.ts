@@ -29,6 +29,7 @@ import {
   occurrencesTruncated,
   resolveFollowupKey,
   shouldApplyDocAuditResponse,
+  shouldApplySurveyResponse,
   evidenceLockedReason,
   isDueSoonWork,
   isOverdueWork,
@@ -848,6 +849,13 @@ describe('document-audit review helpers (WM2 client)', () => {
     assert.equal(shouldApplyDocAuditResponse('u|o', 2, 'u|o', 3), false);
     assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'u|other', 3), false);
     assert.equal(shouldApplyDocAuditResponse('u|o', 3, 'someone|o', 3), false);
+  });
+
+  it('applies survey packets only for the current context and request', () => {
+    assert.equal(shouldApplySurveyResponse('u|o', 3, 'u|o', 3), true);
+    assert.equal(shouldApplySurveyResponse('u|o', 2, 'u|o', 3), false);
+    assert.equal(shouldApplySurveyResponse('u|o', 3, 'u|other', 3), false);
+    assert.equal(shouldApplySurveyResponse('u|o', 3, 'someone|o', 3), false);
   });
 
   it('classifies follow-up settles: apply, same-context refresh, or ignore (WM2C-1)', () => {

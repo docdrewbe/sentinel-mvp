@@ -1,4 +1,5 @@
 import type { AuditEvent, CapaRecord, ComplianceTask, ConcernRecord, DemoUser, MyUpdateEntry, NoticeRecord, Organization, RecurringObligation, RegulatoryDomain, TaskTemplate } from '../shared/types.js';
+import type { SurveyPacket } from '../shared/survey.js';
 
 function currentUserId(): string {
   return localStorage.getItem('sentinel-user') ?? '';
@@ -147,6 +148,8 @@ export const api = {
   transfer: (id: string, t: { evidenceId: string; toHolder: string; reason?: string }) =>
     req(`/api/tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify(t) }),
   audit: (limit = 100) => req<AuditEvent[]>(`/api/audit?limit=${limit}`),
+  surveyPacket: (orgId: string, kind: string, id: string) =>
+    req<SurveyPacket>(`/api/survey-packet?${new URLSearchParams({ orgId, kind, id })}`),
   templates: (orgId: string) => req<TaskTemplate[]>(`/api/templates?orgId=${orgId}`),
   instantiate: (id: string, body: { ownerId: string; dueDate?: string }) =>
     req<ComplianceTask>(`/api/templates/${id}/instantiate`, { method: 'POST', body: JSON.stringify(body) }),
