@@ -196,6 +196,12 @@ button.primary:hover { background: var(--accent-dark); }
 .form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; padding: 10px; background: #f4f8f7; border-radius: 8px; }
 .form.inline { flex-direction: row; flex-wrap: wrap; }
 .form input, .form select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; flex: 1 1 160px; }
+/* Keep form radios at their natural size within option rows. */
+.form input[type="radio"] {
+  flex: none;
+  padding: 0;
+  border: none;
+}
 
 .evidence { list-style: none; margin: 0 0 8px; padding: 0; }
 .evidence li {
