@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ApiError,
   api,
@@ -15,7 +15,7 @@ import { SurveyPacketPanel } from './Survey.js';
 import { addDaysISO, isValidIsoDate, nextDueDate, orgToday, periodKeyFor } from '../shared/scheduling.js';
 import { capaCriteriaLocked, qualifyingEffectivenessEvidence } from '../shared/capa.js';
 import { CONCERN_CATEGORIES, nextConcernStatus } from '../shared/concerns.js';
-import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyFeedSettled, applyOneSettled, applySettled, auditEventDomId, beginContext, concernStatusDomId, concernUpdateDomId, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, linkedCapaLine, STAT_KEYS, STAT_LABELS, FILTER_LABELS, filterBarState, previewToggleIdForRegion, statPreviewRegionId, statPreviewToggleId, statPreviewTasks, statTasks, contextOpObsolete, creationResponseSuperseded, resolveInstantiateTemplate, resolvePendingCreation, retainSelection, selectionSurvivesReconcile, shouldCloseFormOnCompletion, endSubmit, tryBeginSubmit, statusFilterMatches, navFallbackNotice, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, updateNavTarget, updatesViewState, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type ConcernDetailView, type FollowupPreviewRow, type PanelState, type Panels, type PendingCreation, type RunOutcome, type StatKey, type SubmitGuard, type UpdateNavTarget } from './dashboard.js';
+import { CAPA_NEXT, DOCAUDIT_KEYS_UNAVAILABLE_CODE, DOCAUDIT_SAMPLE_A, DOCAUDIT_SAMPLE_B, DOCAUDIT_SUMMARY_MAX, DOCAUDIT_TASK_TITLE_MAX, DOCAUDIT_TEXT_MAX, FOLLOWUP_EVIDENCE_NOTE, applyFeedSettled, applyOneSettled, applySettled, auditEventDomId, beginContext, concernStatusDomId, concernUpdateDomId, buildFollowupPreview, calendarBucket, canAct, capaAdvanceBlockReason, capaReviewBlockReason, evidenceLockedReason, findingBlockers, findingKindLabel, followupSettleAction, initialPanels, isActiveScrollRegion, linkedCapaLine, STAT_KEYS, STAT_LABELS, FILTER_LABELS, filterBarState, previewToggleIdForRegion, statPreviewRegionId, statPreviewToggleId, statPreviewTasks, statTasks, contextOpObsolete, creationResponseSuperseded, resolveInstantiateTemplate, resolvePendingCreation, retainSelection, selectionSurvivesReconcile, shouldCloseFormOnCompletion, endSubmit, tryBeginSubmit, statusFilterMatches, navFallbackNotice, newObligationBlockReason, shortDisplayId, occurrenceLabel, occurrencesTruncated, overdueBadgeLabel, panelData, reopenBlockReason, requiredEvidenceFor, resolveFollowupKey, resolveOrgId, reviewEvidenceLabels, shouldApplyDocAuditResponse, startBlockReason, startButtonLabel, submitBlockReason, submitStatusReason, triageUsersFor, updateNavTarget, updatesViewState, verifyBlockReason, verifyEvidenceReason, verifyStatusReason, verifiedLockNoteId, type DocAuditVerdict, type FollowupKeyBinding, type ConcernDetailView, type FollowupPreviewRow, type PanelState, type Panels, type PendingCreation, type RunOutcome, type StatKey, type SubmitGuard, type UpdateNavTarget } from './dashboard.js';
 
 // CAL3: overdue/due-soon compare against the org-local civil day, passed in
 // by the dashboard (orgToday). Pure string comparison — no local time zone.
@@ -781,7 +781,7 @@ export default function App(): JSX.Element {
 
         <section className="panel">
           <div className="panel-head">
-            <h3>Compliance calendar (illustrative targets — org-selected, not legal mandates)</h3>
+            <h3 id="calendar-heading">Compliance calendar (illustrative targets — org-selected, not legal mandates)</h3>
             <div className="panel-actions">
               <select value={calDomain} onChange={(e) => setCalDomain(e.target.value)} aria-label="Filter calendar by domain" disabled={!tasksReady}>
                 <option value="all">All domains</option>
@@ -807,6 +807,7 @@ export default function App(): JSX.Element {
           </div>
           {org && <p className="trail-detail">Dates in {org.timeZone} (org-local).</p>}
           <PanelNotice panel={panels.tasks} contextKey={contextKey} name="calendar tasks" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+          <TableScroll labelledBy="calendar-heading">
           <table>
             <thead>
               <tr>
@@ -838,8 +839,9 @@ export default function App(): JSX.Element {
               )}
             </tbody>
           </table>
+          </TableScroll>
           <div className="panel-head">
-            <h3>Recurring obligations (synthetic schedules — illustrative)</h3>
+            <h3 id="obligations-heading">Recurring obligations (synthetic schedules — illustrative)</h3>
             <div className="panel-actions">
               {me && can(me, 'task.create') && (
                 <button
@@ -873,6 +875,7 @@ export default function App(): JSX.Element {
               }}
             />
           )}
+          <TableScroll labelledBy="obligations-heading">
           <table>
             <thead>
               <tr>
@@ -937,6 +940,7 @@ export default function App(): JSX.Element {
               )}
             </tbody>
           </table>
+          </TableScroll>
         </section>
 
         <section className="columns">
@@ -988,6 +992,7 @@ export default function App(): JSX.Element {
                 }}
               />
             )}
+            <TableScroll labelledBy="tasks-heading">
             <table>
               <thead>
                 <tr>
@@ -1018,6 +1023,7 @@ export default function App(): JSX.Element {
                 )}
               </tbody>
             </table>
+            </TableScroll>
           </div>
 
           <div className="detail panel">
@@ -1171,9 +1177,10 @@ export default function App(): JSX.Element {
         <section className="columns">
           <div className="tasklist panel">
             <div className="panel-head">
-              <h3>Corrective and preventive actions (CAPA)</h3>
+              <h3 id="capa-heading">Corrective and preventive actions (CAPA)</h3>
             </div>
             <PanelNotice panel={panels.capas} contextKey={contextKey} name="CAPAs" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+            <TableScroll labelledBy="capa-heading">
             <table>
               <thead>
                 <tr>
@@ -1203,6 +1210,7 @@ export default function App(): JSX.Element {
                 )}
               </tbody>
             </table>
+            </TableScroll>
           </div>
 
           <div className="detail panel">
@@ -1275,6 +1283,7 @@ export default function App(): JSX.Element {
             </div>
             <p className="notice">{CONCERN_IDENTIFIED_NOTICE}</p>
             <PanelNotice panel={myConcerns} contextKey={contextKey} name="reports" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+            <TableScroll labelledBy="my-reports-heading">
             <table>
               <thead>
                 <tr>
@@ -1300,6 +1309,7 @@ export default function App(): JSX.Element {
                 )}
               </tbody>
             </table>
+            </TableScroll>
           </div>
 
           <div className="detail panel">
@@ -1332,9 +1342,10 @@ export default function App(): JSX.Element {
           <section className="columns">
             <div className="tasklist panel">
               <div className="panel-head">
-                <h3>Concern triage queue</h3>
+                <h3 id="triage-heading">Concern triage queue</h3>
               </div>
               <PanelNotice panel={concernQueue} contextKey={contextKey} name="concerns" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+              <TableScroll labelledBy="triage-heading">
               <table>
                 <thead>
                   <tr>
@@ -1362,6 +1373,7 @@ export default function App(): JSX.Element {
                   )}
                 </tbody>
               </table>
+              </TableScroll>
             </div>
 
             <div className="detail panel">
@@ -1406,7 +1418,7 @@ export default function App(): JSX.Element {
         <section className="columns">
           <div className="tasklist panel">
             <div className="panel-head">
-              <h3>Safety notices (synthetic — manually pasted, human reviewed)</h3>
+              <h3 id="notices-heading">Safety notices (synthetic — manually pasted, human reviewed)</h3>
               {canNoticeManage && (
                 <div className="panel-actions">
                   <button
@@ -1441,6 +1453,7 @@ export default function App(): JSX.Element {
               <p className="empty">No safety notices recorded in this organization yet.</p>
             )}
             {noticeRows.length > 0 && (
+              <TableScroll labelledBy="notices-heading">
               <table>
                 <thead>
                   <tr><th>Title</th><th>Source</th><th>Date</th><th>Status</th></tr>
@@ -1456,6 +1469,7 @@ export default function App(): JSX.Element {
                   ))}
                 </tbody>
               </table>
+              </TableScroll>
             )}
           </div>
 
@@ -1501,7 +1515,7 @@ export default function App(): JSX.Element {
 
         <section className="panel">
           <div className="panel-head">
-            <h3>Compliance task templates (synthetic — illustrative references, not legal advice)</h3>
+            <h3 id="templates-heading">Compliance task templates (synthetic — illustrative references, not legal advice)</h3>
             <div className="panel-actions">
               <select value={controlFilter} onChange={(e) => setControlFilter(e.target.value)} aria-label="Filter by control type" disabled={!templatesReady}>
                 <option value="all">All controls</option>
@@ -1511,6 +1525,7 @@ export default function App(): JSX.Element {
             </div>
           </div>
           <PanelNotice panel={panels.templates} contextKey={contextKey} name="templates" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+          <TableScroll labelledBy="templates-heading">
           <table>
             <thead>
               <tr>
@@ -1571,6 +1586,7 @@ export default function App(): JSX.Element {
               )}
             </tbody>
           </table>
+          </TableScroll>
           {instantiateTemplate && me && org && (
             <InstantiateForm
               template={instantiateTemplate}
@@ -1613,9 +1629,10 @@ export default function App(): JSX.Element {
 
         <section className="panel">
           <div className="panel-head">
-            <h3>Audit event log (append-only, hash-chained — simulated)</h3>
+            <h3 id="audit-heading">Audit event log (append-only, hash-chained — simulated)</h3>
           </div>
           <PanelNotice panel={panels.audit} contextKey={contextKey} name="audit events" orgName={org?.name ?? 'this organization'} onRetry={retry} />
+          <TableScroll labelledBy="audit-heading">
           <table>
             <thead>
               <tr>
@@ -1644,6 +1661,7 @@ export default function App(): JSX.Element {
                 ))}
             </tbody>
           </table>
+          </TableScroll>
         </section>
 
         {me && can(me, 'docaudit.run', { orgId, ownerId: '' }) && (
@@ -1947,6 +1965,38 @@ function ConcernDetail({ concern, ready, triage, userName, capas, trail, assigne
         <p className="notice">Closed concerns are locked in this slice.</p>
       )}
     </>
+  );
+}
+
+// R-2: tables scroll inside their panel on narrow screens. Region semantics
+// and a tab stop exist only while the wrapper actually scrolls, so desktop
+// gains no inert tab stops or landmarks.
+function TableScroll({ labelledBy, children }: { labelledBy: string; children: ReactNode }): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  const [scrolls, setScrolls] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = (): void => {
+      setScrolls(isActiveScrollRegion(getComputedStyle(el).overflowX, el.scrollWidth, el.clientWidth));
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <div
+      ref={ref}
+      className="table-scroll"
+      role={scrolls ? 'region' : undefined}
+      tabIndex={scrolls ? 0 : undefined}
+      aria-labelledby={scrolls ? labelledBy : undefined}
+      onFocus={(e) => { if (e.target instanceof HTMLElement && e.target !== e.currentTarget) e.target.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }}
+    >
+      {children}
+    </div>
   );
 }
 

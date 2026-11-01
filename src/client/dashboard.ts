@@ -173,6 +173,17 @@ export function concernStatusDomId(view: ConcernDetailView, index: number): stri
   return `concern-status-${view}-${index}`;
 }
 
+/**
+ * R-2: a table wrapper exposes scroll-region semantics only while it is an
+ * active scroll container with overflowing content. The overflow check keeps
+ * desktop free of inert tab stops: there the wrapper is not a scroll
+ * container even when inner content is wider. The 1px tolerance absorbs
+ * subpixel rounding so exactly-fitting tables stay plain.
+ */
+export function isActiveScrollRegion(overflowX: string, scrollWidth: number, clientWidth: number): boolean {
+  return overflowX !== 'visible' && scrollWidth > clientWidth + 1;
+}
+
 /** Shown when navigation lands on a heading because the exact target is unavailable. */
 export const UPDATE_OUTSIDE_HISTORY_NOTICE =
   'This update is outside the currently loaded record history.';

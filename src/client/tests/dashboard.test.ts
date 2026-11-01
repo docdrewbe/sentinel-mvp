@@ -25,6 +25,7 @@ import {
   findingKindLabel,
   followupSettleAction,
   initialPanels,
+  isActiveScrollRegion,
   occurrenceLabel,
   occurrencesTruncated,
   resolveFollowupKey,
@@ -1638,5 +1639,30 @@ describe('submit guard (D-1)', () => {
     endSubmit(guard, 9);
     assert.equal(guard.inFlightFor, null);
     assert.equal(tryBeginSubmit(guard, 9), true);
+  });
+});
+
+describe('R-2 scroll-region activation (unit)', () => {
+  it('stays plain when the wrapper is not a scroll container, even with overflowing content', () => {
+    assert.equal(isActiveScrollRegion('visible', 1909, 360), false);
+    assert.equal(isActiveScrollRegion('visible', 360, 360), false);
+  });
+
+  it('exposes semantics when a scroll container overflows', () => {
+    assert.equal(isActiveScrollRegion('auto', 710, 360), true);
+  });
+
+  it('stays plain when a scroll container fits its content', () => {
+    assert.equal(isActiveScrollRegion('auto', 360, 360), false);
+  });
+
+  it('tolerates 1px of subpixel rounding', () => {
+    assert.equal(isActiveScrollRegion('auto', 361, 360), false);
+    assert.equal(isActiveScrollRegion('auto', 362, 360), true);
+  });
+
+  it('treats a forced scroll container like auto', () => {
+    assert.equal(isActiveScrollRegion('scroll', 500, 360), true);
+    assert.equal(isActiveScrollRegion('scroll', 360, 360), false);
   });
 });

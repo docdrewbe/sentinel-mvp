@@ -158,6 +158,19 @@ tr.selected { background: #e8f3ef; }
   overflow-wrap: anywhere;
   min-width: 12em;
 }
+/* R-2: narrow screens keep wide tables and long content inside their panels. */
+@media (max-width: 980px) {
+  .table-scroll { overflow-x: auto; }
+  .columns > * { min-width: 0; }
+  .panel-head, .panel-actions { flex-wrap: wrap; min-width: 0; }
+  .panel-actions > * { min-width: 0; max-width: 100%; }
+  .meta { grid-template-columns: minmax(0, 1fr); }
+  .meta dd { min-width: 0; overflow-wrap: anywhere; }
+  .pickers, .pickers label { min-width: 0; max-width: 100%; }
+  .pickers select { min-width: 0; max-width: 100%; }
+  .detail h4, .detail p, .update-title { overflow-wrap: anywhere; }
+}
+.table-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .task-title { font-weight: 600; }
 .empty { color: var(--muted); font-style: italic; }
 .overdue { color: var(--red); font-weight: 700; }
