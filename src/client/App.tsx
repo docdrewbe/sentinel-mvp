@@ -2477,6 +2477,9 @@ function TransferForm({ evidence, onTransfer, lockedTitle, describedBy }: { evid
   }, [evidence]);
   // M-UI1: locked forms disable every control with the explanation (see EvidenceForm).
   const locked = lockedTitle !== undefined;
+  // F-1: the narrowed picker clips similar labels, so confirm the exact
+  // selected item (full label + current holder) as wrapping plain text.
+  const selected = evidence.find((x) => x.id === evidenceId) ?? null;
   return (
     <form
       className="form inline"
@@ -2487,11 +2490,16 @@ function TransferForm({ evidence, onTransfer, lockedTitle, describedBy }: { evid
         setReason('');
       }}
     >
-      <select value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>
+      <select className="evidence-select" value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} aria-label="Evidence item" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>
         {evidence.map((x) => (
           <option key={x.id} value={x.id}>{x.label} (now: {x.holder})</option>
         ))}
       </select>
+      {selected !== null && (
+        <p className="transfer-selected">
+          Selected evidence: {selected.label} · Current holder: {selected.holder}
+        </p>
+      )}
       <input value={toHolder} onChange={(e) => setToHolder(e.target.value)} placeholder="Transfer to (new holder)" aria-label="Transfer to (new holder)" required disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
       <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" aria-label="Reason (optional)" disabled={locked} title={lockedTitle} aria-describedby={describedBy} />
       <button type="submit" disabled={locked} title={lockedTitle} aria-describedby={describedBy}>Transfer custody</button>
