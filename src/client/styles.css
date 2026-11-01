@@ -154,6 +154,10 @@ th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacin
 td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tbody tr:hover { background: #f4f8f7; }
 tr.selected { background: #e8f3ef; }
+.audit-detail {
+  overflow-wrap: anywhere;
+  min-width: 12em;
+}
 .task-title { font-weight: 600; }
 .empty { color: var(--muted); font-style: italic; }
 .overdue { color: var(--red); font-weight: 700; }

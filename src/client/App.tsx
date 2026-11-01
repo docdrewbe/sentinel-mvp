@@ -1639,7 +1639,7 @@ export default function App(): JSX.Element {
                     <td><code>{e.action}</code></td>
                     <td><code>{e.recordType}:{e.recordId.slice(0, 8)}</code></td>
                     <td>{new Date(e.timestamp).toLocaleString()}</td>
-                    <td>{e.detail}</td>
+                    <td className="audit-detail">{e.detail}</td>
                   </tr>
                 ))}
             </tbody>
