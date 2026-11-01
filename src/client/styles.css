@@ -168,7 +168,13 @@ tr.selected { background: #e8f3ef; }
   .meta dd { min-width: 0; overflow-wrap: anywhere; }
   .pickers, .pickers label { min-width: 0; max-width: 100%; }
   .pickers select { min-width: 0; max-width: 100%; }
-  .detail h4, .detail p, .update-title { overflow-wrap: anywhere; }
+}
+/* Long detail headings, concern locations and recent-update titles wrap at every width. */
+.detail h4, .detail p, .update-title { overflow-wrap: anywhere; }
+/* Desktop: long unbroken list titles wrap inside their column instead of widening
+ * the table and squeezing the detail panel. Narrow screens scroll tables (R-2). */
+@media (min-width: 981px) {
+  td.task-title, .notice-rowlink { overflow-wrap: anywhere; }
 }
 .table-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .task-title { font-weight: 600; }
