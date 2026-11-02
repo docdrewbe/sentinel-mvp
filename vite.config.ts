@@ -10,9 +10,16 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: { '/api': 'http://localhost:4000' },
-    // Anchor to THIS checkout's ignored scratch dir. A loose '**/.tmp/**'
-    // also matches ancestor .tmp segments, which would blind the watcher
-    // for checkouts nested under .tmp. Absolute + Vite-normalized.
-    watch: { ignored: [`${normalizePath(resolve(configDir, '.tmp'))}/**`] }
+    // Anchor to THIS checkout's ignored scratch dir and its backup/evidence
+    // tree. A loose '**/.tmp/**' also matches ancestor .tmp segments, which
+    // would blind the watcher for checkouts nested under .tmp. Absolute +
+    // Vite-normalized. data/backups holds QA evidence and pre-run backups
+    // that are written while the dev server runs (EBUSY crash, 2026-11-02).
+    watch: {
+      ignored: [
+        `${normalizePath(resolve(configDir, '.tmp'))}/**`,
+        `${normalizePath(resolve(configDir, 'data', 'backups'))}/**`
+      ]
+    }
   }
 });
