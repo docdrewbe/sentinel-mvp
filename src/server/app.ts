@@ -38,6 +38,7 @@ import {
 } from './store.js';
 import { can, visibleOrgIds, type Action } from '../shared/rbac.js';
 import {
+  DOCAUDIT_MAX_TEXT_CHARS,
   FOLLOWUPS_UNAVAILABLE,
   FOLLOWUPS_UNAVAILABLE_CODE,
   IDEMPOTENCY_CONFLICT,
@@ -52,6 +53,8 @@ import {
   validateFollowupInput,
   validateProviderOutput
 } from './docaudit.js';
+import { MN_SECURITY_REQUIREMENTS, runSecurityReview, validateReviewInput } from './mn-security-review.js';
+import { suggestPassagesWithModel } from './mn-security-ai.js';
 import {
   NOTICE_FOLLOWUPS_UNAVAILABLE,
   NOTICE_FOLLOWUPS_UNAVAILABLE_CODE,
@@ -380,6 +383,92 @@ export function createApp(db: DbShape): express.Express {
     } catch (e) {
       sendError(req, res, e);
     }
+  });
+
+  // Minnesota security/access procedure review (smaller scope). Matching
+  // suggests verbatim passages only — by keyword, or, when the caller
+  // passes suggestWith "model" and the Modal (or mock) path is live, by a
+  // model whose quotes are verified verbatim. The reviewer decides each
+  // item, and the summary derives from decisions. Pasted text is
+  // response-only; the audit event carries counts only.
+  app.post('/api/docaudit/security-review', async (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    if (rejectBadText(res, req.body, ['orgId', 'policyText'])) return;
+    const input = req.body as { orgId: string; policyText: string; suggestWith?: unknown };
+    if ((user.role === 'department_manager' || user.role === 'staff') && input.orgId !== user.orgId) {
+      forbidden(res, user, 'docaudit.run');
+      return;
+    }
+    if (!can(user, 'docaudit.run', { orgId: input.orgId, ownerId: '' })) {
+      forbidden(res, user, 'docaudit.run');
+      return;
+    }
+    if (!db.orgs.some((o) => o.id === input.orgId)) {
+      res.status(400).json({ error: 'Unknown organization.' });
+      return;
+    }
+    try {
+      const clean = validateReviewInput(req.body);
+      if (input.suggestWith !== undefined && input.suggestWith !== 'model') {
+        throw new ValidationError('suggestWith must be "model".');
+      }
+      // Availability before quota (WM1-1): refused or model-less runs must
+      // not consume throttle budget. The model path runs only on Modal or
+      // mock; anything else (including Baseten) keeps keyword suggestions.
+      let modelQuotes: Map<string, string | null> | undefined;
+      if (input.suggestWith === 'model') {
+        const provider = resolveProvider();
+        if (provider !== null && (provider.name === 'modal' || provider.name === 'mock')) {
+          if (!checkDocAuditThrottle(user.id)) {
+            res.status(429).json({ error: 'Suggestion limit reached. Try again later.' });
+            return;
+          }
+          const signal = AbortSignal.timeout(currentTimeoutMs());
+          const quotes = await suggestPassagesWithModel(clean.policyText, MN_SECURITY_REQUIREMENTS, signal);
+          if (quotes !== null) modelQuotes = quotes;
+        }
+      }
+      const runId = randomUUID();
+      const result = runSecurityReview(clean, runId, modelQuotes);
+      const counted = result.items.filter((i) => i.decisionComplete);
+      const n = (s: string): number => counted.filter((i) => i.decision === s).length;
+      const modelSuggested = result.items.filter((i) =>
+        i.suggestions.some((s) => s.source === 'muse-spark')
+      ).length;
+      const detail = result.notEvaluated
+        ? `security review not evaluated (over ${DOCAUDIT_MAX_TEXT_CHARS} characters)`
+        : `security review: ${result.items.length} items ` +
+          `(addressed ${n('addressed')}, gaps ${n('gap')}, unclear ${n('unclear')}, ` +
+          `not-applicable ${n('not-applicable')}, pending ${result.items.length - counted.length}), ` +
+          `model-suggested ${modelSuggested}, overall ${result.overall}`;
+      mutateDb(db, () => {
+        appendAudit(db, {
+          actorId: user.id,
+          action: 'docaudit.security_review.completed',
+          recordType: 'docaudit',
+          recordId: runId,
+          orgId: input.orgId,
+          detail
+        });
+      });
+      res.json(result);
+    } catch (e) {
+      sendError(req, res, e);
+    }
+  });
+
+  // Model-path liveness for the Suggest with Muse button. Auth-gated,
+  // boolean only — no keys, models, or URLs. True exactly when the
+  // security-review model path would attempt a call (Modal configured or
+  // mock); the throttle itself is enforced per request on that route.
+  app.get('/api/docaudit/provider-status', (req: AuthRequest, res) => {
+    const user = req.user as DemoUser;
+    if (!can(user, 'docaudit.run', { orgId: user.orgId, ownerId: '' })) {
+      forbidden(res, user, 'docaudit.run');
+      return;
+    }
+    const provider = resolveProvider();
+    res.json({ modelLive: provider !== null && (provider.name === 'modal' || provider.name === 'mock') });
   });
 
   // Phase 2: document-audit follow-up. Creates a task carrying the

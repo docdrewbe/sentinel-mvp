@@ -401,6 +401,23 @@ footer {
 .evidence-jump:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .doca-passage fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
 .doca-passage legend { font-weight: 600; }
+/* Minnesota security review: requirement cards inside the panel. */
+.mn-profile { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 10px; display: flex; gap: 16px; }
+.mn-profile legend { font-weight: 600; }
+.mn-results { margin-top: 12px; }
+.mn-banner { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.mn-banner ul { margin: 6px 0 0; padding-left: 20px; }
+.mn-item { border-top: 1px solid var(--line); padding: 10px 0; }
+.mn-item h4 { margin: 0 0 6px; font-size: 14px; }
+.mn-counted { color: var(--green, #1c6b3a); font-weight: 600; }
+.mn-pending { color: var(--muted); font-weight: 600; }
+.mn-excerpt { margin: 6px 0; }
+.mn-cite { margin: 6px 0; }
+.mn-suggest { margin: 6px 0; padding-left: 20px; }
+.mn-suggest li { margin: 4px 0; }
+.mn-decide { display: grid; grid-template-columns: 220px 1fr; gap: 10px; margin-top: 8px; }
+.mn-decide input[type="text"] { width: 100%; }
+.mn-disclaimers { color: var(--muted); font-size: 12px; margin: 12px 0 0; padding-left: 20px; }
 .doca-option { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
 .doca-context { color: var(--muted); font-size: 12px; }
 

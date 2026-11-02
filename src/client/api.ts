@@ -78,6 +78,51 @@ export interface DocAuditCompareResult {
   findings: DocAuditFinding[];
 }
 
+// Minnesota security-review wire shapes (mirror the server contract; the
+// server re-validates everything, so these are display/submit conveniences).
+
+export type MnDecision = 'addressed' | 'gap' | 'unclear' | 'not-applicable';
+
+export interface MnSuggestion {
+  text: string;
+  occurrences: Array<{ start: number; end: number }>;
+  totalOccurrences: number;
+  source: 'keyword' | 'muse-spark';
+}
+
+export interface MnReviewItem {
+  id: string;
+  title: string;
+  excerpt: string;
+  sources: Array<{ citation: string; url: string }>;
+  appliesToYou: boolean | null;
+  dateChecked: string;
+  suggestions: MnSuggestion[];
+  decision: MnDecision | null;
+  rationale: string | null;
+  decisionComplete: boolean;
+}
+
+export interface MnReviewResult {
+  runId: string;
+  inputHash: string;
+  items: MnReviewItem[];
+  overall: string;
+  reasons: string[];
+  invalidated: number;
+  instructionNotice: MnSuggestion[];
+  notEvaluated: boolean;
+  missingLabel: string;
+  disclaimers: string[];
+}
+
+export interface MnDecisionSubmit {
+  itemId: string;
+  status: MnDecision;
+  rationale: string;
+  inputHash: string;
+}
+
 export interface DocAuditPassageSelection {
   side: 'A' | 'B';
   text: string;
@@ -171,6 +216,9 @@ export const api = {
     req<{ task: ComplianceTask; obligation: RecurringObligation }>(`/api/obligations/${id}/generate`, { method: 'POST' }),
   docauditCompare: (body: { orgId: string; textA: string; textB: string }) =>
     req<DocAuditCompareResult>('/api/docaudit/compare', { method: 'POST', body: JSON.stringify(body) }),
+  securityReview: (body: { orgId: string; policyText: string; profile: { outdoorCanopy: string }; decisions: MnDecisionSubmit[]; suggestWith?: 'model' }) =>
+    req<MnReviewResult>('/api/docaudit/security-review', { method: 'POST', body: JSON.stringify(body) }),
+  providerStatus: () => req<{ modelLive: boolean }>('/api/docaudit/provider-status'),
   docauditFollowup: (body: DocAuditFollowupPayload) =>
     req<DocAuditFollowupResult>('/api/docaudit/followups', { method: 'POST', body: JSON.stringify(body) }),
   concerns: (orgId: string) => req<ConcernRecord[]>(`/api/concerns?orgId=${orgId}`),

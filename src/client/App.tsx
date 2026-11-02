@@ -5,6 +5,9 @@ import {
   type DocAuditCompareResult,
   type DocAuditFinding,
   type DocAuditFollowupPayload,
+  type MnDecision,
+  type MnDecisionSubmit,
+  type MnReviewResult,
   type NewNotice,
   type NewTask,
   type NoticeFollowupPayload
@@ -1697,6 +1700,10 @@ export default function App(): JSX.Element {
           />
         )}
 
+        {me && can(me, 'docaudit.run', { orgId, ownerId: '' }) && orgId === 'org-canna' && (
+          <MnSecurityPanel key={`mn-${contextKey}`} orgId={orgId} />
+        )}
+
         <SurveyPacketPanel
           key={contextKey}
           orgId={orgId}
@@ -2959,6 +2966,254 @@ function NoticeDetail({ notice, tasks, domains, users, timeZone, userName, canMa
         </>
       )}
     </>
+  );
+}
+
+const MN_DECISION_LABELS: Record<MnDecision, string> = {
+  addressed: 'Addressed',
+  gap: 'Gap identified',
+  unclear: 'Unclear',
+  'not-applicable': 'Not applicable'
+};
+
+const MN_SAMPLE_POLICY = [
+  'SYNTHETIC SAMPLE — security and access procedures for a Minnesota microbusiness. Not a real policy.',
+  'Our alarm system, video surveillance, lighting, and locks protect the premises around the clock.',
+  'Any security event triggers our immediate response protocol within 30 minutes of detection.',
+  'The alarm is active 24 hours per day and monitored by our contracted security company with automatic backup power.',
+  'It sounds within 100 feet of entrances and exits, and authorized managers can remotely disable the audio alarm.',
+  'Video records 24 hours at 15 frames per second and 720p with date-and-time stamps on every recording.',
+  'We keep recordings for 90 days in secure storage that stays up eight hours into a power outage.',
+  'Restricted areas use an electronic entry log recording name, time of entry, time of exit, and authorization.',
+  'Entries are conspicuously marked, and we retain the names of entrants for at least three years.',
+  'Every worker completes annual training on our security measures and on robbery and emergency response.',
+  'Training records for each worker are kept and available to the office on request.',
+  'Our outdoor cultivation area has locked gates and six-foot commercial fencing that obscures the view.'
+].join(' ');
+
+export function MnSecurityPanel({ orgId }: { orgId: string }): JSX.Element {
+  const [policyText, setPolicyText] = useState('');
+  const [canopy, setCanopy] = useState<'yes' | 'no' | 'not-sure'>('not-sure');
+  const [result, setResult] = useState<MnReviewResult | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, { status: MnDecision | ''; rationale: string; hash: string }>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [modelLive, setModelLive] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.providerStatus()
+      .then((s) => { if (!cancelled) setModelLive(s.modelLive); })
+      .catch(() => { if (!cancelled) setModelLive(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const run = async (withModel: boolean): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const decisions: MnDecisionSubmit[] = Object.entries(drafts)
+        .filter(([, d]) => d.status !== '')
+        .map(([itemId, d]) => ({ itemId, status: d.status as MnDecision, rationale: d.rationale, inputHash: d.hash }));
+      const res = await api.securityReview({
+        orgId,
+        policyText,
+        profile: { outdoorCanopy: canopy },
+        decisions,
+        ...(withModel ? { suggestWith: 'model' as const } : {})
+      });
+      setDrafts((prev) => {
+        const kept: typeof prev = {};
+        for (const [k, v] of Object.entries(prev)) if (v.hash === res.inputHash) kept[k] = v;
+        return kept;
+      });
+      setResult(res);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Review failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setDraft = (itemId: string, patch: Partial<{ status: MnDecision | ''; rationale: string }>): void => {
+    setDrafts((prev) => {
+      const current: { status: MnDecision | ''; rationale: string; hash: string } =
+        prev[itemId] ?? { status: '', rationale: '', hash: result?.inputHash ?? '' };
+      return { ...prev, [itemId]: { ...current, ...patch } };
+    });
+  };
+
+  const canRun = policyText.trim() !== '' && !busy;
+  const canSuggestModel = canRun && modelLive === true;
+  const modelCount = result?.items.filter((i) => i.suggestions.some((s) => s.source === 'muse-spark')).length ?? 0;
+  return (
+    <section className="panel" aria-label="Minnesota security review">
+      <div className="panel-head">
+        <h3>Minnesota cannabis microbusiness: security and access procedure review (synthetic demo)</h3>
+      </div>
+      <p className="empty">
+        Suggestions by keyword{modelLive === true ? ', or by Muse Spark' : ''} — every model quote is
+        verified verbatim against your pasted text, and you still decide each requirement.
+      </p>
+      <p className="empty">
+        Paste a synthetic security-and-access section (never a real policy). The server suggests matching
+        passages only — you decide each requirement, with a rationale. Editing the text or the profile
+        discards earlier decisions. Pasted text is never stored.
+      </p>
+      <fieldset className="mn-profile">
+        <legend>Does the business have any outdoor cultivation canopy?</legend>
+        {(['yes', 'no', 'not-sure'] as const).map((v) => (
+          <label key={v}>
+            <input type="radio" name="mn-canopy" value={v} checked={canopy === v} onChange={() => setCanopy(v)} />
+            {v === 'yes' ? 'Yes' : v === 'no' ? 'No' : 'Not sure'}
+          </label>
+        ))}
+      </fieldset>
+      <div>
+        <label htmlFor="mn-policy">Policy section (synthetic only)</label>
+        <textarea
+          id="mn-policy"
+          value={policyText}
+          maxLength={DOCAUDIT_TEXT_MAX}
+          rows={6}
+          onChange={(e) => setPolicyText(e.target.value)}
+        />
+        <p className="doca-count">{policyText.length} / {DOCAUDIT_TEXT_MAX} characters</p>
+      </div>
+      <div className="panel-actions">
+        <button onClick={() => setPolicyText(MN_SAMPLE_POLICY)}>Load synthetic sample policy</button>
+        <button className="primary" onClick={() => { run(false).catch(() => {}); }} disabled={!canRun}>
+          {busy ? 'Reviewing…' : result ? 'Run review again' : 'Run review'}
+        </button>
+        <button
+          onClick={() => { run(true).catch(() => {}); }}
+          disabled={!canSuggestModel}
+          title={modelLive === true ? 'Ask Muse Spark for one verbatim passage per requirement' : 'Model suggestions are unavailable right now'}
+        >
+          Suggest with Muse Spark
+        </button>
+      </div>
+      {modelCount > 0 && (
+        <p className="doca-notice" role="note">
+          {modelCount} suggestion{modelCount === 1 ? '' : 's'} by Muse Spark, verified verbatim.
+        </p>
+      )}
+      {error !== '' && (
+        <div className="panel-alert" role="alert">
+          <p>{error}</p>
+          <button onClick={() => setError('')} aria-label="Dismiss security review error">Dismiss</button>
+        </div>
+      )}
+      {result && (
+        <div className="mn-results">
+          <div className="mn-banner" role="status">
+            <strong>{result.overall}</strong>
+            {result.reasons.length > 0 && (
+              <ul>
+                {result.reasons.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+          {result.notEvaluated && (
+            <p className="empty">The document was not evaluated and was not truncated. Paste one section and run again.</p>
+          )}
+          {result.invalidated > 0 && (
+            <div className="doca-notice" role="note">
+              <strong>{result.invalidated} earlier decision{result.invalidated === 1 ? '' : 's'} not counted.</strong>
+              <p>Decisions bind to exact inputs; edited text or profile answers discard them. Decide again below.</p>
+            </div>
+          )}
+          {result.instructionNotice.length > 0 && (
+            <div className="doca-notice" role="note">
+              <strong>Instruction-like text flagged — quoted, never acted on.</strong>
+              {result.instructionNotice.map((p) => (
+                <p key={p.text} className="doca-quote">“{p.text}”</p>
+              ))}
+            </div>
+          )}
+          {result.items.map((item) => {
+            const draft = drafts[item.id] ?? { status: '', rationale: '', hash: '' };
+            return (
+              <article key={item.id} className="mn-item" aria-label={`${item.id} ${item.title}`}>
+                <h4>
+                  {item.id} — {item.title}{' '}
+                  {item.decisionComplete ? (
+                    <span className="mn-counted">Counted: {MN_DECISION_LABELS[item.decision as MnDecision]}</span>
+                  ) : (
+                    <span className="mn-pending">Awaiting your decision</span>
+                  )}
+                </h4>
+                <p className="mn-excerpt">{item.excerpt}</p>
+                <p className="mn-cite">
+                  {item.sources.map((s) => (
+                    <span key={s.citation}>
+                      <a href={s.url} target="_blank" rel="noreferrer">{s.citation}</a>{' '}
+                    </span>
+                  ))}
+                  <span className="doca-count">Checked {item.dateChecked}.</span>{' '}
+                  <span className="doca-count">
+                    {item.appliesToYou === null
+                      ? 'Applicability unknown — answer the profile question, then still record a decision.'
+                      : item.appliesToYou
+                        ? 'Applies to your profile.'
+                        : 'Outside your profile answers — you must still record a decision with a rationale.'}
+                  </span>
+                </p>
+                {item.suggestions.length === 0 ? (
+                  <p className="empty">{result.missingLabel}.</p>
+                ) : (
+                  <ul className="mn-suggest">
+                    {item.suggestions.map((s) => (
+                      <li key={s.text}>
+                        <span className="doca-quote">“{s.text}”</span>{' '}
+                        <span className="doca-count">
+                          {s.source === 'muse-spark' ? 'Suggested by Muse Spark (quote verified) · ' : 'keyword · '}
+                          chars {s.occurrences.map((o) => `${o.start}–${o.end}`).join(', ')}
+                          {s.totalOccurrences > s.occurrences.length ? ` (${s.totalOccurrences} total)` : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="mn-decide">
+                  <label>
+                    Your decision{' '}
+                    <select
+                      value={draft.status}
+                      aria-label={`Decision for ${item.id}`}
+                      onChange={(e) => setDraft(item.id, { status: e.target.value as MnDecision | '' })}
+                    >
+                      <option value="">Choose…</option>
+                      {(Object.keys(MN_DECISION_LABELS) as MnDecision[]).map((k) => (
+                        <option key={k} value={k}>{MN_DECISION_LABELS[k]}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Rationale (required){' '}
+                    <input
+                      type="text"
+                      value={draft.rationale}
+                      aria-label={`Rationale for ${item.id}`}
+                      placeholder="Why — in your own words"
+                      onChange={(e) => setDraft(item.id, { rationale: e.target.value })}
+                    />
+                  </label>
+                </div>
+              </article>
+            );
+          })}
+          <ul className="mn-disclaimers">
+            {result.disclaimers.map((d) => (
+              <li key={d}>{d}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }
 

@@ -278,18 +278,22 @@ function extractContent(envelope: unknown): string {
   return content as string;
 }
 
-/** One POST, no retries, no redirects. The signal cancels on timeout. */
-async function postComparison(
+/**
+ * One POST, no retries, no redirects. The signal cancels on timeout.
+ * Shared by the comparison provider and the MN suggestion path; the
+ * payload shape, caps, and error mapping are identical for both.
+ */
+export async function postChatCompletions(
   config: ModalConfig,
-  textA: string,
-  textB: string,
+  systemPrompt: string,
+  userContent: string,
   signal: AbortSignal
 ): Promise<unknown> {
   const payload = {
     model: config.model,
     messages: [
-      { role: 'system', content: MODAL_SYSTEM_PROMPT },
-      { role: 'user', content: userMessage(textA, textB) }
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent }
     ],
     temperature: DOCAUDIT_MODAL_TEMPERATURE,
     max_tokens: DOCAUDIT_MODAL_MAX_TOKENS,
@@ -341,6 +345,16 @@ async function postComparison(
   } catch {
     throw new ProviderError(502, MODAL_OUTPUT_UNUSABLE);
   }
+}
+
+/** Comparison over the shared transport. Payload bytes are unchanged. */
+async function postComparison(
+  config: ModalConfig,
+  textA: string,
+  textB: string,
+  signal: AbortSignal
+): Promise<unknown> {
+  return postChatCompletions(config, MODAL_SYSTEM_PROMPT, userMessage(textA, textB), signal);
 }
 
 /** Real provider: no fixture notice — responses are actual model output. */
