@@ -8,23 +8,37 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(testDir, '..', '..', '..');
 const posix = (p: string): string => p.replace(/\\/g, '/');
 
-describe('vite watcher scratch exclusion (W-1)', () => {
+function ignoredList(): string[] {
+  const watch = config.server?.watch;
+  const raw = watch && typeof watch === 'object' ? (watch.ignored ?? []) : [];
+  return (Array.isArray(raw) ? raw : [raw]).map(String);
+}
+
+/** Shared anchoring semantics: absolute, this-checkout-only, no loose globs. */
+function assertAnchored(pattern: string, dir: string): void {
+  // Absolute, forward-slash, rooted at the config's own directory.
+  assert.equal(pattern, `${posix(rootDir)}/${dir}/**`);
+  assert.match(pattern, /^(?:[A-Za-z]:)?\//);
+  assert.doesNotMatch(pattern, /^\*\*\//);
+  // Prefix semantics: own dir matches; sources and ancestor
+  // dirs (a checkout nested under some other dir) do not.
+  const prefix = pattern.slice(0, -'/**'.length);
+  assert.ok(posix(resolve(rootDir, dir, 'x')).startsWith(prefix));
+  assert.ok(!posix(resolve(rootDir, 'src', 'client', 'App.tsx')).startsWith(prefix));
+  assert.ok(!posix(resolve(rootDir, '..', dir, 'y')).startsWith(prefix));
+  assert.ok(!posix(resolve(rootDir, '..', 'other', dir, 'z')).startsWith(prefix));
+}
+
+describe('vite watcher scratch exclusion (W-1, W-2)', () => {
+  it('ignores exactly .tmp and data/backups', () => {
+    assert.deepEqual(ignoredList().map((p) => p.slice(posix(rootDir).length)), ['/.tmp/**', '/data/backups/**']);
+  });
+
   it('anchors the .tmp ignore to this checkout only', () => {
-    const watch = config.server?.watch;
-    const raw = watch && typeof watch === 'object' ? (watch.ignored ?? []) : [];
-    const list = (Array.isArray(raw) ? raw : [raw]).map(String);
-    assert.equal(list.length, 1);
-    const pattern = list[0];
-    // Absolute, forward-slash, rooted at the config's own directory.
-    assert.equal(pattern, `${posix(rootDir)}/.tmp/**`);
-    assert.match(pattern, /^(?:[A-Za-z]:)?\//);
-    assert.doesNotMatch(pattern, /^\*\*\//);
-    // Prefix semantics: own scratch matches; sources and ancestor
-    // scratch (a checkout nested under some other .tmp) do not.
-    const prefix = pattern.slice(0, -'/**'.length);
-    assert.ok(posix(resolve(rootDir, '.tmp', 'x')).startsWith(prefix));
-    assert.ok(!posix(resolve(rootDir, 'src', 'client', 'App.tsx')).startsWith(prefix));
-    assert.ok(!posix(resolve(rootDir, '..', '.tmp', 'y')).startsWith(prefix));
-    assert.ok(!posix(resolve(rootDir, '..', 'other', '.tmp', 'z')).startsWith(prefix));
+    assertAnchored(ignoredList()[0], '.tmp');
+  });
+
+  it('anchors the data/backups ignore to this checkout only', () => {
+    assertAnchored(ignoredList()[1], 'data/backups');
   });
 });
