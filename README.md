@@ -2,7 +2,7 @@
 
 **Meta x Cerebral Valley Global Hackathon. Startup track. Problem statement: Build for Your World.**
 **Built during the hackathon:** every commit in this repository, from the first ("Sentinel MVP - Day 1 Foundation", 2026-10-26 12:32 CT, after kickoff) to the submission.
-**Demo video:** [link] · **How we use Meta models:** [docs/META-MODEL-USAGE.md](docs/META-MODEL-USAGE.md)
+**Demo video:** [youtu.be/qxsAhNRAH84](https://youtu.be/qxsAhNRAH84) · **How we use Meta models:** [docs/META-MODEL-USAGE.md](docs/META-MODEL-USAGE.md)
 
 © 2026 Drew Duffy. Source available for review and evaluation (including by Meta Global Hackathon judges) under the PolyForm Strict License 1.0.0. No commercial use, modification or redistribution without written permission.
 
@@ -10,7 +10,7 @@
 - The United States has more than 1,300 critical access hospitals ([Flex Monitoring Team](https://www.flexmonitoring.org/node/12286)): small rural hospitals of 25 beds or fewer.
 - They answer to the same regulators as large systems (CMS conditions of participation, HIPAA, OSHA, accreditation), usually with a compliance team of one or two people and spreadsheets.
 - The hard part isn't knowing the rules. It's **proving** the work was done, by the right person, on time, with evidence that holds up when a surveyor asks.
-- Sentinel's founder has spent 22 years in healthcare and regulatory compliance and built Sentinel for those teams.
+- Sentinel's founder has spent 23 years in healthcare and regulatory compliance and built Sentinel for those teams.
 
 ## What Sentinel does
 1. **Tracks compliance work with real accountability:**
@@ -25,18 +25,20 @@
    - staff concern reporting;
    - safety notices with human review;
    - read-only survey and inspection packets with printable integrity checks.
-5. **Works for other regulated industries without new code.** The same engine runs a Minnesota cannabis microbusiness under the Office of Cannabis Management.
+5. **Works for other regulated industries.** The same engine runs a Minnesota cannabis microbusiness under the Office of Cannabis Management. A Minnesota security-and-access checklist uses Muse Spark to suggest the policy sentence for each requirement. Every quote is verified on the server, and the reviewer decides every item.
 
 ## Built to hold up
 - Crash-safe saves (atomic write and rename) and strict organization isolation.
 - Separation of duties enforced on the server.
 - An independent QA log with reproducible evidence for every slice.
-- A 148-check verification suite for the real-model launcher. It runs in an isolated scratch folder against temporary databases. QA runs it under a network guard that blocks all non-local connections.
+- 632 product tests, all passing.
+- A 164-check verification suite for the real-model launcher. It runs in an isolated scratch folder against temporary databases. QA runs it under a network guard that blocks all non-local connections.
 - All demo data is synthetic. No patient data. Sign-in is simulated in this MVP.
+- Sentinel does not give medical advice.
 
 ## Limits (stated honestly)
 - Authentication is simulated, and the audit chain isn't yet anchored externally.
-- The model comparison gives leads for a person to review. It doesn't certify compliance.
+- The AI features give leads for a person to review. They don't certify compliance.
 
 ---
 # Sentinel — Compliance Management MVP (Demo)
